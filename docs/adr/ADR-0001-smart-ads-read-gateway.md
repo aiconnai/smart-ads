@@ -26,15 +26,15 @@ The missing product is not another general-purpose marketing backend. It is an *
 
 ## 2. Supersession & Lineage Map (`Supersedes`)
 
-This document formally supersedes `DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md` (accepted 2026-07-23) for all Read Plane operations:
+This document defines the target architecture for the Read Plane. Formal supersession of `DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md` is **conditional and phased**: the legacy ADR remains active during `direct → shadow → gateway → rollback` and is formally superseded only upon issuance of the `legacy_read_retirement_receipt/v1` after stabilization and retirement.
 
-| Decision / Area in Legacy ADR | Disposition in ADR-0001 | Architectural Rationale |
+| Decision / Area in Legacy ADR | Phased Transition Status | Target Disposition in ADR-0001 |
 |---|---|---|
-| `/ibvi-ads` as sole business entrypoint | **Preserved in Legacy during Transition; Superseded in Target** | `/ibvi-ads` remains active in legacy throughout `direct → shadow → gateway → rollback`. The target canonical engine exposes MCP (`smart_ads.transports.mcp`) and CLI `smart-ads` with tenant context injected by cell runtime. |
-| Pipeboard as sole live integration | **Refined to Single Operational Driver (`pipeboard_hosted`)** | Defined via closed `ProviderPort` boundary. Initial operational driver is `pipeboard_hosted`. `meta_graph_native` is decoupled as an independent certification reference harness (`independent_meta_reference_harness`). |
+| `/ibvi-ads` as sole business entrypoint | **Active in Legacy during Transition** | Preserved in `mbras-campaigns` throughout transition. In `aiconnai/smart-ads`, the entrypoint is the MCP server (`smart_ads.transports.mcp`) and CLI `smart-ads` with tenant context pinned by the cell runtime. |
+| Pipeboard as sole live integration | **Active in Legacy** | Refined to single operational driver (`pipeboard_hosted`) under a closed `ProviderPort`. `independent_meta_reference_harness` is decoupled as an independent certification reference. |
 | `operator_run/v1` execution contract | **Preserved & Wrapped** | `operator_run/v1` is preserved intact for exact parity; it is wrapped by `smart_ads/tenant_execution/v1`. |
-| Operational Acceptance Gate | **Preserved & Reconciled** | Explicit requirement: **5 consecutive business days of daily reports accepted by operator + 4 consecutive weekly draft cycles accepted operationally**. |
-| Synthetic Collector `daily_collector.py` | **Preserved Fixture-Only** | Retained strictly as offline fixture harness; live collection uses legacy runner seam. |
+| Operational Acceptance Gate | **Preserved & Reconciled** | Literal requirement: **5 relatórios consecutivos em dias úteis aceitos por operador + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente**. |
+| Synthetic Collector `daily_collector.py` | **Preserved Fixture-Only** | Retained strictly as offline fixture harness; live collection uses the legacy runner seam. |
 | Pinna Mutation Scripts (5,255 LOC) | **Deferred (`defer_to_write_plane`)** | 100% of mutation scripts and Customer Match loaders are deferred to the future **Write Plane ADR**. |
 
 ---
@@ -50,11 +50,12 @@ ADR-0001 establishes **exclusively the Read Plane**:
 │ 1. Contracts & Schemas (smart_ads.contracts)                           │
 │    • smart_ads/tenant/v1, front/v1, tenant_execution/v1                │
 │    • smart_ads/analytics_landing/v1, curation_execution/v1            │
-│    • smart_ads/analysis_execution/v1, finding/v1, report_execution/v1  │
+│    • smart_ads/generation_manifest/v1, analysis_execution/v1          │
+│    • smart_ads/finding/v1, report_execution/v1                         │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 2. Data Plane (Single Persisted Zone: landing/)                        │
 │    • In-memory provider sanitization (zero raw payload stored)         │
-│    • Atomic partition generation promotion in Parquet                  │
+│    • Atomic partition generation promotion via generation_manifest/v1  │
 │    • Ephemeral, rebuildable DuckDB analytical index                    │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 3. Pure Intelligence Layer (smart_ads.application.intelligence)        │
@@ -90,7 +91,7 @@ ad_platform_api_version:
 ```
 
 * **Independent Live Reference:** `independent_meta_reference_harness` is used strictly during Gate 3 / 7B live certification. It is not an active operational fallback in Phase 1.
-* **API Version Handling:** `pipeboard_hosted` declares `status: opaque` and `value: null` until verifiable upstream vendor attestation is provided. No global static API version (e.g. `v26.0`) is hardcoded into schemas.
+* **API Version Handling:** `pipeboard_hosted` declares `status: opaque` and `value: null` until verifiable upstream vendor attestation is provided. No global static API version is hardcoded into schemas.
 
 ### 4.2 Closed Boundary `ProviderPort`
 ```python
@@ -127,12 +128,23 @@ Canonical Business Leads       = 23
   3. Test suites must enforce counter-proofs: `(65, unknown)`, `(0, 23)`, and `(unknown, unknown)`.
 
 ### 5.2 Immutable Semantic Metric Identity
-A canonical metric is defined by the immutable tuple:
+A canonical base metric is defined by the immutable tuple:
 ```text
-(transport_provider, ad_platform, metric_action_type, resource_level,
- attribution_setting, reporting_timezone, currency_unit, aggregation_rule, breakdowns)
+(transport_provider, ad_platform, source_contract_ref, source_metric_ref,
+ metric_action_type, resource_level, attribution_setting, reporting_timezone,
+ currency_unit, aggregation_rule, breakdowns)
 ```
-*Invariant:* Any modification to any element of this tuple creates a new semantic entity requiring dedicated UI Reconciled Evidence before adoption.
+Where `source_contract_ref` is strictly formatted as:
+* `api-version:<exact-version>` (for direct platform harnesses); or
+* `opaque-driver-contract:<driver_contract_digest>` (for opaque intermediate drivers like Pipeboard).
+
+### 5.3 Derived Metrics Contract
+For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
+* **Inputs:** Formally declared as an ordered list of certified base metrics.
+* **Calculation:** Denominators must be validated strictly non-zero before division.
+* **Rounding:** Versioned rounding mode and precision explicitly recorded.
+* **Formula Integrity:** Digest of the derivation formula is cryptographically bound.
+* **Certification Inheritance:** A derived metric inherits the **worst** certification status among its constituent base metrics (`presence_status = unknown` if any input is `unknown`).
 
 ---
 
@@ -143,27 +155,30 @@ A canonical metric is defined by the immutable tuple:
 │                        DATA PLANE LIFECYCLE                            │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 1. Provider Response in Memory                                         │
-│    ├── Validated against schema                                        │
+│    ├── Validated against transport schema                              │
 │    ├── Sanitized & Normalized (opaque resource_ref assigned)           │
 │    └── Raw JSON immediately discarded (Zero raw payload persisted)     │
 │                                                                        │
 │ 2. Candidate Creation: analytics_landing/v1                            │
-│    ├── Computes logical_row_digest & payload_provenance_digest         │
+│    ├── Computes typed logical_row_digest & payload_provenance_digest   │
 │    └── Validated against declared capabilities                         │
 │                                                                        │
-│ 3. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
+│ 3. Curation Execution: curation_execution/v1                           │
+│    ├── Records restatement_lookback_days and curation policy           │
+│    └── Prepares atomic partition generation                            │
+│                                                                        │
+│ 4. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
 │    ├── Written to temporary generation file                            │
 │    ├── Verifies complete coverage (partial pagination fails closed)    │
-│    ├── Computes physical_parquet_digest                                │
-│    └── Atomic Manifest Promotion via Compare-and-Swap                  │
+│    ├── Computes physical_parquet_digest and logical_row_digest         │
+│    └── Promotes generation atomically via generation_manifest/v1 (CAS)│
 │                                                                        │
-│ 4. Execution Provenance Envelopes:                                     │
-│    ├── curation_execution/v1 (records restatement_lookback_days)       │
+│ 5. Analysis & Reporting Envelopes:                                     │
 │    ├── analysis_execution/v1 (records threshold_policy_ref & digest)   │
 │    ├── finding/v1 (binds landing_digest + analysis_execution_digest)   │
 │    └── report_execution/v1 (records certified report output)           │
 │                                                                        │
-│ 5. Ephemeral Query Layer: analytics/analytics.duckdb                   │
+│ 6. Ephemeral Query Layer: analytics/analytics.duckdb                   │
 │    └── Rebuildable index over Parquet generations; never source of truth
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -194,9 +209,10 @@ landing_digest
 * **Prohibition:** `float`, `NaN`, and `Infinity` are strictly forbidden in storage and contracts.
 * Ratios/Percentages: computed dynamically in query views only after validating non-zero denominators.
 
-### 6.3 Consequence of Zero Raw Payload
-* **Benefit:** Eliminates GDPR/LGPD compliance liabilities and prevents credential/PII leaks.
-* **Trade-off:** Retrospective re-normalization is restricted to fields preserved in `landing/`. Unparsed provider attributes cannot be recovered without a fresh collection.
+### 6.3 Generation Manifest & Retention Pinning
+* **`generation_manifest/v1`:** Records `generation_id`, `created_at`, `physical_parquet_digest`, `logical_row_digest`, `row_count`, `partition_key`, and `curation_execution_ref`.
+* **Retention Pinning:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
+* **Consequence of Zero Raw:** Eliminates GDPR/LGPD liabilities. Retrospective re-normalization is restricted to fields preserved in `landing/`.
 
 ---
 
@@ -249,11 +265,11 @@ Audited at commit `d26c73d8508c7c3d43161fe36a80c44a46bf0f2d` (`d26c73d`):
 
 ### Legacy Systems Decomposition
 
-> `source_loc` and `test_loc` are informative dimensioning metadata; canonical authority is `(source_sha, source_path, source_digest)`.
+> `source_loc` and `test_loc` are informative dimensioning metadata; canonical authority is strictly the 4-tuple: `(source_sha, source_path, source_symbol, source_digest)`.
 
 | Legacy System / Module | Primary Source Path | `source_loc` | `test_loc` (Associated Suites) | Manifest Disposition | Target Destination |
 |---|---|---:|---:|---|---|
-| **Ledger & Controller** | `scripts/autonomy/ledger.py` + `controller.py` | **5.943** | **3.459** (`test_controller.py`) | `legacy_governance_only` | Retained in legacy repository |
+| **Ledger & Controller** | `scripts/autonomy/ledger.py` + `controller.py` | **5.943** | **3.459** (`test_controller.py`) | `legacy_governance_only` | Retained in legacy repository (P0 ledger defect blocks autonomous execution only) |
 | **Codex Gate & Scanners** | `docs/harness/bin/scan_codex_payload.py` + `sh` | **2.754** | **2.806** (`test_codex_gate.py`) | `repository_tooling` | Minimal re-implementation in `tooling/governance/` (outside wheel) |
 | **Funnel Validator** | `scripts/analytics/validate_funnel_contract.py` | **2.786** | **1.677** (`test_funnel_contract.py`) | `defer_to_funnel_integration` | Deferred to dedicated funnel phase |
 | **Google Canary Transport** | `scripts/operator/google_canary.py` | **2.125** | **3.148** (`tests/operator/test_google_canary.py`) | `defer_to_google_phase` | Deferred to Google Ads Gateway |
@@ -296,7 +312,7 @@ smart-ads/
 │       │   └── v1/
 │       ├── audit/                     # Append-only audit logger and event envelopes
 │       └── transports/
-│           └── mcp/                   # FastMCP / Standard MCP server for Hermes
+│           └── mcp/                   # MCP server for Hermes (protocol frozen, library evaluated at impl)
 └── tests/
     ├── unit/                          # Pure intelligence rule tests over truth tables
     ├── contract/                      # Schema validations and fail-closed property tests
@@ -314,22 +330,30 @@ smart-ads/
 
 ```mermaid
 flowchart TD
-    DRAFT["0. In-Memory Specification"] --> G1["[GATE HUMANO 1: CONCEDIDO]
-    Create Private Repo aiconnai/smart-ads"]
+    DRAFT["0. In-Memory Canonical Draft"] --> G1["[GATE HUMANO 1: CONCEDIDO]
+    Authorization to Create Private Repo aiconnai/smart-ads"]
     
-    G1 --> ADR["1. Record ADR-0001 in Canonical Repository
+    G1 --> BOOTSTRAP["1. Bootstrap Repository & Record ADR-0001
     (docs/adr/ADR-0001-smart-ads-read-gateway.md)"]
     
-    ADR --> G2["[GATE HUMANO 2]
-    Formal Approval of ADR-0001 on Exact SHA"]
+    BOOTSTRAP --> G2["[GATE HUMANO 2]
+    Formal Approval of ADR-0001 on Exact Commit SHA"]
     
-    G2 --> DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
-    (Path + Symbol Granular Mapping)"]
+    G2 --> DELIV_MODE{"Delivery Mode Selection
+    (Manual / Human vs. Autonomous Engine)"}
+    
+    DELIV_MODE -->|Manual / Human| DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
+    (Path + Symbol 4-Tuple Mapping)"]
+    DELIV_MODE -->|Autonomous Engine| LEDGER_FIX["P0 Fix on Legacy Ledger Required"] --> DEC_MAN
     
     DEC_MAN --> PR1["3. PR 1 (Smart Ads): Packaging (src/), Schemas,
     Semantic Metric Registry & ProviderPort"]
+    DEC_MAN --> GOV1["3b. GOV 1: Governance & CI Tooling"]
     
-    PR1 --> PR2["4. PR 2 (Smart Ads): Pure Intelligence Layer
+    PR1 --> CONV_GATE["[CONVERGENCE GATE: PR 1 + GOV 1]"]
+    GOV1 --> CONV_GATE
+    
+    CONV_GATE --> PR2["4. PR 2 (Smart Ads): Pure Intelligence Layer
     & Truth Table Edge Cases"]
     
     PR2 --> PR3["5. PR 3 (Smart Ads): Pipeboard Hosted Adapter Offline,
@@ -347,39 +371,55 @@ flowchart TD
     LEG_PR --> PR6["9. PR 6 (Smart Ads): Granular Seam Adapter
     & operator_run/v1 Exact Parity"]
     
-    PR6 --> HERMES_PR["10. Consumer PR (limaronaldo/hermes-ronaldo):
+    PR6 --> SEAM_REC["10. Emit seam_parity_record/v1"]
+    
+    SEAM_REC --> HERMES_PR["11. Consumer PR (limaronaldo/hermes-ronaldo):
     Gateway Integration with Feature Flag (Default OFF)"]
     
     HERMES_PR --> G3["[GATE HUMANO 3]
-    Authorize Live Sources, Workload Identity & 7B Calls"]
+    Authorize Live Sources, Workload Identity & Meta API Version"]
     
-    G3 --> CERT7B["11. 7B Live Certification:
+    G3 --> AUTH_LIVE["Separate Human Authorizations:
+    (a) Credential / Workload Identity
+    (b) Deployment & Configuration
+    (c) 7B Live Provider Calls"]
+    
+    AUTH_LIVE --> CERT7B["12. 7B Live Certification:
     Pipeboard vs. independent_meta_reference_harness"]
     
-    CERT7B --> SHADOW["12. Shadow Mode in Hermes:
+    CERT7B --> AUTH_SHADOW["[HUMAN AUTHORIZATION: SHADOW MODE]"]
+    
+    AUTH_SHADOW --> SHADOW["13. Shadow Mode in Hermes:
     Compare Direct vs. Gateway Responses"]
     
-    SHADOW --> ACC["13. Operational Acceptance:
-    5 consecutive business days of daily reports
-    + 4 consecutive weekly draft cycles"]
+    SHADOW --> ACC["14. Operational Acceptance:
+    5 relatórios consecutivos em dias úteis aceitos por operador
+    + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente"]
     
-    ACC --> ROLLBACK["14. Human-Only Rollback Test & Validation"]
+    ACC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]"]
     
-    ROLLBACK --> MAN_FINAL["15. Tripartite MIGRATION_MANIFEST.json Generated
-    (Includes rollback_test_digest and Attestation)"]
+    AUTH_RB --> ROLLBACK["15. Human-Only Rollback Test & Validation
+    Emits rollback_test_receipt/v1"]
+    
+    ROLLBACK --> MAN_FINAL["16. Tripartite MIGRATION_MANIFEST.json Generated
+    (Proves Readiness; binds all digests & SHAs)"]
     
     MAN_FINAL --> G4["[GATE HUMANO 4]
-    Formal Authorization of Read-Only Cutover"]
+    Formal Authorization of Read-Only Cutover on Exact Manifest"]
     
-    G4 --> CUTOVER_EXEC["16. Cutover Execution (Toggle Feature Flag to Gateway)
+    G4 --> AUTH_CUTOVER["[HUMAN AUTHORIZATION: EXECUTE CUTOVER]"]
+    
+    AUTH_CUTOVER --> CUTOVER_EXEC["17. Cutover Execution (Toggle Feature Flag to Gateway)
     Emits cutover_execution_receipt/v1"]
     
-    CUTOVER_EXEC --> STABILIZE["17. Post-Cutover Verification & Stabilization Window"]
+    CUTOVER_EXEC --> STABILIZE["18. Post-Cutover Verification & Stabilization Window"]
     
     STABILIZE --> RETIRE_GATE["[GATE DE RETIRADA]
     Authorize Decommissioning of Legacy Direct Read"]
     
-    RETIRE_GATE --> RETIRE_EXEC["18. Decommission Legacy Direct Path
+    RETIRE_GATE --> AUTH_RETIRE["[HUMAN AUTHORIZATION: EXECUTE RETIREMENT]"]
+    
+    AUTH_RETIRE --> RETIRE_EXEC["19. Decommission Legacy Direct Path
     Emits legacy_read_retirement_receipt/v1"]
     
     RETIRE_EXEC -.-> WRITE_PLANE["[Future Decoupled Phase]
@@ -388,15 +428,20 @@ flowchart TD
 
 ---
 
-## 12. Tripartite Cutover Manifest Schema with Attestation
+## 12. Tripartite Cutover Readiness Manifest Schema
+
+The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readiness. Gate 4 subsequently references the immutable digest of this manifest:
 
 ```json
 {
   "manifest_schema_version": "smart_ads/migration_manifest/v1",
   "generated_at": "2026-08-30T15:00:00Z",
+  "decomposition_manifest_digest": "sha256:...",
   "source_packet_digest": "sha256:...",
-  "certification_digest": "sha256:...",
-  "shadow_parity_digest": "sha256:...",
+  "gate3_selection_digest": "sha256:...",
+  "seam_parity_record_digest": "sha256:...",
+  "certification_7b_digest": "sha256:...",
+  "shadow_acceptance_digest": "sha256:...",
   "rollback_test_digest": "sha256:...",
   "tripartite_cutover": {
     "legacy_side": {
@@ -415,10 +460,9 @@ flowchart TD
       "feature_flag_digest": "sha256:..."
     }
   },
-  "attestation": {
+  "readiness_attestation": {
     "subject_digest": "sha256:...",
     "attestor_ref": "user:ronaldo",
-    "authorization_ref": "auth:cutover-read-only-gate4",
     "issued_at": "2026-08-30T15:05:00Z",
     "signature_or_receipt_ref": "receipt:00000000-0000-4000-8000-000000000000"
   }
