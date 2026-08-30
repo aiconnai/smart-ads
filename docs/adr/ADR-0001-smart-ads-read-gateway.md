@@ -26,7 +26,7 @@ The missing product is not another general-purpose marketing backend. It is a **
 
 ## 2. Supersession & Lineage Map (`Supersedes`)
 
-This document defines the target architecture for the Read Plane. Formal supersession of `DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md` is **conditional and phased**: the legacy ADR remains active during `direct → shadow → gateway → rollback` and is formally superseded only upon issuance of the `legacy_read_retirement_receipt/v1` after stabilization and retirement.
+This document defines the target architecture for the Read Plane. Formal supersession of `DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md` is **strictly conditional and phased**: the legacy ADR remains active during `direct → shadow → gateway → rollback` and is formally superseded only upon completion of the post-retirement verification window and issuance of the verified `legacy_read_retirement_receipt/v1`.
 
 | Decision / Area in Legacy ADR | Phased Transition Status | Target Disposition in ADR-0001 |
 |---|---|---|
@@ -112,14 +112,14 @@ def collect(request: CollectionRequest) -> CollectionResult:
   2. **Never leaks** raw provider payloads, API tokens, cleartext account IDs, provider request URLs, HTTP headers, or raw provider error bodies.
 
 ### 4.3 Presence Status & `unknown != zero`
-Every metric field carries an explicit presence classification:
+Every metric field in an observation carries an explicit presence classification, decoupled from downstream semantic certification:
 ```text
 presence_status:
-  - observed        # Explicitly returned by provider and certified
-  - unknown         # Missing, uncertified, timeout, partial pagination, or unproven zero
+  - observed        # Explicitly returned by provider in payload (independent of certification)
+  - unknown         # Missing, unproven zero, partial pagination, or provider timeout
   - not_applicable  # Metric not supported by resource level or breakdown
 ```
-*Invariant:* `unknown != zero`. A value of zero is valid only when explicitly returned by the provider and confirmed through semantic certification.
+*Invariant:* `unknown != zero`. A numerical value of zero is valid only when explicitly returned as observed in provider payloads.
 
 ---
 
@@ -139,9 +139,14 @@ capability_state:
 * **7A Offline Certification** promotes capabilities strictly to `fixture_certified`. It **never** promotes a capability to `live_certified`.
 * Promotion to `live_certified` requires successful execution of 7B live verification against `independent_meta_reference_harness`.
 
-### 5.2 Per-Metric Verification States & Reconciliation Outcomes
-Every metric observation evaluated in a certification run produces a `certification_record/v1` with explicit verification and reconciliation status:
+### 5.2 Scoped Certification Records & Verification States
+Every metric observation evaluated in a certification run produces a `certification_record/v1`. To prevent cross-account, cross-tenant, or stale certificate leakage, every record is strictly keyed by the 7-tuple:
+```text
+(tenant_ref, binding_ref, account_ref, resource_scope_ref,
+ metric_semantic_ref, source_contract_ref, generation_id)
+```
 
+Verification status and reconciliation outcomes are strictly classified:
 ```text
 metric_verification_status:
   - VERIFIED      # Semantically valid and numerically verified against reference harness
@@ -213,6 +218,7 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │                                                                        │
 │ 4. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
 │    ├── Written to temporary generation file                            │
+│    ├── Embeds generation_id and curation_execution_digest in rows      │
 │    ├── Verifies complete coverage (partial pagination fails closed)    │
 │    ├── Computes physical_parquet_digest and logical_row_digest         │
 │    └── Promotes generation atomically via generation_manifest/v1 (CAS)│
@@ -244,11 +250,13 @@ breakdown_signature
 collected_at
 adapter_version
 semantic_contract_version
-generation_manifest_digest
+generation_id
 curation_execution_digest
 ```
 
-*Invariant:* `analysis_execution_digest` is intentionally decoupled from the storage grain. Downstream analysis executions reference `generation_manifest_digest`, permitting multiple analysis policies over the same immutable partition generation without storage mutation.
+*Invariants:*
+* Fact rows store `generation_id` and `curation_execution_digest`. Fact rows do **not** store `generation_manifest_digest` (which avoids circular preimages, since `generation_manifest_digest` is computed after sealing Parquet files).
+* `analysis_execution_digest` is decoupled from the storage grain. Downstream analysis executions reference `generation_manifest_digest`, permitting multiple analysis policies over the same immutable partition generation without storage mutation.
 
 ### 6.2 Strict Numeric Typing
 * Counts: integers (`int64`).
@@ -257,8 +265,8 @@ curation_execution_digest
 * Ratios/Percentages: computed dynamically in query views only after validating non-zero denominators.
 
 ### 6.3 Generation Manifest & Retention Pinning
-* **`generation_manifest/v1`:** Records `generation_id`, `created_at`, `physical_parquet_digest`, `logical_row_digest`, `row_count`, `partition_key`, and `curation_execution_ref`.
-* **Retention Pinning:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
+* **`generation_manifest/v1`:** Records `generation_id`, `created_at`, `physical_parquet_digest` (SHA-256 of raw Parquet file bytes), `logical_row_digest` (SHA-256 over RFC 8785 canonical rows), `row_count`, `partition_key`, and `curation_execution_ref`.
+* **Retention Pinning Rule:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `analysis_execution/v1`, `finding/v1`, `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
 * **Privacy & LGPD Boundary:** Zero persistence of raw payloads reduces the data attack surface and exposure risks. It **does not eliminate** privacy obligations (LGPD/GDPR): `landing/`, audit logs, and binding registries remain subject to legal basis, purpose limitation, necessity, security, access controls, and accountability.
 
 ---
@@ -325,7 +333,7 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
       "source_repository": "mbras-tech/mbras-campaigns",
       "source_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
       "source_path": "scripts/operator/conductor.py",
-      "source_symbol": "Conductor",
+      "source_symbol": "conduct_offline_run",
       "source_digest": "sha256:<64_hex_chars>",
       "system_id": "operator-core",
       "system_owner": "legacy-operator",
@@ -342,7 +350,8 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
 }
 ```
 
-* **Digest Preimage:** `manifest_digest` is computed as the SHA-256 over the canonical JSON bytes of the manifest payload excluding the `manifest_digest` property itself.
+* **Normative Hashing Standard:** All JSON digests are computed strictly according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**.
+* **Digest Preimage:** `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the entire manifest object excluding the `manifest_digest` property.
 * **Closed Enums:**
   * `target_repository`: `aiconnai/smart-ads | mbras-tech/mbras-campaigns | limaronaldo/hermes-ronaldo | runtime-private | none`
   * `target_layer`: `core_engine | data_plane | repository_tooling | legacy_governance | consumer_integration | null`
@@ -429,7 +438,7 @@ flowchart TD
     G2 --> DELIV_MODE{"Delivery Mode Selection
     (Manual / Human vs. Autonomous Engine)"}
     
-    DELIV_MODE -->|Manual / Human| DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
+    DELIV_MODE -->|Manual / Human| DELIV_REC["Emit delivery_mode_decision_receipt/v1"] --> DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
     (Path + Symbol 4-Tuple Mapping)"]
     DELIV_MODE -->|Autonomous Engine| LEDGER_FIX["P0 Fix on Legacy Ledger Required"] --> DEC_MAN
     
@@ -464,41 +473,46 @@ flowchart TD
     Gateway Integration with Feature Flag (Default OFF)"]
     
     HERMES_PR --> G3["[GATE HUMANO 3]
-    Selection & Attestation of Supported Meta API Version & Scope
+    Versão exata suportada, revalidada e selecionada
+    + Escopo de certificação atestado
     Emits gate3_selection_receipt/v1"]
     
     G3 --> AUTH_ID["[HUMAN AUTHORIZATION: WORKLOAD IDENTITY]
-    Emits workload_identity_receipt/v1"]
+    Emits workload_identity_authorization_receipt/v1"]
     
     AUTH_ID --> AUTH_DEPLOY["[HUMAN AUTHORIZATION: DEPLOYMENT & CONFIG]
-    Emits deployment_config_receipt/v1"]
+    Emits deployment_config_authorization_receipt/v1"]
     
     AUTH_DEPLOY --> AUTH_CALLS["[HUMAN AUTHORIZATION: 7B LIVE CALLS]
-    Emits live_execution_receipt/v1"]
+    Emits live_call_authorization_receipt/v1"]
     
     AUTH_CALLS --> CERT7B["12. 7B Live Certification:
     Pipeboard vs. independent_meta_reference_harness
-    Emits certification_7b_record/v1"]
+    Emits certification_7b_record/v1 + live_execution_receipt/v1"]
     
-    CERT7B --> AUTH_SHADOW["[HUMAN AUTHORIZATION: SHADOW MODE]"]
+    CERT7B --> AUTH_SHADOW["[HUMAN AUTHORIZATION: SHADOW MODE]
+    Emits shadow_mode_authorization_receipt/v1"]
     
     AUTH_SHADOW --> SHADOW["13. Shadow Mode in Hermes:
     Compare Direct vs. Gateway Responses"]
     
     SHADOW --> ACC["14. Operational Acceptance:
     5 relatórios consecutivos em dias úteis aceitos por operador
-    + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente"]
+    + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente
+    Emits shadow_acceptance_record/v1"]
     
-    ACC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]"]
+    ACC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]
+    Emits rollback_test_authorization_receipt/v1"]
     
     AUTH_RB --> ROLLBACK["15. Human-Only Rollback Test & Validation
     Emits rollback_test_receipt/v1"]
     
     ROLLBACK --> MAN_FINAL["16. Tripartite MIGRATION_MANIFEST.json Generated
-    (Proves Readiness; binds all digests & SHAs)"]
+    (Proves Readiness; binds all digests, receipts & SHAs)"]
     
     MAN_FINAL --> G4["[GATE HUMANO 4]
-    Formal Authorization of Read-Only Cutover on Exact Manifest"]
+    Formal Authorization of Read-Only Cutover on Exact Manifest
+    Emits cutover_authorization_receipt/v1"]
     
     G4 --> AUTH_CUTOVER["[HUMAN AUTHORIZATION: EXECUTE CUTOVER]"]
     
@@ -508,14 +522,19 @@ flowchart TD
     CUTOVER_EXEC --> STABILIZE["18. Post-Cutover Verification & Stabilization Window"]
     
     STABILIZE --> RETIRE_GATE["[GATE DE RETIRADA]
-    Authorize Decommissioning of Legacy Direct Read"]
+    Formal Authorization of Legacy Direct Read Retirement"]
     
-    RETIRE_GATE --> AUTH_RETIRE["[HUMAN AUTHORIZATION: EXECUTE RETIREMENT]"]
+    RETIRE_GATE --> AUTH_RETIRE["[HUMAN AUTHORIZATION: EXECUTE RETIREMENT]
+    Emits retirement_authorization_receipt/v1"]
     
-    AUTH_RETIRE --> RETIRE_EXEC["19. Decommission Legacy Direct Path
-    Emits legacy_read_retirement_receipt/v1"]
+    AUTH_RETIRE --> RETIRE_EXEC["19. Decommission Legacy Direct Path"]
     
-    RETIRE_EXEC -.-> WRITE_PLANE["[Future Decoupled Phase]
+    RETIRE_EXEC --> RETIRE_VERIF["20. Post-Retirement Verification Window"]
+    
+    RETIRE_VERIF --> RETIRE_REC["21. Emit legacy_read_retirement_receipt/v1
+    (Formally triggers supersession of legacy ADR)"]
+    
+    RETIRE_REC -.-> WRITE_PLANE["[Future Decoupled Phase]
     Write Plane ADR & Pinna Operational Mutation Engine"]
 ```
 
@@ -523,18 +542,24 @@ flowchart TD
 
 ## 12. Tripartite Cutover Readiness Manifest Schema
 
-The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readiness. Gate 4 subsequently references the immutable digest of this manifest:
+The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readiness. Gate 4 subsequently references the immutable `manifest_digest` of this document:
 
 ```json
 {
   "manifest_schema_version": "smart_ads/migration_manifest/v1",
+  "manifest_digest": "sha256:<64_hex_chars>",
   "generated_at": "<ISO-8601-TIMESTAMP>",
   "decomposition_manifest_digest": "sha256:<64_hex_chars>",
   "source_packet_digest": "sha256:<64_hex_chars>",
-  "gate3_selection_digest": "sha256:<64_hex_chars>",
+  "delivery_mode_decision_receipt_digest": "sha256:<64_hex_chars>",
+  "gate3_selection_receipt_digest": "sha256:<64_hex_chars>",
+  "workload_identity_authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "deployment_config_authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "live_call_authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "certification_7b_record_digest": "sha256:<64_hex_chars>",
+  "live_execution_receipt_digest": "sha256:<64_hex_chars>",
   "seam_parity_record_digest": "sha256:<64_hex_chars>",
-  "certification_7b_digest": "sha256:<64_hex_chars>",
-  "shadow_acceptance_digest": "sha256:<64_hex_chars>",
+  "shadow_acceptance_record_digest": "sha256:<64_hex_chars>",
   "rollback_test_receipt_digest": "sha256:<64_hex_chars>",
   "tripartite_cutover": {
     "legacy_side": {
@@ -555,12 +580,17 @@ The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readine
   },
   "readiness_attestation": {
     "subject_digest": "sha256:<64_hex_chars>",
+    "authorization_ref": "receipt:auth-readiness-attestation-01",
     "attestor_principal_ref": "principal:operator-authorized",
     "issued_at": "<ISO-8601-TIMESTAMP>",
     "signature_or_receipt_ref": "receipt:00000000-0000-4000-8000-000000000000"
   }
 }
 ```
+
+* **Digest Calculation Standard:**
+  * `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the manifest object excluding `manifest_digest` and `readiness_attestation`.
+  * `readiness_attestation.subject_digest` equals `manifest_digest` exactly (computed over RFC 8785 canonical JSON bytes excluding the `readiness_attestation` property).
 
 ---
 
