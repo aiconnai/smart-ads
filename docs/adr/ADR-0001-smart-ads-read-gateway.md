@@ -2,7 +2,7 @@
 
 - **Status:** Proposed / Awaiting Formal Approval (GATE HUMANO 2)
 - **Decision Date:** 2026-08-30
-- **Scope:** Read Plane Gateway, Lakehouse-Style Embedded Data Plane (`landing/`), Single Initial Operational Driver (`pipeboard_hosted`), Semantic Metric Registry, and Canonical Migration DAG
+- **Scope:** Read Plane Gateway, Lakehouse-Style Embedded Data Plane (`landing/`), Single Initial Operational Driver (`pipeboard_hosted`), Metric Certification Model, Semantic Metric Registry, and Canonical Migration DAG
 - **Decision Owners:** MBRAS Group / aiconnai
 - **Target Canonical Repository:** `aiconnai/smart-ads`
 - **Source Legacy Repository:** `mbras-tech/mbras-campaigns`
@@ -14,13 +14,13 @@
 
 Historical ad operations in luxury real estate (MBRAS Group / Pinna) required manual, ad-hoc pulls and human verification for every performance report. While the legacy workspace (`mbras-tech/mbras-campaigns`) established valuable contracts, safety boundaries, and naming governance, recurrence was blocked by structural coupling between business rules, customer data, and execution runtime.
 
-The missing product is not another general-purpose marketing backend. It is an **autonomous, read-only media intelligence gateway** that:
+The missing product is not another general-purpose marketing backend. It is a **governed, recurrent, read-only media intelligence gateway** that:
 1. Operates within tenant private cells with zero raw PII or secret leakage;
-2. Packages live and historical evidence deterministically into an embedded lakehouse-style data plane;
+2. Packages live and historical evidence deterministically into an embedded lakehouse-style data plane (`landing/`);
 3. Normalizes marketing metrics into immutable semantic identities with certified UI reconciliation;
 4. Enforces the foundational law of regression testing: `conversions = 65` vs `canonical leads = 23` are distinct semantic entities;
 5. Evaluates functional intelligence rules (audience saturation, budget waste, stalled delivery, and retroactive restatements) over synthetic truth tables; and
-6. Exposes a clean, read-only MCP interface for consumers (such as Hermes) while isolating all mutation capabilities.
+6. Exposes a clean, read-only MCP interface for consumers (such as Hermes) while strictly isolating all mutation capabilities.
 
 ---
 
@@ -30,8 +30,8 @@ This document defines the target architecture for the Read Plane. Formal superse
 
 | Decision / Area in Legacy ADR | Phased Transition Status | Target Disposition in ADR-0001 |
 |---|---|---|
-| `/ibvi-ads` as sole business entrypoint | **Active in Legacy during Transition** | Preserved in `mbras-campaigns` throughout transition. In `aiconnai/smart-ads`, the entrypoint is the MCP server (`smart_ads.transports.mcp`) and CLI `smart-ads` with tenant context pinned by the cell runtime. |
-| Pipeboard as sole live integration | **Active in Legacy** | Refined to single operational driver (`pipeboard_hosted`) under a closed `ProviderPort`. `independent_meta_reference_harness` is decoupled as an independent certification reference. |
+| `/ibvi-ads` as sole business entrypoint | **Active in Legacy during Transition** | Preserved in `mbras-campaigns` throughout transition. In `aiconnai/smart-ads`, the initial transport is the MCP server (`smart_ads.transports.mcp`) with tenant context pinned by the cell runtime. CLI surfaces are reserved for future administration tooling. |
+| Pipeboard as sole live integration | **Active in Legacy** | Refined to single operational driver (`pipeboard_hosted`) under a closed `ProviderPort`. `independent_meta_reference_harness` is decoupled as an independent certification reference harness. |
 | `operator_run/v1` execution contract | **Preserved & Wrapped** | `operator_run/v1` is preserved intact for exact parity; it is wrapped by `smart_ads/tenant_execution/v1`. |
 | Operational Acceptance Gate | **Preserved & Reconciled** | Literal requirement: **5 relatórios consecutivos em dias úteis aceitos por operador + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente**. |
 | Synthetic Collector `daily_collector.py` | **Preserved Fixture-Only** | Retained strictly as offline fixture harness; live collection uses the legacy runner seam. |
@@ -51,7 +51,7 @@ ADR-0001 establishes **exclusively the Read Plane**:
 │    • smart_ads/tenant/v1, front/v1, tenant_execution/v1                │
 │    • smart_ads/analytics_landing/v1, curation_execution/v1            │
 │    • smart_ads/generation_manifest/v1, analysis_execution/v1          │
-│    • smart_ads/finding/v1, report_execution/v1                         │
+│    • smart_ads/certification_record/v1, finding/v1, report_execution/v1│
 ├────────────────────────────────────────────────────────────────────────┤
 │ 2. Data Plane (Single Persisted Zone: landing/)                        │
 │    • In-memory provider sanitization (zero raw payload stored)         │
@@ -62,10 +62,11 @@ ADR-0001 establishes **exclusively the Read Plane**:
 │    • Functional rules: Saturation, Waste, Stalled Delivery, Restatement│
 │    • Restatement findings fail-closed (block mutation recommendations) │
 ├────────────────────────────────────────────────────────────────────────┤
-│ 4. Provider Adapter & Offline Certification                            │
+│ 4. Provider Adapter & Certification Model                              │
 │    • ProviderPort: closed boundary returning sanitized candidates      │
 │    • PipeboardHostedAdapter (driver_id: pipeboard_hosted)              │
 │    • 7A Offline Certification + Synthetic 65×23 Regression Law         │
+│    • 7B Live Certification against independent reference               │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 5. Read-Only Transport                                                 │
 │    • MCP Server (smart_ads.transports.mcp) for Hermes consumption       │
@@ -115,9 +116,41 @@ presence_status:
 
 ---
 
-## 5. The 65×23 Regression Law & Semantic Metric Identity
+## 5. Metric Certification Model & The 65×23 Regression Law
 
-### 5.1 The 65×23 Law
+### 5.1 Capability Registry & Lifecycle States
+The engine maintains a capability registry defining five discrete capability lifecycle states:
+```text
+capability_state:
+  - declared          # Defined in schema/contracts, no test proof yet
+  - fixture_certified # Proven offline against frozen synthetic fixtures (7A)
+  - live_certified    # Certified live against independent reference (7B)
+  - unavailable       # Confirmed unsupported by transport provider
+  - deferred          # Valid capability postponed to future phase
+```
+*Invariants:*
+* **7A Offline Certification** promotes capabilities strictly to `fixture_certified`. It **never** promotes a capability to `live_certified`.
+* Promotion to `live_certified` requires successful execution of 7B live verification against `independent_meta_reference_harness`.
+
+### 5.2 Per-Metric Verification States & Reconciliation Outcomes
+Every metric observation evaluated in a certification run produces a `certification_record/v1` with explicit verification and reconciliation status:
+
+```text
+metric_verification_status:
+  - VERIFIED      # Exact match or within declared tolerance against reference
+  - DEGRADED      # Semantic discrepancy detected within non-blocking margin
+  - UNRECONCILED  # Unresolved numerical mismatch between provider and reference
+  - UNAVAILABLE   # Metric missing from provider response
+  - BLOCKED       # Certification blocked by upstream transport or schema error
+
+reconciliation_outcome:
+  - exact_match
+  - within_declared_tolerance
+  - mismatch
+  - not_comparable
+```
+
+### 5.3 The 65×23 Regression Law
 ```text
 Aggregate Provider Conversions = 65
 Canonical Business Leads       = 23
@@ -127,10 +160,10 @@ Canonical Business Leads       = 23
   2. They are **never aliases**, **never fallbacks**, and **never derived from one another**.
   3. Test suites must enforce counter-proofs: `(65, unknown)`, `(0, 23)`, and `(unknown, unknown)`.
 
-### 5.2 Immutable Semantic Metric Identity
+### 5.4 Immutable Semantic Metric Identity
 A canonical base metric is defined by the immutable tuple:
 ```text
-(transport_provider, ad_platform, source_contract_ref, source_metric_ref,
+(transport_provider_ref, ad_platform_ref, source_contract_ref, source_metric_ref,
  metric_action_type, resource_level, attribution_setting, reporting_timezone,
  currency_unit, aggregation_rule, breakdowns)
 ```
@@ -138,13 +171,13 @@ Where `source_contract_ref` is strictly formatted as:
 * `api-version:<exact-version>` (for direct platform harnesses); or
 * `opaque-driver-contract:<driver_contract_digest>` (for opaque intermediate drivers like Pipeboard).
 
-### 5.3 Derived Metrics Contract
+### 5.5 Derived Metrics Contract
 For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 * **Inputs:** Formally declared as an ordered list of certified base metrics.
 * **Calculation:** Denominators must be validated strictly non-zero before division.
 * **Rounding:** Versioned rounding mode and precision explicitly recorded.
 * **Formula Integrity:** Digest of the derivation formula is cryptographically bound.
-* **Certification Inheritance:** A derived metric inherits the **worst** certification status among its constituent base metrics (`presence_status = unknown` if any input is `unknown`).
+* **Certification Inheritance:** A derived metric inherits the **worst** certification status among its constituent base metrics (`presence_status = unknown` if any input is `unknown` or `UNRECONCILED`).
 
 ---
 
@@ -175,7 +208,7 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │                                                                        │
 │ 5. Analysis & Reporting Envelopes:                                     │
 │    ├── analysis_execution/v1 (records threshold_policy_ref & digest)   │
-│    ├── finding/v1 (binds landing_digest + analysis_execution_digest)   │
+│    ├── finding/v1 (binds generation_manifest_digest + analysis_digest) │
 │    └── report_execution/v1 (records certified report output)           │
 │                                                                        │
 │ 6. Ephemeral Query Layer: analytics/analytics.duckdb                   │
@@ -200,7 +233,9 @@ breakdown_signature
 collected_at
 adapter_version
 semantic_contract_version
-landing_digest
+generation_manifest_digest
+curation_execution_digest
+analysis_execution_digest
 ```
 
 ### 6.2 Strict Numeric Typing
@@ -212,7 +247,7 @@ landing_digest
 ### 6.3 Generation Manifest & Retention Pinning
 * **`generation_manifest/v1`:** Records `generation_id`, `created_at`, `physical_parquet_digest`, `logical_row_digest`, `row_count`, `partition_key`, and `curation_execution_ref`.
 * **Retention Pinning:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
-* **Consequence of Zero Raw:** Eliminates GDPR/LGPD liabilities. Retrospective re-normalization is restricted to fields preserved in `landing/`.
+* **Privacy & LGPD Boundary:** Zero persistence of raw payloads reduces the data attack surface and exposure risks. It **does not eliminate** privacy obligations (LGPD/GDPR): `landing/`, audit logs, and binding registries remain subject to legal basis, purpose limitation, necessity, security, access controls, and accountability.
 
 ---
 
@@ -236,26 +271,26 @@ $$\text{Analyze}(\text{LandingDataset},\ \text{TenantThresholdPolicy}) \longrigh
 * **Uniqueness Constraints:**
   * `binding_ref` is unique per tenant.
   * `account_ref` is unique per tenant.
-  * Provider accounts are unique per `(tenant, provider, platform, private_account_key)`.
+  * Provider accounts are unique per `(tenant, transport_provider_ref, ad_platform_ref, private_account_key)`.
 * **Sub-Scope Authorization (`shared_with`):**
   ```yaml
   account_bindings:
-    - binding_ref: binding:mbras-meta-primary
-      provider: pipeboard
-      platform: meta
+    - binding_ref: binding:opaque-meta-primary
+      transport_provider_ref: pipeboard
+      ad_platform_ref: meta
       shared_with:
         - front_ref: front:mbras
           profile_ref: profile:mbras-anuncios
-          resource_scope_ref: scope:mbras-meta
+          resource_scope_ref: scope:opaque-mbras-meta
         - front_ref: front:pinna
           profile_ref: profile:pinna-operacao
-          resource_scope_ref: scope:pinna-meta
+          resource_scope_ref: scope:opaque-pinna-meta
   ```
 *Invariant:* Any collision between references, digests, or unauthorized scope cross-talk fails closed.
 
 ---
 
-## 9. Baseline Audit & Legacy Monolith Dispositions
+## 9. Baseline Audit & Decomposition Manifest Contract
 
 Audited at commit `d26c73d8508c7c3d43161fe36a80c44a46bf0f2d` (`d26c73d`):
 * **Pytest Baseline:** `2172 passed, 1 skipped, 3 warnings` (pytest 9.1.1, Python 3.12.11).
@@ -263,13 +298,51 @@ Audited at commit `d26c73d8508c7c3d43161fe36a80c44a46bf0f2d` (`d26c73d`):
 * **Typecheck Baseline:** `uv run basedpyright` — PASS (0 errors).
 * **Security Guards:** 267 collected test cases (1,529 LOC).
 
-### Legacy Systems Decomposition
+### 9.1 Executable Contract for `MIGRATION_DECOMPOSITION_MANIFEST.json`
+Immediately following Gate 2, the formal decomposition manifest will be generated conforming to the following exact contract:
+
+```json
+{
+  "$schema": "smart_ads/decomposition_manifest/v1",
+  "manifest_digest": "sha256:<64_hex_chars>",
+  "supersedes_digest": null,
+  "generated_at": "<ISO-8601-TIMESTAMP>",
+  "source_baseline_commit": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+  "entries": [
+    {
+      "source_repository": "mbras-tech/mbras-campaigns",
+      "source_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+      "source_path": "scripts/operator/conductor.py",
+      "source_symbol": "Conductor",
+      "source_digest": "sha256:<64_hex_chars>",
+      "system_id": "operator-core",
+      "system_owner": "legacy-operator",
+      "target_repository": "smart-ads",
+      "target_layer": "application",
+      "migration_mode": "reimplement_clean",
+      "decision_status": "approved",
+      "preserved_invariants": ["fail_closed_on_missing_evidence", "digest_provenance"],
+      "compatibility_surface": ["operator_run_v1"],
+      "blocking_defects": [],
+      "required_tests": ["test_conductor_parity.py"]
+    }
+  ]
+}
+```
+
+* **Closed Enums:**
+  * `target_repository`: `smart-ads | mbras-campaigns | hermes-ronaldo | runtime-private | none`
+  * `migration_mode`: `reimplement_clean | compatibility_seam | split_by_invariant | legacy_governance_only | repository_tooling | reference_only | defer_to_funnel_integration | defer_to_google_phase | defer_to_write_plane`
+  * `decision_status`: `approved | deferred | rejected`
+* **Invariants:** Full 40-char SHAs and 64-char SHA-256 digests (zero abbreviated hashes). Corrections require generating a new manifest referencing `supersedes_digest`.
+
+### 9.2 Legacy Systems Decomposition Summary
 
 > `source_loc` and `test_loc` are informative dimensioning metadata; canonical authority is strictly the 4-tuple: `(source_sha, source_path, source_symbol, source_digest)`.
 
 | Legacy System / Module | Primary Source Path | `source_loc` | `test_loc` (Associated Suites) | Manifest Disposition | Target Destination |
 |---|---|---:|---:|---|---|
-| **Ledger & Controller** | `scripts/autonomy/ledger.py` + `controller.py` | **5.943** | **3.459** (`test_controller.py`) | `legacy_governance_only` | Retained in legacy repository (P0 ledger defect blocks autonomous execution only) |
+| **Ledger & Controller** | `scripts/autonomy/ledger.py` + `controller.py` | **5.943** | **3.459** (`test_controller.py`) | `legacy_governance_only` | Retained in legacy repository (P0 ledger defect blocks autonomous delivery only) |
 | **Codex Gate & Scanners** | `docs/harness/bin/scan_codex_payload.py` + `sh` | **2.754** | **2.806** (`test_codex_gate.py`) | `repository_tooling` | Minimal re-implementation in `tooling/governance/` (outside wheel) |
 | **Funnel Validator** | `scripts/analytics/validate_funnel_contract.py` | **2.786** | **1.677** (`test_funnel_contract.py`) | `defer_to_funnel_integration` | Deferred to dedicated funnel phase |
 | **Google Canary Transport** | `scripts/operator/google_canary.py` | **2.125** | **3.148** (`tests/operator/test_google_canary.py`) | `defer_to_google_phase` | Deferred to Google Ads Gateway |
@@ -377,7 +450,7 @@ flowchart TD
     Gateway Integration with Feature Flag (Default OFF)"]
     
     HERMES_PR --> G3["[GATE HUMANO 3]
-    Authorize Live Sources, Workload Identity & Meta API Version"]
+    Selection & Attestation of Supported Meta API Version & Scope"]
     
     G3 --> AUTH_LIVE["Separate Human Authorizations:
     (a) Credential / Workload Identity
@@ -435,35 +508,35 @@ The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readine
 ```json
 {
   "manifest_schema_version": "smart_ads/migration_manifest/v1",
-  "generated_at": "2026-08-30T15:00:00Z",
-  "decomposition_manifest_digest": "sha256:...",
-  "source_packet_digest": "sha256:...",
-  "gate3_selection_digest": "sha256:...",
-  "seam_parity_record_digest": "sha256:...",
-  "certification_7b_digest": "sha256:...",
-  "shadow_acceptance_digest": "sha256:...",
-  "rollback_test_digest": "sha256:...",
+  "generated_at": "<ISO-8601-TIMESTAMP>",
+  "decomposition_manifest_digest": "sha256:<64_hex_chars>",
+  "source_packet_digest": "sha256:<64_hex_chars>",
+  "gate3_selection_digest": "sha256:<64_hex_chars>",
+  "seam_parity_record_digest": "sha256:<64_hex_chars>",
+  "certification_7b_digest": "sha256:<64_hex_chars>",
+  "shadow_acceptance_digest": "sha256:<64_hex_chars>",
+  "rollback_test_digest": "sha256:<64_hex_chars>",
   "tripartite_cutover": {
     "legacy_side": {
       "repository": "mbras-tech/mbras-campaigns",
       "commit_sha": "<seam_commit_sha_40_chars>",
-      "seam_adapter_digest": "sha256:..."
+      "seam_adapter_digest": "sha256:<64_hex_chars>"
     },
     "canonical_side": {
       "repository": "aiconnai/smart-ads",
       "commit_sha": "<canonical_commit_sha_40_chars>",
-      "wheel_digest": "sha256:..."
+      "wheel_digest": "sha256:<64_hex_chars>"
     },
     "consumer_side": {
       "repository": "limaronaldo/hermes-ronaldo",
       "commit_sha": "<consumer_commit_sha_40_chars>",
-      "feature_flag_digest": "sha256:..."
+      "feature_flag_digest": "sha256:<64_hex_chars>"
     }
   },
   "readiness_attestation": {
-    "subject_digest": "sha256:...",
-    "attestor_ref": "user:ronaldo",
-    "issued_at": "2026-08-30T15:05:00Z",
+    "subject_digest": "sha256:<64_hex_chars>",
+    "attestor_principal_ref": "principal:operator-authorized",
+    "issued_at": "<ISO-8601-TIMESTAMP>",
     "signature_or_receipt_ref": "receipt:00000000-0000-4000-8000-000000000000"
   }
 }
