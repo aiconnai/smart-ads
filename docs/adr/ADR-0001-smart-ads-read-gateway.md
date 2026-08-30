@@ -140,10 +140,11 @@ capability_state:
 * Promotion to `live_certified` requires successful execution of 7B live verification against `independent_meta_reference_harness`.
 
 ### 5.2 Scoped Certification Records & Verification States
-Every metric observation evaluated in a certification run produces a `certification_record/v1`. To prevent cross-account, cross-tenant, or stale certificate leakage, every record is strictly keyed by the 7-tuple:
+Every metric observation evaluated in a certification run produces a `certification_record/v1`. To prevent cross-account, cross-tenant, or stale certificate leakage, every record is strictly keyed by the 9-tuple:
 ```text
 (tenant_ref, binding_ref, account_ref, resource_scope_ref,
- metric_semantic_ref, source_contract_ref, generation_id)
+ metric_semantic_ref, source_contract_ref, generation_id,
+ generation_manifest_digest, registry_snapshot_digest)
 ```
 
 Verification status and reconciliation outcomes are strictly classified:
@@ -187,13 +188,21 @@ Where `source_contract_ref` is strictly formatted as:
 * `api-version:<exact-version>` (for direct platform harnesses); or
 * `opaque-driver-contract:<driver_contract_digest>` (for opaque intermediate drivers like Pipeboard).
 
-### 5.5 Derived Metrics Contract
+### 5.5 Derived Metrics Contract, Calculation Availability & Certification Lattice
 For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 * **Inputs:** Formally declared as an ordered list of certified base metrics.
-* **Calculation:** Denominators must be validated strictly non-zero before division.
-* **Rounding:** Versioned rounding mode and precision explicitly recorded.
+* **Presence Status:**
+  * `observed`: When all required base metric inputs are `observed`.
+  * `unknown`: When any required base metric input is `unknown`.
+  * `not_applicable`: When any required base metric input is `not_applicable`.
+* **Calculation Availability & Zero Denominator Rule:**
+  * When a denominator is zero (e.g. 0 impressions for CTR, 0 conversions for CPA), the engine returns `value: null` with `calculation_status: division_by_zero`.
+  * `float`, `NaN`, and `Infinity` are strictly prohibited.
+* **Rounding:** Versioned rounding mode and decimal precision explicitly recorded.
 * **Formula Integrity:** Digest of the derivation formula is cryptographically bound.
-* **Certification Inheritance:** A derived metric inherits the **worst** certification status among its constituent base metrics (`presence_status = unknown` if any input is `unknown` or `UNRECONCILED`).
+* **Certification Status Lattice:**
+  $$\text{BLOCKED} < \text{UNRECONCILED} < \text{UNAVAILABLE} < \text{DEGRADED} < \text{VERIFIED}$$
+  A derived metric inherits the **worst** status among its inputs along this lattice. If any input is `UNRECONCILED`, the derived metric is `UNRECONCILED`.
 
 ---
 
@@ -219,6 +228,7 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │ 4. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
 │    ├── Written to temporary generation file                            │
 │    ├── Embeds generation_id and curation_execution_digest in rows      │
+│    ├── Rows sorted by deterministic composite key                      │
 │    ├── Verifies complete coverage (partial pagination fails closed)    │
 │    ├── Computes physical_parquet_digest and logical_row_digest         │
 │    └── Promotes generation atomically via generation_manifest/v1 (CAS)│
@@ -264,7 +274,8 @@ curation_execution_digest
 * **Prohibition:** `float`, `NaN`, and `Infinity` are strictly forbidden in storage and contracts.
 * Ratios/Percentages: computed dynamically in query views only after validating non-zero denominators.
 
-### 6.3 Generation Manifest & Retention Pinning
+### 6.3 Generation Manifest & Deterministic Row Ordering
+* **Deterministic Row Ordering:** Rows within a generation partition are strictly sorted by the composite key `(metric_date, resource_level, resource_ref, metric_semantic_ref, breakdown_signature)` before computing `logical_row_digest` via RFC 8785 canonical JSON array serialization.
 * **`generation_manifest/v1`:** Records `generation_id`, `created_at`, `physical_parquet_digest` (SHA-256 of raw Parquet file bytes), `logical_row_digest` (SHA-256 over RFC 8785 canonical rows), `row_count`, `partition_key`, and `curation_execution_ref`.
 * **Retention Pinning Rule:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `analysis_execution/v1`, `finding/v1`, `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
 * **Privacy & LGPD Boundary:** Zero persistence of raw payloads reduces the data attack surface and exposure risks. It **does not eliminate** privacy obligations (LGPD/GDPR): `landing/`, audit logs, and binding registries remain subject to legal basis, purpose limitation, necessity, security, access controls, and accountability.
@@ -428,112 +439,118 @@ smart-ads/
 flowchart TD
     DRAFT["0. In-Memory Canonical Draft"] --> G1["[GATE HUMANO 1: CONCEDIDO]
     Authorization to Create Private Repo aiconnai/smart-ads"]
-    
+
     G1 --> BOOTSTRAP["1. Bootstrap Repository & Record ADR-0001
     (docs/adr/ADR-0001-smart-ads-read-gateway.md)"]
-    
+
     BOOTSTRAP --> G2["[GATE HUMANO 2]
     Formal Approval of ADR-0001 on Exact Commit SHA"]
-    
+
     G2 --> DELIV_MODE{"Delivery Mode Selection
     (Manual / Human vs. Autonomous Engine)"}
-    
-    DELIV_MODE -->|Manual / Human| DELIV_REC["Emit delivery_mode_decision_receipt/v1"] --> DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
+
+    DELIV_MODE -->|Manual / Human| DELIV_REC["Emit delivery_mode_decision_receipt/v1 (manual mode)"] --> DEC_MAN["2. Generate MIGRATION_DECOMPOSITION_MANIFEST.json
     (Path + Symbol 4-Tuple Mapping)"]
-    DELIV_MODE -->|Autonomous Engine| LEDGER_FIX["P0 Fix on Legacy Ledger Required"] --> DEC_MAN
-    
+    DELIV_MODE -->|Autonomous Engine| LEDGER_FIX["P0 Fix on Legacy Ledger"] --> DELIV_AUTON["Emit delivery_mode_decision_receipt/v1 (autonomous mode + fix evidence)"] --> DEC_MAN
+
     DEC_MAN --> PR1["3. PR 1 (Smart Ads): Packaging (src/), Schemas,
     Semantic Metric Registry & ProviderPort"]
     DEC_MAN --> GOV1["3b. GOV 1: Governance & CI Tooling"]
-    
+
     PR1 --> CONV_GATE["[CONVERGENCE GATE: PR 1 + GOV 1]"]
     GOV1 --> CONV_GATE
-    
+
     CONV_GATE --> PR2["4. PR 2 (Smart Ads): Pure Intelligence Layer
     & Truth Table Edge Cases"]
-    
+
     PR2 --> PR3["5. PR 3 (Smart Ads): Pipeboard Hosted Adapter Offline,
     Capability Registry & 7A Offline Certification (CI)"]
-    
+
     PR3 --> PR4["6. PR 4 (Smart Ads): landing/ Atomic Parquet Generation
     & curation_execution/v1 Lookback"]
-    
+
     PR4 --> PR5["7. PR 5 (Smart Ads): Rebuildable DuckDB Analytics
     & Sanitized CSV Reports"]
-    
+
     PR5 --> LEG_PR["8. Legacy Seam PR (mbras-tech/mbras-campaigns):
     Dual Projection Seam (Granular + Aggregated)"]
-    
+
     LEG_PR --> PR6["9. PR 6 (Smart Ads): Granular Seam Adapter
     & operator_run/v1 Exact Parity"]
-    
+
     PR6 --> SEAM_REC["10. Emit seam_parity_record/v1"]
-    
+
     SEAM_REC --> HERMES_PR["11. Consumer PR (limaronaldo/hermes-ronaldo):
     Gateway Integration with Feature Flag (Default OFF)"]
-    
+
     HERMES_PR --> G3["[GATE HUMANO 3]
     Versão exata suportada, revalidada e selecionada
     + Escopo de certificação atestado
     Emits gate3_selection_receipt/v1"]
-    
+
     G3 --> AUTH_ID["[HUMAN AUTHORIZATION: WORKLOAD IDENTITY]
     Emits workload_identity_authorization_receipt/v1"]
-    
-    AUTH_ID --> AUTH_DEPLOY["[HUMAN AUTHORIZATION: DEPLOYMENT & CONFIG]
+
+    AUTH_ID --> PROV_ID["Provision & Verify Workload Identity
+    Emits workload_identity_execution_receipt/v1"]
+
+    PROV_ID --> AUTH_DEPLOY["[HUMAN AUTHORIZATION: DEPLOYMENT & CONFIG]
     Emits deployment_config_authorization_receipt/v1"]
-    
-    AUTH_DEPLOY --> AUTH_CALLS["[HUMAN AUTHORIZATION: 7B LIVE CALLS]
+
+    AUTH_DEPLOY --> PROV_DEPLOY["Deploy & Verify Cell Configuration
+    Emits deployment_config_execution_receipt/v1"]
+
+    PROV_DEPLOY --> AUTH_CALLS["[HUMAN AUTHORIZATION: 7B LIVE CALLS]
     Emits live_call_authorization_receipt/v1"]
-    
+
     AUTH_CALLS --> CERT7B["12. 7B Live Certification:
     Pipeboard vs. independent_meta_reference_harness
     Emits certification_7b_record/v1 + live_execution_receipt/v1"]
-    
+
     CERT7B --> AUTH_SHADOW["[HUMAN AUTHORIZATION: SHADOW MODE]
     Emits shadow_mode_authorization_receipt/v1"]
-    
+
     AUTH_SHADOW --> SHADOW["13. Shadow Mode in Hermes:
     Compare Direct vs. Gateway Responses"]
-    
+
     SHADOW --> ACC["14. Operational Acceptance:
     5 relatórios consecutivos em dias úteis aceitos por operador
     + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente
     Emits shadow_acceptance_record/v1"]
-    
+
     ACC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]
     Emits rollback_test_authorization_receipt/v1"]
-    
+
     AUTH_RB --> ROLLBACK["15. Human-Only Rollback Test & Validation
     Emits rollback_test_receipt/v1"]
-    
+
     ROLLBACK --> MAN_FINAL["16. Tripartite MIGRATION_MANIFEST.json Generated
     (Proves Readiness; binds all digests, receipts & SHAs)"]
-    
+
     MAN_FINAL --> G4["[GATE HUMANO 4]
     Formal Authorization of Read-Only Cutover on Exact Manifest
     Emits cutover_authorization_receipt/v1"]
-    
+
     G4 --> AUTH_CUTOVER["[HUMAN AUTHORIZATION: EXECUTE CUTOVER]"]
-    
+
     AUTH_CUTOVER --> CUTOVER_EXEC["17. Cutover Execution (Toggle Feature Flag to Gateway)
     Emits cutover_execution_receipt/v1"]
-    
+
     CUTOVER_EXEC --> STABILIZE["18. Post-Cutover Verification & Stabilization Window"]
-    
+
     STABILIZE --> RETIRE_GATE["[GATE DE RETIRADA]
     Formal Authorization of Legacy Direct Read Retirement"]
-    
+
     RETIRE_GATE --> AUTH_RETIRE["[HUMAN AUTHORIZATION: EXECUTE RETIREMENT]
     Emits retirement_authorization_receipt/v1"]
-    
+
     AUTH_RETIRE --> RETIRE_EXEC["19. Decommission Legacy Direct Path"]
-    
+
     RETIRE_EXEC --> RETIRE_VERIF["20. Post-Retirement Verification Window"]
-    
+
     RETIRE_VERIF --> RETIRE_REC["21. Emit legacy_read_retirement_receipt/v1
     (Formally triggers supersession of legacy ADR)"]
-    
+
     RETIRE_REC -.-> WRITE_PLANE["[Future Decoupled Phase]
     Write Plane ADR & Pinna Operational Mutation Engine"]
 ```
@@ -554,12 +571,16 @@ The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readine
   "delivery_mode_decision_receipt_digest": "sha256:<64_hex_chars>",
   "gate3_selection_receipt_digest": "sha256:<64_hex_chars>",
   "workload_identity_authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "workload_identity_execution_receipt_digest": "sha256:<64_hex_chars>",
   "deployment_config_authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "deployment_config_execution_receipt_digest": "sha256:<64_hex_chars>",
   "live_call_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "certification_7b_record_digest": "sha256:<64_hex_chars>",
   "live_execution_receipt_digest": "sha256:<64_hex_chars>",
   "seam_parity_record_digest": "sha256:<64_hex_chars>",
+  "shadow_mode_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "shadow_acceptance_record_digest": "sha256:<64_hex_chars>",
+  "rollback_test_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "rollback_test_receipt_digest": "sha256:<64_hex_chars>",
   "tripartite_cutover": {
     "legacy_side": {
@@ -588,9 +609,11 @@ The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readine
 }
 ```
 
-* **Digest Calculation Standard:**
-  * `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the manifest object excluding `manifest_digest` and `readiness_attestation`.
-  * `readiness_attestation.subject_digest` equals `manifest_digest` exactly (computed over RFC 8785 canonical JSON bytes excluding the `readiness_attestation` property).
+* **Normative Hashing Standard & Single Preimage Rule:**
+  * All JSON digests are computed strictly according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**.
+  * The normative preimage for the manifest is defined as the RFC 8785 canonical JSON bytes of the manifest object excluding both the `manifest_digest` and `readiness_attestation` properties.
+  * Computing the SHA-256 over this canonical preimage yields the immutable digest value $D$.
+  * Both `manifest_digest` and `readiness_attestation.subject_digest` are assigned this exact value $D$ (`manifest_digest = subject_digest = D`).
 
 ---
 
