@@ -94,15 +94,22 @@ ad_platform_api_version:
 * **Independent Live Reference:** `independent_meta_reference_harness` is used strictly during Gate 3 / 7B live certification. It is not an active operational fallback in Phase 1.
 * **API Version Handling:** `pipeboard_hosted` declares `status: opaque` and `value: null` until verifiable upstream vendor attestation is provided. No global static API version is hardcoded into schemas.
 
-### 4.2 Closed Boundary `ProviderPort`
+### 4.2 Closed Boundary `ProviderPort` Contract
 ```python
 def collect(request: CollectionRequest) -> CollectionResult:
     ...
 ```
+* **`CollectionRequest`:** Carries `binding_ref`, `resource_scope_ref`, `registry_snapshot_digest`, and ordered `requested_capabilities`.
+* **`CollectionResult`:**
+  * `outcome_status`: strictly closed enum `complete | partial | failed`.
+  * `capabilities_requested`: list of requested capability refs.
+  * `capabilities_observed`: list of validated capability refs present in candidate.
+  * `registry_snapshot_digest`: echo of the authorized input registry snapshot digest.
+  * `candidates`: list of validated, sanitized `analytics_landing/v1` observations.
+  * `errors`: normalized local error classifications (fail closed).
 * **Invariants:**
-  1. Accepts only opaque, authorized references (`binding_ref`, `resource_scope_ref`).
-  2. Returns sanitized candidates with per-metric presence, content digests, and normalized local error classes.
-  3. **Never leaks** raw provider payloads, API tokens, cleartext account IDs, provider request URLs, HTTP headers, or raw error response bodies.
+  1. Accepts only opaque, authorized references.
+  2. **Never leaks** raw provider payloads, API tokens, cleartext account IDs, provider request URLs, HTTP headers, or raw provider error bodies.
 
 ### 4.3 Presence Status & `unknown != zero`
 Every metric field carries an explicit presence classification:
@@ -137,11 +144,11 @@ Every metric observation evaluated in a certification run produces a `certificat
 
 ```text
 metric_verification_status:
-  - VERIFIED      # Exact match or within declared tolerance against reference
-  - DEGRADED      # Semantic discrepancy detected within non-blocking margin
-  - UNRECONCILED  # Unresolved numerical mismatch between provider and reference
-  - UNAVAILABLE   # Metric missing from provider response
-  - BLOCKED       # Certification blocked by upstream transport or schema error
+  - VERIFIED      # Semantically valid and numerically verified against reference harness
+  - DEGRADED      # Semantically valid with documented operational limitation (freshness/tolerance)
+  - UNRECONCILED  # Uncertified metric, numerical mismatch, or inconclusive comparison
+  - UNAVAILABLE   # Capability confirmed unsupported in that specific provider/platform context
+  - BLOCKED       # Metric usage prohibited by governance or security policy
 
 reconciliation_outcome:
   - exact_match
@@ -149,6 +156,10 @@ reconciliation_outcome:
   - mismatch
   - not_comparable
 ```
+
+*Invariants:*
+* A semantic discrepancy can **never** be classified as `DEGRADED`; any semantic difference fails to `UNRECONCILED` or `BLOCKED`.
+* Absence of a metric in a partial response is classified as `unknown` / `UNRECONCILED`, never as `UNAVAILABLE`.
 
 ### 5.3 The 65×23 Regression Law
 ```text
@@ -206,9 +217,9 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │    ├── Computes physical_parquet_digest and logical_row_digest         │
 │    └── Promotes generation atomically via generation_manifest/v1 (CAS)│
 │                                                                        │
-│ 5. Analysis & Reporting Envelopes:                                     │
-│    ├── analysis_execution/v1 (records threshold_policy_ref & digest)   │
-│    ├── finding/v1 (binds generation_manifest_digest + analysis_digest) │
+│ 5. Analysis & Reporting Envelopes (Downstream of Storage Promotion):   │
+│    ├── analysis_execution/v1 (binds generation_manifest_digest + policy)│
+│    ├── finding/v1 (binds analysis_execution_digest)                    │
 │    └── report_execution/v1 (records certified report output)           │
 │                                                                        │
 │ 6. Ephemeral Query Layer: analytics/analytics.duckdb                   │
@@ -235,8 +246,9 @@ adapter_version
 semantic_contract_version
 generation_manifest_digest
 curation_execution_digest
-analysis_execution_digest
 ```
+
+*Invariant:* `analysis_execution_digest` is intentionally decoupled from the storage grain. Downstream analysis executions reference `generation_manifest_digest`, permitting multiple analysis policies over the same immutable partition generation without storage mutation.
 
 ### 6.2 Strict Numeric Typing
 * Counts: integers (`int64`).
@@ -275,16 +287,16 @@ $$\text{Analyze}(\text{LandingDataset},\ \text{TenantThresholdPolicy}) \longrigh
 * **Sub-Scope Authorization (`shared_with`):**
   ```yaml
   account_bindings:
-    - binding_ref: binding:opaque-meta-primary
+    - binding_ref: binding:opaque-primary-01
       transport_provider_ref: pipeboard
       ad_platform_ref: meta
       shared_with:
-        - front_ref: front:mbras
-          profile_ref: profile:mbras-anuncios
-          resource_scope_ref: scope:opaque-mbras-meta
-        - front_ref: front:pinna
-          profile_ref: profile:pinna-operacao
-          resource_scope_ref: scope:opaque-pinna-meta
+        - front_ref: front:front-alpha
+          profile_ref: profile:profile-core
+          resource_scope_ref: scope:scope-alpha-core
+        - front_ref: front:front-beta
+          profile_ref: profile:profile-ops
+          resource_scope_ref: scope:scope-beta-ops
   ```
 *Invariant:* Any collision between references, digests, or unauthorized scope cross-talk fails closed.
 
@@ -317,8 +329,8 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
       "source_digest": "sha256:<64_hex_chars>",
       "system_id": "operator-core",
       "system_owner": "legacy-operator",
-      "target_repository": "smart-ads",
-      "target_layer": "application",
+      "target_repository": "aiconnai/smart-ads",
+      "target_layer": "core_engine",
       "migration_mode": "reimplement_clean",
       "decision_status": "approved",
       "preserved_invariants": ["fail_closed_on_missing_evidence", "digest_provenance"],
@@ -330,8 +342,10 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
 }
 ```
 
+* **Digest Preimage:** `manifest_digest` is computed as the SHA-256 over the canonical JSON bytes of the manifest payload excluding the `manifest_digest` property itself.
 * **Closed Enums:**
-  * `target_repository`: `smart-ads | mbras-campaigns | hermes-ronaldo | runtime-private | none`
+  * `target_repository`: `aiconnai/smart-ads | mbras-tech/mbras-campaigns | limaronaldo/hermes-ronaldo | runtime-private | none`
+  * `target_layer`: `core_engine | data_plane | repository_tooling | legacy_governance | consumer_integration | null`
   * `migration_mode`: `reimplement_clean | compatibility_seam | split_by_invariant | legacy_governance_only | repository_tooling | reference_only | defer_to_funnel_integration | defer_to_google_phase | defer_to_write_plane`
   * `decision_status`: `approved | deferred | rejected`
 * **Invariants:** Full 40-char SHAs and 64-char SHA-256 digests (zero abbreviated hashes). Corrections require generating a new manifest referencing `supersedes_digest`.
@@ -345,7 +359,7 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
 | **Ledger & Controller** | `scripts/autonomy/ledger.py` + `controller.py` | **5.943** | **3.459** (`test_controller.py`) | `legacy_governance_only` | Retained in legacy repository (P0 ledger defect blocks autonomous delivery only) |
 | **Codex Gate & Scanners** | `docs/harness/bin/scan_codex_payload.py` + `sh` | **2.754** | **2.806** (`test_codex_gate.py`) | `repository_tooling` | Minimal re-implementation in `tooling/governance/` (outside wheel) |
 | **Funnel Validator** | `scripts/analytics/validate_funnel_contract.py` | **2.786** | **1.677** (`test_funnel_contract.py`) | `defer_to_funnel_integration` | Deferred to dedicated funnel phase |
-| **Google Canary Transport** | `scripts/operator/google_canary.py` | **2.125** | **3.148** (`tests/operator/test_google_canary.py`) | `defer_to_google_phase` | Deferred to Google Ads Gateway |
+| **Google Canary Transport** | `scripts/operator/google_canary.py` | **2.125** | **3.148** (`tests/operator/test_google_canary.py`) | `defer_to_google_phase` | Deferred to future Google phase |
 | **Security Boundaries** | `tests/test_security_boundaries.py` | — | **1.467** (262 test cases) | `split_by_invariant` | Pure invariants (umask 0600, symlinks, redaction) ported to `smart_ads` |
 | **Disablement Packets** | Service account disablement docs | **656** | **2.014** (2 test suites) | `legacy_governance_only` | Retained in legacy repository |
 | **Pinna Scripts (16 files)** | `scripts/google_ads/pinna5109/*.py` | **5.255** | — | `defer_to_write_plane` | 100% deferred to Write Plane ADR |
@@ -450,15 +464,21 @@ flowchart TD
     Gateway Integration with Feature Flag (Default OFF)"]
     
     HERMES_PR --> G3["[GATE HUMANO 3]
-    Selection & Attestation of Supported Meta API Version & Scope"]
+    Selection & Attestation of Supported Meta API Version & Scope
+    Emits gate3_selection_receipt/v1"]
     
-    G3 --> AUTH_LIVE["Separate Human Authorizations:
-    (a) Credential / Workload Identity
-    (b) Deployment & Configuration
-    (c) 7B Live Provider Calls"]
+    G3 --> AUTH_ID["[HUMAN AUTHORIZATION: WORKLOAD IDENTITY]
+    Emits workload_identity_receipt/v1"]
     
-    AUTH_LIVE --> CERT7B["12. 7B Live Certification:
-    Pipeboard vs. independent_meta_reference_harness"]
+    AUTH_ID --> AUTH_DEPLOY["[HUMAN AUTHORIZATION: DEPLOYMENT & CONFIG]
+    Emits deployment_config_receipt/v1"]
+    
+    AUTH_DEPLOY --> AUTH_CALLS["[HUMAN AUTHORIZATION: 7B LIVE CALLS]
+    Emits live_execution_receipt/v1"]
+    
+    AUTH_CALLS --> CERT7B["12. 7B Live Certification:
+    Pipeboard vs. independent_meta_reference_harness
+    Emits certification_7b_record/v1"]
     
     CERT7B --> AUTH_SHADOW["[HUMAN AUTHORIZATION: SHADOW MODE]"]
     
@@ -515,7 +535,7 @@ The `MIGRATION_MANIFEST.json` is generated **prior to Gate 4** to attest readine
   "seam_parity_record_digest": "sha256:<64_hex_chars>",
   "certification_7b_digest": "sha256:<64_hex_chars>",
   "shadow_acceptance_digest": "sha256:<64_hex_chars>",
-  "rollback_test_digest": "sha256:<64_hex_chars>",
+  "rollback_test_receipt_digest": "sha256:<64_hex_chars>",
   "tripartite_cutover": {
     "legacy_side": {
       "repository": "mbras-tech/mbras-campaigns",
