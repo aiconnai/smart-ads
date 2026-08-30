@@ -36,7 +36,7 @@ Upon verified retirement receipt issuance, ADR-0001 supersedes the legacy ADR **
 4. Read-only client transport (MCP Gateway).
 
 ### 2.2 Preserved Governance (Non-Superseded Scope)
-All other areas—including `/ibvi-ads` business mutations, Customer Match upload policies, CAPI lead writes, autonomous controller review policies, and Pinna operational mutation scripts (5,255 LOC)—**remain governed under existing legacy ADR and workspace policies** until a dedicated Write Plane ADR is formally approved.
+All other areas—including `/ibvi-ads` business mutations, commercial funnel contracts, Customer Match upload policies, CAPI lead writes, autonomous controller review policies, and Pinna operational mutation scripts (5,255 LOC)—**remain governed under existing legacy ADR and workspace policies** until a dedicated Write Plane ADR is formally approved.
 
 | Decision / Area in Legacy ADR | Phased Transition Status | Target Disposition in ADR-0001 |
 |---|---|---|
@@ -79,14 +79,29 @@ ADR-0001 establishes **exclusively the Read Plane**:
 │    • 7A Offline Certification + Synthetic 65×23 Regression Law         │
 │    • 7B Live Certification against independent reference               │
 ├────────────────────────────────────────────────────────────────────────┤
-│ 5. Read-Only Transport (Deny-by-Default MCP)                           │
+│ 5. Read-Only Transport (Deny-by-Default MCP Tool Inventory)            │
 │    • MCP Server (smart_ads.transports.mcp) for Hermes consumption       │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 Normative Security Defenses
-1. **7A Offline Isolation Enforcement:** The 7A test harness strictly enforces offline isolation via environment sandboxing (socket/network monkeypatching, stripping ambient cloud/provider credentials `AWS_*`, `META_*`, `PIPEBOARD_*`). Automated negative tests verify that any network socket creation attempt immediately triggers test failure.
-2. **MCP Read-Only Boundary Enforcement:** `smart_ads.transports.mcp` implements strict allowlisting: only read tools (`smart_ads.queries.*`, `smart_ads.reports.*`) are exposed. Any mutation RPC, unknown tool, ambient filesystem write outside isolated `/tmp`, or credential retrieval request is denied by default. Negative fuzzing test suites in CI verify immediate rejection of mutation payloads.
+### 3.1 Explicit Non-Goals for ADR-0001
+Staging Ports, Approval Stores (SQLite/Postgres), CAS Execution Workers, Customer Match uploads, campaign creation/mutation, budget changes, CAPI lead writes, autonomous schedulers, commercial multi-tenant SaaS features, and writable filesystem APIs are **strictly out of scope**.
+
+### 3.2 Normative Security Defenses
+1. **7A Hermetic Offline Isolation:**
+   * Execution environment runs with an allowlisted environment variable set (only standard `PATH`, `PYTHONPATH`, `LANG`; all provider, cloud, and token variables stripped).
+   * Network deny-all: Subprocess, TCP/UDP sockets, and HTTP client modules are monkeypatched or sandboxed to fail immediately on any socket creation.
+   * Credential access deny-all: Host credential locations (`~/.netrc`, `~/.aws`, `~/.config`, macOS Keychain) are strictly blocked from the test runtime.
+   * Automated negative CI suites assert that any outbound network or credential discovery attempt triggers an immediate test failure.
+2. **MCP Read-Only Tool Inventory & Zero Filesystem Access:**
+   * `smart_ads.transports.mcp` implements a strictly closed inventory of exact tool identifiers:
+     * `smart_ads.queries.get_campaign_performance_v1`
+     * `smart_ads.queries.get_adset_performance_v1`
+     * `smart_ads.queries.get_ad_performance_v1`
+     * `smart_ads.queries.get_intelligence_findings_v1`
+     * `smart_ads.reports.generate_recurrent_summary_v1`
+   * **Zero Filesystem Exposure:** The MCP server returns purely in-memory structured JSON. No file reading, writing, or path manipulation endpoints are exposed over MCP.
+   * Any mutation RPC, unlisted tool name, or write payload is rejected before any downstream handler invocation. CI negative fuzzing verifies fail-closed rejection.
 
 ---
 
@@ -111,36 +126,54 @@ ad_platform_api_version:
 def collect(request: CollectionRequest) -> CollectionResult:
     ...
 ```
-* **`CollectionRequest`:** Carries `binding_ref`, `resource_scope_ref`, `registry_snapshot_digest`, and ordered `requested_capabilities`.
+* **`CollectionRequest`:** Fully freezes the query universe:
+  * `request_id`: unique UUIDv4 string.
+  * `binding_ref`: opaque tenant binding reference.
+  * `resource_scope_ref`: authorized scope reference.
+  * `date_range`: `{ start_date: "YYYY-MM-DD", end_date: "YYYY-MM-DD" }`.
+  * `reporting_timezone`: IANA timezone string (e.g. `"America/Sao_Paulo"`).
+  * `resource_level`: `account | campaign | adset | ad`.
+  * `attribution_setting`: attribution window identifier.
+  * `breakdowns`: ordered list of breakdown strings.
+  * `requested_capabilities`: ordered list of capability refs.
+  * `registry_snapshot_digest`: SHA-256 digest of the authorized input registry state.
+* **`request_digest`:** Computed as SHA-256 over RFC 8785 canonical JSON bytes of `CollectionRequest`.
 * **`CollectionResult`:**
+  * `request_digest`: echoes input request digest.
+  * `registry_snapshot_digest`: echoes input registry snapshot digest.
   * `outcome_status`: strictly closed enum `complete | partial | failed`.
   * `capabilities_requested`: list of requested capability refs.
   * `capabilities_observed`: list of validated capability refs present in candidate.
-  * `registry_snapshot_digest`: echo of the authorized input registry snapshot digest.
   * `candidates`: list of validated, sanitized `analytics_landing/v1` observations.
   * `errors`: normalized local error classifications (fail closed).
 * **Invariants:**
   1. Accepts only opaque, authorized references.
   2. **Never leaks** raw provider payloads, API tokens, cleartext account IDs, provider request URLs, HTTP headers, or raw provider error bodies.
 
-### 4.3 Observation Presence Status & `unknown != zero`
-Every raw metric field in an observation carries an explicit observation presence classification, decoupled from downstream semantic certification:
-```text
-presence_status:
-  - observed                  # Explicitly returned by provider in payload (independent of certification)
-  - missing                   # Omitted from provider response object
-  - unproven_zero             # Zero returned in uncertified or ambiguous context
-  - timeout                   # Response timed out before metric delivered
-  - not_applicable_at_level   # Metric not supported by requested resource level/breakdown
-```
-*Invariant:* `unknown != zero`. A numerical value of zero is valid only when explicitly returned as `observed` in provider payloads.
+### 4.3 Observation Presence, Origin & Calculation Dimensions
+To eliminate ambiguity, observations and derivations are classified across four orthogonal dimensions:
+
+1. **`presence_status` (Base Observation Presence):**
+   * `observed`: Explicitly returned in payload by provider (independent of certification).
+   * `missing`: Omitted from provider response object.
+   * `unproven_zero`: Zero returned in uncertified or ambiguous context.
+   * `timeout`: Response timed out before metric was delivered.
+   * `not_applicable_at_level`: Metric not supported by requested resource level/breakdown.
+2. **`unknown_reason` (Non-Observed Diagnostic):**
+   * `null | provider_omitted | unverified_zero | connection_timeout | pagination_truncated | capability_unsupported`.
+3. **`metric_origin`:**
+   * `provider_collected | derived_computed | synthetic_fixture`.
+4. **`calculation_status` (Derived Metrics):**
+   * `computed | division_by_zero | missing_input | unproven_zero_input | non_computable`.
+
+*Invariant:* `unknown != zero`. In regression laws and truth tables, `unknown` denotes any non-observed state (`presence_status in { missing, timeout, unproven_zero }`). A numerical value of zero is valid only when explicitly returned as `observed`.
 
 ---
 
 ## 5. Metric Certification Model & The 65×23 Regression Law
 
-### 5.1 Capability Registry & Lifecycle States
-The engine maintains a capability registry defining five discrete capability lifecycle states:
+### 5.1 Capability Registry & Granular Lifecycle States
+The engine maintains a capability registry where each capability declares its own required metric set and resource scope. Capabilities transition through five discrete states:
 ```text
 capability_state:
   - declared          # Defined in schema/contracts, no test proof yet
@@ -150,23 +183,28 @@ capability_state:
   - deferred          # Valid capability postponed to future phase
 ```
 *Invariants:*
+* **Granular Evaluation:** Every `capability_definition` declares its own explicit `required_metrics` list. Capabilities are certified and promoted individually.
 * **7A Offline Certification** promotes capabilities strictly to `fixture_certified`. It **never** promotes a capability to `live_certified`.
 * Promotion to `live_certified` requires successful execution of 7B live verification against `independent_meta_reference_harness`.
 
 ### 5.2 Scoped Certification Records (7A vs 7B Evidence Discrimination)
-Every certification evaluation produces a `certification_record/v1`. To avoid temporal and causal deadlocks (e.g. 7A executing prior to storage creation), the record discriminates `evidence_kind`:
+Every certification evaluation produces a `certification_record/v1` discriminating `evidence_kind`:
 
 1. **For `evidence_kind: fixture_7a` (Offline Certification):**
-   * Keyed by: `(tenant_ref, binding_ref, resource_scope_ref, metric_semantic_ref, source_contract_ref, fixture_digest, mapping_version)`
+   * Keyed by: `(tenant_ref, binding_ref, resource_scope_ref, metric_semantic_ref, source_contract_ref, fixture_dataset_digest, mapping_rules_digest)`
    * Storage digests (`generation_id`, `generation_manifest_digest`) are `null`.
-   * Cryptographically binds the synthetic fixture digest and mapping rule version.
+   * Cryptographically binds:
+     * `parser_code_digest`: SHA-256 of parser implementation.
+     * `adapter_code_digest`: SHA-256 of adapter implementation.
+     * `mapping_rules_digest`: SHA-256 of mapping rule definitions.
+     * `fixture_dataset_digest`: SHA-256 of synthetic fixture dataset.
 
 2. **For `evidence_kind: live_7b` (Live Verification):**
    * Keyed by the full 9-tuple:
      $$(tenant\_ref,\ binding\_ref,\ account\_ref,\ resource\_scope\_ref,\ metric\_semantic\_ref,\ source\_contract\_ref,\ generation\_id,\ generation\_manifest\_digest,\ registry\_snapshot\_digest)$$
-   * Cryptographically binds the live generation manifest digest and the reference harness run digest.
+   * Cryptographically binds `generation_manifest_digest`, `reference_workload_ref`, and `reference_run_digest`.
 
-### 5.3 Per-Metric Verification States & Closed Success Criteria for `live_certified`
+### 5.3 Per-Metric Verification States & Closed Success Criteria
 ```text
 metric_verification_status:
   - VERIFIED      # Semantically valid and numerically verified against reference harness
@@ -182,13 +220,12 @@ reconciliation_outcome:
   - not_comparable
 ```
 
-* **Mandatory Core Metric Set for Live Promotion:**
-  `{ impressions, spend, clicks, reach, frequency, conversions, canonical_leads }`.
-* **Closed Promotion Invariant:** Promotion of a capability to `live_certified` requires that **100% of mandatory core metrics** achieve `metric_verification_status == VERIFIED` with `reconciliation_outcome in { exact_match, within_declared_tolerance }`. If any core metric produces `mismatch`, `not_comparable`, `UNRECONCILED`, `UNAVAILABLE`, or `BLOCKED`, the capability remains `fixture_certified` and live promotion is **strictly denied**.
+* **Closed Promotion Invariant for `live_certified`:**
+  Promotion of a capability to `live_certified` requires that **100% of the capability's declared `required_metrics`** achieve `metric_verification_status == VERIFIED` with `reconciliation_outcome in { exact_match, within_declared_tolerance }`. If any required metric produces `mismatch`, `not_comparable`, `UNRECONCILED`, `UNAVAILABLE`, or `BLOCKED`, the capability remains `fixture_certified` and live promotion is **strictly denied**.
 * A semantic discrepancy can **never** be classified as `DEGRADED`.
 
-### 5.4 7B Reconciliation Pairing (Source vs Canonical Identity)
-Because `pipeboard_hosted` and `independent_meta_reference_harness` declare distinct transport provider refs in their source metric identities, `certification_7b_record/v1` establishes a formal pairing contract:
+### 5.4 7B Dynamic Version Binding & Reconciliation Pairing
+`certification_7b_record/v1` dynamically binds the exact Meta API version selected in Gate 3:
 ```yaml
 reconciliation_pairing:
   canonical_metric_ref: metric:canonical_leads_v1
@@ -199,15 +236,17 @@ reconciliation_pairing:
     source_metric_ref: actions:lead
     source_contract_ref: opaque-driver-contract:<digest>
   reference_metric:
-    transport_provider_ref: independent_meta_reference_harness
+    reference_workload_ref: workload:meta_direct_verifier
     ad_platform_ref: meta
     source_metric_ref: actions:lead
-    source_contract_ref: api-version:v21.0
+    source_contract_ref: api-version:<gate3_selected_version>
+    implementation_kind: official_sdk
   tolerance_profile:
     max_absolute_delta: "0"
     max_relative_delta: "0.0000"
   reconciliation_outcome: exact_match
 ```
+*Invariant:* `reference_metric.source_contract_ref` must match the exact version attested in `gate3_selection_receipt/v1`.
 
 ### 5.5 The 65×23 Regression Law
 ```text
@@ -216,8 +255,9 @@ Canonical Business Leads       = 23
 ```
 * **Invariants:**
   1. `conversions` and `leads` have distinct `metric_semantic_ref` identifiers.
-  2. They are **never aliases**, **never fallbacks**, and **never derived from one another**.
-  3. Test suites must enforce counter-proofs: `(65, unknown)`, `(0, 23)`, and `(unknown, unknown)`.
+  2. Binds `action_type: lead`, 7-day click attribution window, and exact truth vector `(conversions=65, leads=23)`.
+  3. They are **never aliases**, **never fallbacks**, and **never derived from one another**.
+  4. Test suites must enforce counter-proofs: `(65, unknown)`, `(0, 23)`, and `(unknown, unknown)`.
 
 ### 5.6 Immutable Semantic Metric Identity
 A canonical base metric is defined by the immutable tuple:
@@ -231,11 +271,10 @@ A canonical base metric is defined by the immutable tuple:
 For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 * **Inputs:** Formally declared as an ordered list of certified base metrics.
 * **Presence Status:**
-  * `observed`: When all required base metric inputs are `observed`.
-  * `missing`: When any required base metric input is `missing` or `timeout`.
+  * `observed`: When all required base metric inputs have `presence_status == observed`.
+  * `missing`: When any required base metric input has `presence_status in { missing, timeout, unproven_zero }`.
   * `not_applicable_at_level`: When any required base metric input is `not_applicable_at_level`.
 * **Calculation Availability & Zero Denominator Rule:**
-  * `calculation_status`: `computed | division_by_zero | missing_input | non_computable`.
   * When a denominator is zero (e.g. 0 impressions for CTR, 0 conversions for CPA), the engine returns `value: null` with `calculation_status: division_by_zero`.
   * `float`, `NaN`, and `Infinity` are strictly prohibited.
 * **Rounding:** Versioned rounding mode and decimal precision explicitly recorded.
@@ -272,7 +311,7 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │                                                                        │
 │ 4. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
 │    ├── Written to temporary generation file                            │
-│    ├── Embeds generation_id and curation_execution_digest in rows      │
+│    ├── Embeds generation_id, curation_digest, presence & origin columns│
 │    ├── Rows sorted lexicographically by fact_key                       │
 │    ├── Enforces primary key uniqueness (zero duplicates allowed)       │
 │    ├── Computes physical_parquet_digest and logical_row_digest         │
@@ -290,9 +329,9 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 
 ### 6.1 Long Fact Parquet Grain & Fact Key
 The primary `fact_key` uniquely identifies each row within a partition:
-$$\text{fact\_key} = (\text{binding\_ref},\ \text{account\_ref},\ \text{resource\_ref},\ \text{resource\_level},\ \text{metric\_date},\ \text{metric\_semantic\_ref},\ \text{source\_metric\_ref},\ \text{attribution\_ref},\ \text{breakdown\_signature})$$
+$$\text{fact\_key} = (\text{binding\_ref},\ \text{account\_ref},\ \text{resource\_ref},\ \text{resource\_level},\ \text{metric_date},\ \text{metric_semantic_ref},\ \text{source_metric_ref},\ \text{attribution_ref},\ \text{breakdown_signature})$$
 
-Full storage schema:
+Full storage schema (persisting presence and calculation dimensions):
 ```text
 binding_ref
 account_ref
@@ -306,6 +345,10 @@ unit
 currency
 attribution_ref
 breakdown_signature
+presence_status
+unknown_reason
+metric_origin
+calculation_status
 collected_at
 adapter_version
 semantic_contract_version
@@ -315,14 +358,14 @@ curation_execution_digest
 
 *Invariants:*
 * Any collision on `fact_key` within a partition generation represents an integrity failure and fails closed (duplicate insertion rejected).
-* Fact rows store `generation_id` and `curation_execution_digest` (no circular preimages).
+* Fact rows store `generation_id`, `curation_execution_digest`, `presence_status`, and `calculation_status`, ensuring `unknown != zero` is permanently preserved in storage.
 * `analysis_execution_digest` is decoupled from storage, allowing re-analysis of the same immutable Parquet generation under new policies without storage mutation.
 
 ### 6.2 Strict Numeric Typing & RFC 8785 Canonical Representation
 * Counts: integers (`int64`).
-* Money: integer minor currency units (e.g. BRL centavos) + ISO-4217 currency code; or exact `Decimal`.
+* Money: integer minor currency units (e.g. BRL centavos) + ISO-4217 currency code; or exact `Decimal` formatted as canonical string without trailing zeros or scientific notation (`"123.45"`).
 * **Prohibition:** `float`, `NaN`, and `Infinity` are strictly forbidden in storage and contracts.
-* **Canonical Hashing Projection:** To satisfy RFC 8785 §3.1 (which restricts native JSON numbers to IEEE-754 double precision), numeric values in row digests are projected into typed string representations `{"_type": "int64", "value": "12345"}` or `{"_type": "decimal", "value": "123.4500"}` prior to JCS SHA-256 computation.
+* **Canonical Hashing Projection:** To satisfy RFC 8785 §3.1 (which restricts native JSON numbers to IEEE-754 double precision), numeric values in row digests are projected into typed string representations `{"_type": "int64", "value": "12345"}` or `{"_type": "decimal", "value": "123.45"}` prior to JCS SHA-256 computation.
 
 ### 6.3 Generation Manifest & Deterministic Row Ordering
 * **Deterministic Row Ordering:** Rows within a generation partition are strictly sorted lexicographically by `fact_key` before computing `logical_row_digest` via RFC 8785 canonical JSON array serialization.
@@ -394,6 +437,7 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
       "source_repository": "mbras-tech/mbras-campaigns",
       "source_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
       "source_path": "scripts/operator/conductor.py",
+      "selector_kind": "ast_symbol",
       "source_symbol": "conduct_offline_run",
       "source_digest": "sha256:<64_hex_chars>",
       "system_id": "operator-core",
@@ -412,7 +456,10 @@ Immediately following Gate 2, the formal decomposition manifest will be generate
 ```
 
 * **Normative Hashing Standard:** All JSON digests are computed strictly according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**.
-* **Source Digest Preimage:** `source_digest` is computed as the SHA-256 of the AST-extracted UTF-8 bytes of `source_symbol`'s definition at `source_path` in `source_sha`.
+* **Multi-Kind `source_digest` Preimage Specification:**
+  * For `selector_kind: whole_file`: SHA-256 over raw UTF-8 bytes of the file at `source_path` in `source_sha`.
+  * For `selector_kind: ast_symbol`: SHA-256 of AST unparsed UTF-8 bytes of `source_symbol` definition at `source_path` in `source_sha`.
+  * For `selector_kind: text_region`: SHA-256 of exact byte slice `[start_byte, end_byte]` at `source_path` in `source_sha`.
 * **Digest Preimage:** `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the entire manifest object excluding the `manifest_digest` property.
 * **Closed Enums:**
   * `target_repository`: `aiconnai/smart-ads | mbras-tech/mbras-campaigns | limaronaldo/hermes-ronaldo | runtime-private | none`
@@ -470,11 +517,11 @@ smart-ads/
 │       │   └── v1/
 │       ├── audit/                     # Append-only audit logger and event envelopes
 │       └── transports/
-│           └── mcp/                   # MCP server for Hermes (protocol frozen, library evaluated at impl)
+│           └── mcp/                   # Closed inventory read-only MCP server for Hermes
 └── tests/
     ├── unit/                          # Pure intelligence rule tests over truth tables
     ├── contract/                      # Schema validations and fail-closed property tests
-    ├── certification_7a/              # Pipeboard offline mapping & 65×23 regression law
+    ├── certification_7a/              # Hermetic offline certification & 65×23 regression law
     ├── analytics/                     # DuckDB view queries and ratio calculations
     ├── integration/                   # Atomic Parquet generation and rebuild benchmarks
     ├── security/                      # Ported security invariants (umask, redaction, symlink)
@@ -504,12 +551,13 @@ flowchart TD
     (Path + Symbol 4-Tuple Mapping)"]
 
     DELIV_MODE -->|Autonomous Engine| AUTON_GATE["Autonomous Eligibility Gate:
-    (a) P0 Fix on Legacy Ledger
-    (b) Active Reviewer Attestation
-    (c) Worktree Isolation Enforced"]
+    (a) P0 Fix on Legacy Ledger Verified
+    (b) Active Reviewer Attestation (sonnet-5-medium)
+    (c) Worktree Isolation Enforced
+    (d) Controller Invariants Passing"]
 
     AUTON_GATE -->|Pass| DELIV_AUTON["Emit delivery_mode_decision_receipt/v1 (autonomous mode + evidence)"] --> DEC_MAN
-    AUTON_GATE -->|Fail| FROZEN["Fail Closed: frozen_human_only"] --> DELIV_REC
+    AUTON_GATE -->|Fail| FROZEN["Fail Closed: frozen_human_only"] --> WAIT_HUMAN["[WAITING_HUMAN_GATE: Explicit Manual Mode Decision Required]"] --> DELIV_REC
 
     DEC_MAN --> PR1["3. PR 1 (Smart Ads): Packaging (src/), Schemas,
     Semantic Metric Registry & ProviderPort"]
@@ -522,7 +570,7 @@ flowchart TD
     & Truth Table Edge Cases"]
 
     PR2 --> PR3["5. PR 3 (Smart Ads): Pipeboard Hosted Adapter Offline,
-    Capability Registry & 7A Offline Certification (CI)"]
+    Capability Registry & 7A Hermetic Offline Certification (CI)"]
 
     PR3 --> PR4["6. PR 4 (Smart Ads): landing/ Atomic Parquet Generation
     & curation_execution/v1 Lookback"]
@@ -605,7 +653,7 @@ flowchart TD
     RETIRE_GATE --> AUTH_RETIRE["[HUMAN AUTHORIZATION: EXECUTE RETIREMENT]
     Emits retirement_authorization_receipt/v1"]
 
-    AUTH_RETIRE --> RETIRE_EXEC["19. Decommission Legacy Direct Path"]
+    AUTH_RETIRE --> RETIRE_EXEC["19. Decommission legacy direct read path only"]
 
     RETIRE_EXEC --> RETIRE_VERIF["20. Post-Retirement Verification Window"]
 
@@ -618,8 +666,43 @@ flowchart TD
 
 ---
 
-## 12. Tripartite Cutover Readiness Manifest & Attestation Envelopes
+## 12. Tripartite Cutover Readiness Manifest & Verifiable Envelope Contracts
 
+### 12.1 Standard Authorization & Execution Receipt Schemas
+All intermediate authorization and execution receipts conform to generic verifiable schemas:
+
+```json
+{
+  "$schema": "smart_ads/authorization_receipt/v1",
+  "receipt_id": "receipt:auth-00000000-0000-4000-8000-000000000000",
+  "receipt_type": "authorization",
+  "action_name": "gate3_selection",
+  "authorizer_principal_ref": "principal:operator-authorized",
+  "authorized_sha": "<commit_sha_40_chars>",
+  "predecessor_receipt_digest": "sha256:<64_hex_chars>",
+  "single_use_nonce": "nonce:00000000-0000-4000-8000-000000000000",
+  "issued_at": "<ISO-8601-TIMESTAMP>",
+  "expires_at": "<ISO-8601-TIMESTAMP>",
+  "status": "pending"
+}
+```
+
+```json
+{
+  "$schema": "smart_ads/execution_receipt/v1",
+  "receipt_id": "receipt:exec-00000000-0000-4000-8000-000000000000",
+  "receipt_type": "execution",
+  "action_name": "workload_identity_provisioning",
+  "executor_principal_ref": "principal:cell-executor",
+  "authorization_receipt_digest": "sha256:<64_hex_chars>",
+  "input_state_digest": "sha256:<64_hex_chars>",
+  "output_state_digest": "sha256:<64_hex_chars>",
+  "executed_at": "<ISO-8601-TIMESTAMP>",
+  "status": "success"
+}
+```
+
+### 12.2 Tripartite Cutover Readiness Manifest (`MIGRATION_MANIFEST.json`)
 The `MIGRATION_MANIFEST.json` and its companion signed attestation are generated **prior to Gate 4** to attest readiness. Gate 4 subsequently references both the immutable `manifest_digest` and `attestation_digest`:
 
 ```json
@@ -663,7 +746,7 @@ The `MIGRATION_MANIFEST.json` and its companion signed attestation are generated
 }
 ```
 
-Companion Signed Attestation Envelope (`readiness_attestation.json`):
+### 12.3 Signed Attestation Envelope (`readiness_attestation.json`)
 ```json
 {
   "attestation_schema_version": "smart_ads/readiness_attestation/v1",
@@ -671,8 +754,10 @@ Companion Signed Attestation Envelope (`readiness_attestation.json`):
   "subject_manifest_digest": "sha256:<64_hex_chars>",
   "authorization_ref": "receipt:auth-readiness-attestation-01",
   "attestor_principal_ref": "principal:operator-authorized",
-  "issued_at": "<ISO-8601-TIMESTAMP>",
-  "signature_or_receipt_ref": "receipt:00000000-0000-4000-8000-000000000000"
+  "signature_algorithm": "ed25519",
+  "public_key_ref": "key:operator-ed25519-public-01",
+  "signature_bytes_base64": "<base64_encoded_signature>",
+  "issued_at": "<ISO-8601-TIMESTAMP>"
 }
 ```
 
@@ -680,7 +765,7 @@ Companion Signed Attestation Envelope (`readiness_attestation.json`):
   * All JSON digests are computed strictly according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**.
   * `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the manifest object excluding the `manifest_digest` property.
   * `subject_manifest_digest` in the attestation envelope equals `manifest_digest` identically.
-  * `attestation_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the attestation object excluding `attestation_digest`.
+  * `attestation_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the attestation object excluding `attestation_digest` and `signature_bytes_base64`.
 
 ---
 
