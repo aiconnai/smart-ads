@@ -70,6 +70,7 @@ certification evidence.
   "profile_id": "smart_ads_7a_hermetic_linux_amd64_oci_v1",
   "runtime_kind": "oci",
   "platform": "linux/amd64",
+  "rootfs_read_only": true,
   "oci_image_digest": "sha256:<64_lowercase_hex>",
   "runner_binary_digest": "sha256:<64_lowercase_hex>",
   "exact_environment": {
@@ -107,21 +108,24 @@ the supervisor is placed under this profile.
 unique case set must equal exactly:
 
 ```text
+credential_paths_denied
 env_is_exact_allowlist
-inherited_fd_denied
-socket_denied
-process_creation_denied
-host_proc_denied
-host_sys_denied
 host_dev_denied
 host_home_denied
-credential_paths_denied
+host_proc_denied
+host_sys_denied
+inherited_fd_denied
+process_creation_denied
+socket_denied
 write_outside_tmp_denied
 ```
 
 Every case must be `passed`; missing, extra, duplicate, skipped, inconclusive,
 or failed cases block 7A. The report binds the sandbox, image, runner, wheel,
-and test-suite digests.
+and test-suite digests. The case list above is sorted by raw UTF-8 lexical byte
+order and that exact order is signed. Runtime evidence records the effective
+read-only rootfs and writable-mount inventory; the negative write case attempts
+creation in a non-`/tmp` rootfs path and must observe denial.
 
 ### 3.3 MCP Deny-Before-I/O Boundary
 
@@ -305,13 +309,23 @@ Purpose-specific admission is fail-closed:
 | Purpose | Required capability state | Required evidence before any credential or RPC |
 |---|---|---|
 | `fixture_7a` | `declared` or `fixture_certified` | sealed sandbox and fixture locators; network is forbidden |
-| `live_verification_7b` | `fixture_certified` or `live_certified` | Gate 3 selection, workload-identity execution, deployment execution, and live-call authorization locators for the same run/query |
-| `operational_read` | `live_certified` | workload/deployment execution and active provider-read authorization locators for the same cell and scope |
+| `live_verification_7b` | `fixture_certified` or `live_certified` | same-run `legacy_step2_authorization_receipt/v1` prerequisite and Gate 3 selection; completed authorization + reservation + execution + consumption proofs for workload identity and deployment; and the current live-call authorization plus successful pre-I/O reservation for this exact admitted query |
+| `operational_read` | `live_certified` | same-run `legacy_step2_authorization_receipt/v1` prerequisite; exact current `live_certification_transition/v1` and `live_certification_certificate/v1` locators; completed workload/deployment effect proofs; and the current provider-read authorization plus successful pre-I/O reservation for this exact admitted query/cell/scope |
 
 `requested_capabilities` is non-empty, unique, and a subset of the resolved
-driver snapshot. Every evidence locator is resolved and validated before
-credential lookup, token decryption, socket creation, or RPC. Failure emits a
-local admission error with all external-I/O counters equal to zero.
+driver snapshot. Every prerequisite and every current authorization/reservation
+locator is resolved and validated before credential lookup, token decryption,
+socket creation, or RPC. The execution and consumption records for the current
+provider call are necessarily emitted only after that reserved call terminates;
+they must then complete the same four-record effect proof before its result can
+enter certification, curation, or any downstream gate. Failure before dispatch
+emits a local admission error with all external-I/O counters equal to zero.
+
+The legacy Step 2 receipt is necessary historical governance evidence, never
+sufficient live authority. Both live purposes resolve it against the current
+migration run before credential or network access. Operational admission also
+resolves the current signed certification transition and its certificate
+locator; capability-state text or a registry enum alone is insufficient.
 
 The Phase 1 native request must omit action-attribution parameters entirely,
 including `action_attribution_windows` and `action_breakdowns`. Their presence,
@@ -363,6 +377,41 @@ Derived metrics use `presence_status: not_applicable`; only
 `calculation_status: computed` carries a value. All other combinations fail
 schema validation. An observed zero is valid; an unknown value is never
 coerced to zero.
+
+The closed semantic enums are:
+
+```text
+metric_origin: provider_observation | derived_formula
+presence_status: observed | missing | unproven_zero | timeout |
+                 not_applicable_at_level | retracted_tombstone |
+                 not_applicable
+unknown_reason: provider_omitted | provider_timeout | zero_not_proven |
+                metric_not_applicable_at_level | source_retracted |
+                input_missing | input_unproven | division_by_zero | null
+calculation_status: not_applicable | computed | input_missing |
+                    input_unproven | division_by_zero
+```
+
+The following matrix is exhaustive; an unlisted combination rejects:
+
+| `metric_origin` | presence/calculation state | `unknown_reason` | value/type/unit/currency |
+|---|---|---|---|
+| `provider_observation` | `observed` / `not_applicable` | `null` | non-null closed numeric union; count=`int64_count/count/null`, money=`int64_minor_currency/minor_currency/<query currency>`, ratio=`decimal_ratio/ratio/null` |
+| `provider_observation` | `missing` / `not_applicable` | `provider_omitted` | all null |
+| `provider_observation` | `unproven_zero` / `not_applicable` | `zero_not_proven` | all null |
+| `provider_observation` | `timeout` / `not_applicable` | `provider_timeout` | all null |
+| `provider_observation` | `not_applicable_at_level` / `not_applicable` | `metric_not_applicable_at_level` | all null |
+| `provider_observation` | `retracted_tombstone` / `not_applicable` | `source_retracted` | all null |
+| `derived_formula` | `not_applicable` / `computed` | `null` | non-null output required by the formula signature |
+| `derived_formula` | `not_applicable` / `input_missing` | `input_missing` | all null |
+| `derived_formula` | `not_applicable` / `input_unproven` | `input_unproven` | all null |
+| `derived_formula` | `not_applicable` / `division_by_zero` | `division_by_zero` | all null |
+
+Null precedence is deterministic: a tombstone applies before formula
+evaluation; otherwise `provider_timeout > provider_omitted > zero_not_proven >
+metric_not_applicable_at_level`; derived dependency propagation maps any
+timeout or missing input to `input_missing`, any unproven zero to
+`input_unproven`, and tests division by zero only after every input is observed.
 
 ## 5. Certification & Metric Semantics
 
@@ -502,7 +551,9 @@ candidate_execution:
   adapter_code_digest: "sha256:<64_lowercase_hex>"
   parser_code_digest: "sha256:<64_lowercase_hex>"
   mapping_rules_digest: "sha256:<64_lowercase_hex>"
-  request_digest: "sha256:<64_lowercase_hex>"
+  native_request_projection: "<complete redacted native_request_projection/v1>"
+  native_request_digest: "sha256:<64_lowercase_hex>"
+  native_to_canonical_projection_algorithm_digest: "sha256:<64_lowercase_hex>"
   canonical_query_projection: "<complete normalized object>"
   canonical_query_projection_digest: "sha256:<64_lowercase_hex>"
   retrieved_at_utc: "<ISO-8601-UTC>"
@@ -516,7 +567,9 @@ reference_execution:
   reference_code_digest: "sha256:<64_lowercase_hex>"
   source_contract_ref: "api-version:<exact_gate3_selected_version>"
   implementation_kind: official_sdk
-  request_digest: "sha256:<64_lowercase_hex>"
+  native_request_projection: "<complete redacted native_request_projection/v1>"
+  native_request_digest: "sha256:<64_lowercase_hex>"
+  native_to_canonical_projection_algorithm_digest: "sha256:<64_lowercase_hex>"
   canonical_query_projection: "<complete normalized object>"
   canonical_query_projection_digest: "sha256:<64_lowercase_hex>"
   retrieved_at_utc: "<ISO-8601-UTC>"
@@ -543,6 +596,26 @@ Counts use `int64_count/count/null`; spend uses
 `int64_minor_currency/minor_currency/BRL`. Both sides must be observed and
 type-identical.
 
+Each side's closed `native_request_projection/v1` contains only endpoint,
+HTTP method, exact Gate-3 endpoint/API version (or the candidate's exact opaque
+driver endpoint/version identity), tenant-scoped resource refs, date range,
+level, sorted metrics, breakdowns, pagination, currency, and attribution
+omission state. It has `additionalProperties: false`; secrets, headers, URLs
+with authority/query strings, and raw provider identifiers are forbidden.
+The verifier recomputes `native_request_digest` from RFC 8785 bytes, runs the
+digest-pinned mapping/projection algorithm, and requires the resulting complete
+canonical projection to equal the canonical query byte-for-byte. Extra native
+parameters—including default-valued parameters—fail 7B.
+
+Every metric comparison contains a protected content-addressed
+`tolerance_profile_locator` resolving `tolerance_profile/v1`. The profile is
+closed by metric and numeric type and declares exact absolute and relative
+limits, decimal scale, rounding mode, and the reference-zero rule. Phase 1
+defaults to absolute zero and relative zero tolerance; any non-zero limit
+requires an explicit Gate-3-authorized profile bound to the same query, scope,
+and run. The verifier ignores asserted tolerance outcomes and recomputes them
+from the resolved profile and canonical values.
+
 The verifier ignores asserted deltas and recomputes:
 
 ```text
@@ -558,6 +631,21 @@ else:
 An unknown reference is `not_comparable`, never zero. Missing, extra,
 duplicated, partial, truncated, differently typed, noncanonical, negative, or
 out-of-tolerance evidence fails the entire 7B bundle and blocks shadow mode.
+
+Successful 7B does not mutate a registry enum in place. It produces a signed
+`live_certification_transition/v1` binding the successful 7B locator, exact
+prior immutable registry snapshot (`fixture_certified`), exact new immutable
+snapshot (`live_certified`), transition execution time, driver contract/query/
+scope/code/schema fingerprints, validity start/end, and `maximum_age_seconds`.
+The prior and new snapshot digests may differ only by the authorized capability
+transition and both snapshot signatures must verify. Its non-null
+`certificate_locator` resolves `live_certification_certificate/v1`, which
+repeats the transition locator, new snapshot locator, fingerprints, validity,
+and maximum age byte-identically; that exact locator is the sole operational
+certificate. Expiry, current key revocation,
+driver or query drift, scope/code/schema fingerprint change, registry
+supersession, or a new Gate-3 selection invalidates it and requires a fresh 7B
+and transition. Hosted availability remains unproven until this passes.
 
 ### 5.5 Synthetic 65x23 Regression Law
 
@@ -620,6 +708,17 @@ becomes the derived row's `source_metric_ref`. Derived certification inherits
 the worst input status in the closed order
 `BLOCKED < UNRECONCILED < UNAVAILABLE < DEGRADED < VERIFIED`.
 
+Definitions are admitted only as one content-addressed
+`formula_bundle/v1`. The verifier builds the complete directed dependency
+graph before evaluation, rejects a direct self-reference, any indirect cycle,
+unknown dependency, duplicate output, or dependency outside the bundle/base
+metric registry, then computes the unique deterministic topological order using
+raw UTF-8 `metric_semantic_ref` as the tie-break among ready nodes. The signed
+bundle records that recomputed order and bundle digest. Mandatory negative
+fixtures cover direct self-reference, a two-node cycle, a longer cycle, an
+unknown dependency, duplicate output, and an asserted topological order that
+differs from recomputation; every fixture must reject.
+
 ## 6. Data Plane
 
 ### 6.1 Lifecycle and Long Fact Grain
@@ -651,12 +750,18 @@ The canonical fact key is:
 
 Rows persist the key plus the numeric union, presence/calculation/origin
 states, `collected_at_utc`, adapter and semantic versions, `generation_id`,
-`curation_execution_digest`, and `row_digest`. Duplicate fact keys in a
-promoted generation are forbidden.
+`curation_execution_digest`, `semantic_observation_digest`, and `row_digest`.
+Duplicate fact keys in a promoted generation are forbidden.
 
-`row_digest` is SHA-256 over RFC 8785 bytes of one canonical row excluding
-`row_digest`. Numeric values use tagged string objects before JCS. It is never
-the aggregate generation digest.
+`semantic_observation_digest` is SHA-256 over the RFC 8785 stable observation
+projection: the complete fact key, typed numeric union, presence/calculation/
+origin/unknown states, canonical `collected_at_utc`, source observation
+identity, adapter semantic version, and tombstone state. It excludes
+`generation_id`, `curation_execution_digest`, physical path/file/row-group
+coordinates, Parquet encoding/compression, ingestion/materialization times,
+and every other materialization metadata field. `row_digest` separately hashes
+the complete physical canonical row excluding only `row_digest`; it may bind
+those materialization fields and is never used as a semantic tie-break.
 
 The numeric digest projection is exactly
 `{"_type":"<value_type>","value":"<raw_numeric_value>"}`; null remains JSON
@@ -686,10 +791,11 @@ For equal fact keys, precedence is:
 
 1. later `collected_at_utc`;
 2. at equal time, `retracted_tombstone` over a non-tombstone; and
-3. otherwise, lexicographically greater `row_digest`.
+3. otherwise, lexicographically greater `semantic_observation_digest`.
 
-The incoming and historical rows use the same row-digest preimage. Tombstones
-carry null numeric/unit/currency values.
+Incoming and historical rows use the identical stable-observation projection.
+Regeneration, compaction, or re-curation of the same observation cannot change
+the winner. Tombstones carry null numeric/unit/currency values.
 
 ### 6.3 Atomic Generations and Snapshots
 
@@ -759,6 +865,28 @@ The database is rebuilt only from the bound snapshot and exact analytical
 identity. Missing or different engine, extension, setting, view, or query
 evidence makes replay non-equivalent.
 
+`analysis_execution/v1` also contains a typed locator to the exact snapshot,
+an ordered typed locator set for immutable result objects, and a
+`canonical_result_digest` recomputed over their sorted RFC 8785 projections.
+Each `finding/v1` binds exactly one analysis-execution locator, a stable finding
+key, finding type/status, complete evidence/result locators, policy locator,
+and `canonical_finding_digest`; it cannot point directly at a mutable database.
+Each `certification_record/v1` binds the exact finding locator set it certifies,
+the certification kind, decision, verifier profile, and canonical certification
+output digest. `report_execution/v1` binds the snapshot, analysis, ordered
+finding, and certification locators plus template/policy/render identities and
+canonical report-input and report-result digests. Verification requires the
+typed locator graph `snapshot -> analysis -> finding -> certification ->
+report` to be same-run and digest-consistent; skipped, reverse, untyped, or
+cross-snapshot edges reject.
+
+Snapshot publication, certification, and report roots transitively pin every
+resolved generation manifest, Parquet object, analysis result, finding,
+certification, policy, template, and report result. Retention may release an
+object only after no live root reaches it and a signed retention proof
+recomputes the graph; a report artifact cannot outlive its replay inputs by
+accident.
+
 Zero raw payload persistence reduces exposure but does not eliminate LGPD/GDPR
 obligations for purpose, necessity, retention, access, security, and
 accountability.
@@ -787,6 +915,17 @@ states, currencies, and scopes used by admission. Reference, hash, account, or
 scope collision fails closed. `src/smart_ads` never exposes private account
 keys or resolves a caller-selected registry snapshot.
 
+Every persisted `resource_ref` is an opaque tenant-scoped keyed derivation:
+`base32(HMAC-SHA-256(tenant_resource_key, mapping_version || 0x00 ||
+ad_platform_ref || 0x00 || resource_level || 0x00 || raw_provider_id))` with a
+closed `resource_ref_mapping_version`, non-secret `key_identity`, and domain
+separator in the signed registry snapshot. The private reversible mapping, raw
+provider ID, and key bytes remain only in the registry boundary. Admission
+checks uniqueness in both directions; any derived-ref collision or mapping
+version/key mismatch fails closed. Raw provider IDs are forbidden in facts,
+Parquet, snapshots, analysis/findings/reports, audit/application logs, error
+objects, and MCP requests/responses.
+
 ## 9. Migration Decomposition Contract
 
 ### 9.1 Factual Baseline
@@ -812,6 +951,7 @@ After Gate 2 and the signed manual delivery decision,
     "$schema": "smart_ads/source_inventory/v1",
     "repository": "mbras-tech/mbras-campaigns",
     "commit_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+    "declared_paths": ["scripts/operator/conductor.py"],
     "declared_paths_digest": "sha256:<64_lowercase_hex>",
     "inventory_digest": "sha256:<64_lowercase_hex>",
     "items": [
@@ -823,8 +963,10 @@ After Gate 2 and the signed manual delivery decision,
           "symbol_name": "conduct_offline_run",
           "parser_abi": "python:3.12_ast_v1",
           "byte_range": [597, 1350],
-          "raw_span_digest": "sha256:bfa964d57d212b5dd4a21d2e842e2a32709ac1bb45b04f02160ccd3f22243dd8"
+          "raw_span_digest": "sha256:bfa964d57d212b5dd4a21d2e842e2a32709ac1bb45b04f02160ccd3f22243dd8",
+          "ast_digest": "sha256:28021585f9364831d3bf470d89757ce581f5c527cd6af63efc7ca5e8ba1645f3"
         },
+        "source_selector_digest": "sha256:<64_lowercase_hex>",
         "source_digest": "sha256:28021585f9364831d3bf470d89757ce581f5c527cd6af63efc7ca5e8ba1645f3",
         "coverage_role": "production_source"
       }
@@ -845,6 +987,8 @@ After Gate 2 and the signed manual delivery decision,
       "system_owner": "legacy-operator",
       "target_repository": "aiconnai/smart-ads",
       "target_layer": "core_engine",
+      "target_path": "src/smart_ads/application/conductor.py",
+      "target_selector": null,
       "migration_mode": "reimplement_clean",
       "decision_status": "approved",
       "preserved_invariants": ["fail_closed_on_missing_evidence", "digest_provenance"],
@@ -879,6 +1023,10 @@ superseded digest.
 `inventory_digest`. `manifest_digest` hashes RFC 8785 bytes of the full
 decomposition manifest excluding only `manifest_digest`. Declared paths and
 inventory items are unique and sorted by raw UTF-8 identity before hashing.
+`declared_paths` is the complete canonical array of normalized repository-
+relative paths, sorted by raw UTF-8 bytes. `declared_paths_digest` is exactly
+`SHA-256(RFC8785(declared_paths))`; no wrapper object, glob, implicit directory,
+or asserted-only digest is accepted.
 
 Closed destinations are `aiconnai/smart-ads`,
 `mbras-tech/mbras-campaigns`, `limaronaldo/hermes-ronaldo`,
@@ -890,8 +1038,23 @@ Closed destinations are `aiconnai/smart-ads`,
 Closed target layers are `core_engine`, `data_plane`, `repository_tooling`,
 `legacy_governance`, `consumer_integration`, and `null`. Every disposition
 entry resolves its `inventory_id` back to the immutable source baseline and
-therefore binds the authority tuple `(source_sha, source_path, source_symbol,
-source_digest)` without duplicating or weakening it.
+therefore binds the complete `source_selector` object and its digest, not a
+lossy source-symbol tuple. `ast_symbol` binds symbol name, parser ABI, half-open
+range, raw-span digest, AST digest, and source digest; `whole_file` binds the
+full byte range, raw/source digests, and file mode; `text_region` binds the
+half-open range, raw/source digests, and selector ABI. Missing, extra, or
+inconsistent selector fields reject.
+
+Every disposition also has a normalized repository-relative `target_path` and
+optional closed `target_selector`. Paths use `/`, contain no empty, `.`, `..`,
+absolute, drive-prefix, NUL, percent-encoded traversal, or symlink-escape
+component, and must remain under the selected destination repository/layer.
+`target_path: null` is allowed only for a nonimplementation disposition;
+implementation dispositions require it. A null path still requires the closed
+destination/mode fields to state why no implementation target exists. The
+human-readable destination table below is non-authoritative: each destination
+must be encoded and validated through `target_repository`, `target_layer`,
+`target_path`, and `target_selector` fields.
 
 The manifest must individually cover ledger/controller, Codex gate/scanners,
 funnel validation, Google canary, security invariants, disablement packets, and
@@ -980,13 +1143,15 @@ flowchart TD
     DEPEXEC --> LIVEAUTH["Human authorization for 7B live calls"]
     LIVEAUTH --> CERT7B["7B Pipeboard vs independent Meta reference"]
     CERT7B -->|failure| STOP7B["Fail closed; shadow denied"]
-    CERT7B -->|all three metrics verified| SHADOWAUTH["Human shadow-mode authorization"]
+    CERT7B -->|all three metrics verified| LIVECERT["Signed fixture_certified to live_certified registry transition"]
+    LIVECERT --> SHADOWAUTH["Human shadow-mode authorization"]
     SHADOWAUTH --> SHADOW["Hermes shadow mode"]
     SHADOW --> ACCEPT["Independent 5-day and 4-week acceptance series"]
     ACCEPT --> RB_AUTH["Human rollback-test authorization"]
     RB_AUTH --> ROLLBACK["Execute rollback_test_protocol/v1"]
     ROLLBACK --> READY["Generate tripartite readiness manifest"]
-    READY --> ATTESTAUTH["Human readiness-attestation authorization"]
+    READY --> VALIDATE["Recursive validation emits manifest_validation_record PASS"]
+    VALIDATE --> ATTESTAUTH["Human readiness-attestation authorization"]
     ATTESTAUTH --> ATTEST["Reserve, attest, and consume authorization"]
     ATTEST --> G4["GATE 4 emits sole single-use cutover authorization"]
     G4 --> CUTOVER["Reserve, execute cutover, emit execution and consumption records"]
@@ -1038,18 +1203,23 @@ healthy legacy fallback. It then:
 
 1. dispatches 200 successful gateway reads at 10 requests/second;
 2. records a signed toggle-initiation event;
-3. waits for a signed Hermes ACK proving the flag is false and a signed drain
-   completion event;
+3. continuously injects uniquely identified reads through the toggle/ACK/drain
+   boundary, observes their actual routed completion, and waits for a signed
+   Hermes ACK proving the flag is false plus a signed drain completion event;
 4. requires the entire interval from toggle initiation through ACK and drain
    completion to be at most 500 ms; and
 5. dispatches 400 successful direct-legacy reads at 10 requests/second.
 
-The 60 seconds measure cumulative active dispatch time and exclude the paused
-transition interval. Pre/post sets are derived from signed event timestamps and
+The 60 seconds measure cumulative active dispatch time and exclude only the
+transition interval for the 200/400 rate calculation; boundary probes continue
+during that interval and are included in zero-loss/routing verification. Pre,
+transition, and post sets are derived from signed event timestamps and actual
 route observations, never fixed query-sequence assumptions. Every query log
 records unique ID, dispatch/completion time, route, latency, status, and event
-boundary membership. The receipt binds prestate, toggle, ACK, drain, final
-flag readback, detailed log, counts `200 + 400`, zero loss, and zero errors.
+boundary membership. Event-derived ID-set equality proves every injected read
+completed exactly once on an allowed route, with no gap or duplicate. The
+receipt binds prestate, toggle, ACK, drain, final flag readback, detailed log,
+counts `200 + 400`, zero loss, zero errors, and the at-most-500-ms transition.
 
 ### 11.3 Stabilization, Retirement, and Completion
 
@@ -1060,6 +1230,13 @@ source, feature-flag/routing evidence from two independent sources, telemetry
 source, and monitor heartbeat. The record contains the ordered bucket locators,
 coverage start/end, `bucket_count: 336`, and `gap_count: 0`.
 
+Coverage starts at the exact effective cutover time recorded by the matching
+cutover consumption/execution pair, with no selectable delay. Bucket 0 is the
+half-open interval from that instant to one hour later; the next 335 buckets
+continue in exact one-hour increments. Thus a partial wall-clock hour is still
+a full relative one-hour bucket, and no rounding to civil-hour boundaries is
+permitted. The last interval ends exactly 336 hours after effective cutover.
+
 After stabilization, a separate human gate may authorize retirement of the
 direct legacy read path only. Write Plane and `/ibvi-ads` remain active.
 
@@ -1068,6 +1245,12 @@ hourly buckets after the retirement execution receipt. Every bucket proves
 zero calls to direct legacy read endpoints, gateway traffic greater than zero,
 healthy independent monitors, exact endpoint inventory, and complete routing
 coverage. The record requires `bucket_count: 168` and `gap_count: 0`.
+
+Retirement verification starts at the exact retirement effective time proved
+by the matching retirement authorization/reservation/execution/consumption
+records, not at a later convenient hour. Its 168 relative half-open one-hour
+buckets handle partial first/last civil hours identically and end exactly 168
+hours later; no selectable gap is representable.
 
 `migration_completion_record/v1` is a signed terminal graph linking readiness,
 attestation, cutover authorization/execution/consumption, the 336-hour record,
@@ -1095,6 +1278,17 @@ lifecycle.
 Every other signed artifact refers to exactly one immutable
 `key_registry_snapshot_locator`. Unknown, unresolved, revoked, expired,
 role-incompatible, action-incompatible, or hash-inconsistent keys fail closed.
+
+The run-pinned registry remains immutable historical provenance but never
+establishes current authority for an effect. Immediately before every
+reservation, credential resolution, RPC, deployment, cutover, retirement, or
+other external effect, the verifier obtains a monotonically newer-or-equal
+`current_key_state/v1` under the external trust anchor, verifies its epoch and
+predecessor chain, and checks the historical signing key and every authority
+key against current lifecycle/revocation state. A revoked key, rolled-back or
+forked epoch, stale current-state proof, validity failure, or trust-anchor
+change fails before I/O. Artifact replay may still validate historical
+provenance while being ineligible to authorize a present effect.
 
 ### 12.2 Typed Artifact Locators and Gate 2 Genesis
 
@@ -1209,19 +1403,62 @@ decomposition_manifest
 delivery_mode_decision
 legacy_step2_authorization
 gate3_selection
-workload_identity_authorization
-workload_identity_execution
-deployment_config_authorization
-deployment_config_execution
-live_call_authorization
+workload_identity_effect_proof
+deployment_config_effect_proof
+live_call_7b_effect_proof
 certification_7b
-live_execution
+live_certification_transition
 seam_parity
-shadow_mode_authorization
+shadow_mode_effect_proof
 shadow_acceptance
-rollback_test_authorization
-rollback_test_execution
+rollback_test_effect_proof
 ```
+
+The manifest's tripartite target is structurally explicit:
+
+```json
+{
+  "tripartite_target": {
+    "legacy_side": {
+      "repository": "mbras-tech/mbras-campaigns",
+      "commit_sha": "<40_lowercase_hex>",
+      "provenance_locator": "<typed artifact_locator/v1>",
+      "artifact_digest": "sha256:<64_lowercase_hex>"
+    },
+    "canonical_side": {
+      "repository": "aiconnai/smart-ads",
+      "commit_sha": "<40_lowercase_hex>",
+      "provenance_locator": "<typed artifact_locator/v1>",
+      "artifact_digest": "sha256:<64_lowercase_hex>"
+    },
+    "consumer_side": {
+      "repository": "limaronaldo/hermes-ronaldo",
+      "commit_sha": "<40_lowercase_hex>",
+      "provenance_locator": "<typed artifact_locator/v1>",
+      "artifact_digest": "sha256:<64_lowercase_hex>"
+    },
+    "tripartite_digest": "sha256:<64_lowercase_hex>"
+  }
+}
+```
+
+For each side, the provenance object resolves the same repository/SHA and
+recomputes the same `artifact_digest`; the manifest field, locator digest,
+resolved-object digest, and Git/blob evidence must all be equal. The
+`tripartite_digest` is recomputed from the three complete side objects in the
+fixed order `legacy_side`, `canonical_side`, `consumer_side`.
+
+Every prerequisite external effect before Gate 4 is represented by an
+`effect_proof/v1` with four non-null typed locators:
+`authorization_locator`, `reservation_locator`, `execution_locator`, and
+`consumption_locator`. This applies at minimum to workload identity,
+deployment/config, the completed 7B live call, shadow activation, and rollback
+toggle/execution. Operator acceptance tokens and shadow acceptance are signed
+non-effect evidence under their own profiles; readiness attestation is produced
+after the manifest and is verified separately in section 12.6. The four
+objects must agree on run, action, subject, nonce, parameters, predecessor,
+current revocation proof, and successful terminal state. A bare execution or
+authorization locator never satisfies a readiness DAG slot.
 
 It does not contain its later attestation, Gate 4 authorization, cutover, or
 retirement artifacts. Manifest validation recursively resolves every locator
@@ -1229,6 +1466,16 @@ and verifies schema, content digest, signature profile, same run context, exact
 Git provenance, action, status, predecessor chain, and DAG slot. Missing,
 extra, duplicate, failed, superseded, unresolved, cross-run, cross-SHA, or
 predecessor-incoherent artifacts fail readiness.
+
+Recursive validation emits an immutable signed
+`manifest_validation_record/v1` containing the exact manifest locator/digest,
+run locator, validator binary/build/source/schema-bundle/profile-inventory
+digests, validation time, complete sorted resolved-locator set and graph digest,
+tripartite equality digest, effect-proof digest, and `validation_status: PASS`.
+PASS is permitted only after every reachable object and semantic predicate has
+been recomputed; warnings, unknown profiles, partial traversal, cache-only
+claims, or asserted child status fail. Revalidation produces a new record and
+cannot overwrite the old one.
 
 ### 12.6 Readiness Attestation and Gate 4
 
@@ -1238,12 +1485,17 @@ and consumes it exactly once. `readiness_attestation/v1` is valid only when:
 
 1. its run-context locator equals the manifest's;
 2. its manifest locator resolves to the exact manifest digest;
-3. its authorization subject contains the same locators;
-4. its authorization locator and nonce equal the execution and consumption
+3. its `manifest_validation_record_locator` resolves to PASS for that exact
+   manifest/run and validator identity;
+4. its authorization subject contains the same manifest and validation locators;
+5. its authorization locator and nonce equal the reservation, execution, and consumption
    records; and
-5. the attestor key/profile is authorized for this run and schema.
+6. the attestor key/profile is authorized for this run and schema under current
+   revocation state.
 
-Gate 4 verifies those equalities and itself emits the sole single-use
+Gate 4 independently resolves and verifies the same
+`manifest_validation_record/v1`, then verifies those equalities and itself
+emits the sole single-use
 `authorization_receipt/v1` for `cutover_execution` with subject
 `cutover_target`. There is no second authorization node between Gate 4 and
 cutover. Cutover reserves this nonce, executes the exact tripartite target, and
@@ -1252,36 +1504,100 @@ emits matching execution and consumption records.
 ### 12.7 Schema-Specific Verification Profiles
 
 A common primitive only canonicalizes, hashes, and verifies Ed25519. It never
-infers semantic fields. Each known schema has a closed profile defining digest
-field, signature field, signer role, time policy, domain, and semantic checks:
+infers semantic fields. The externally anchored, signed
+`artifact_contract_inventory/v1` is the closed registry of every signed or
+readiness-resolved artifact. Each entry has exactly these non-null fields:
+`schema`, `digest_json_pointer`, `signature_json_pointer`,
+`preimage_rule`, `signer_role`, `current_revocation_policy`, `time_policy`,
+`domain_prefix`, `semantic_predicate_id`, and `dag_slot`. The inventory's own
+bootstrap profile is pinned by `cell_trust_anchor_config/v1`; it cannot add
+itself or a new schema without a new externally signed inventory.
 
-| Profile | Schemas | Domain prefix |
-|---|---|---|
-| key registry | `key_authorization_registry/v1` | `SMART-ADS:KEY-REGISTRY:V1\n` |
-| run context | `migration_run_context/v1` | `SMART-ADS:RUN-CONTEXT:V1\n` |
-| Gate 2 | `gate2_approval_receipt/v1` | `SMART-ADS:GATE2-RECEIPT:V1\n` |
-| delivery decision | `delivery_mode_decision_receipt/v1` | `SMART-ADS:DELIVERY-MODE:V1\n` |
-| authorization | `authorization_receipt/v1` | `SMART-ADS:AUTH-RECEIPT:V1\n` |
-| execution | `execution_receipt/v1` | `SMART-ADS:EXEC-RECEIPT:V1\n` |
-| Gate 3 | `gate3_selection_receipt/v1` | `SMART-ADS:GATE3-RECEIPT:V1\n` |
-| daily acceptance | `daily_acceptance_token/v1` | `SMART-ADS:DAILY-ACCEPTANCE:V1\n` |
-| weekly acceptance | `weekly_acceptance_token/v1` | `SMART-ADS:WEEKLY-ACCEPTANCE:V1\n` |
-| shadow acceptance | `shadow_acceptance_record/v1` | `SMART-ADS:SHADOW-ACCEPTANCE:V1\n` |
-| rollback prestate | `rollback_prestate_record/v1` | `SMART-ADS:ROLLBACK-PRESTATE:V1\n` |
-| rollback ACK | `feature_flag_ack_record/v1` | `SMART-ADS:ROLLBACK-FLAG-ACK:V1\n` |
-| rollback drain | `rollback_drain_record/v1` | `SMART-ADS:ROLLBACK-DRAIN:V1\n` |
-| rollback completion | `rollback_test_receipt/v1` | `SMART-ADS:ROLLBACK-RECEIPT:V1\n` |
-| readiness | `readiness_attestation/v1` | `SMART-ADS:READINESS-ATTESTATION:V1\n` |
-| stabilization bucket | `stabilization_hour_bucket/v1` | `SMART-ADS:STABILIZATION-HOUR:V1\n` |
-| stabilization completion | `stabilization_period_completion_record/v1` | `SMART-ADS:STABILIZATION-COMPLETION:V1\n` |
-| retirement bucket | `retirement_hour_bucket/v1` | `SMART-ADS:RETIREMENT-HOUR:V1\n` |
-| retirement verification | `retirement_verification_record/v1` | `SMART-ADS:RETIREMENT-VERIFICATION:V1\n` |
-| completion | `migration_completion_record/v1` | `SMART-ADS:MIGRATION-COMPLETION:V1\n` |
+`P1` means SHA-256 over `domain_prefix || RFC8785(artifact)` after omitting only
+the value at `/integrity/content_digest` and the bytes at
+`/integrity/signature_base64`; algorithm, domain, key, registry locator,
+issuer, time, run, and payload remain in the preimage. `E` means validate the
+run-pinned historical registry plus monotonic current revocation/key state at
+effect time; `H` means validate historical issuance/validity for replay and
+apply `E` before the artifact can contribute to a new effect. These codes are
+literal expanded fields in the inventory, not verifier defaults.
 
-For each profile, content digest is SHA-256 over RFC 8785 bytes after omitting
-only that profile's digest value and signature bytes. Algorithm, domain, key,
-registry locator, issuer, time, run, and semantic payload remain signed. An
-unknown schema/profile is rejected before semantic processing.
+| Schema | Preimage | Signer role | Revocation/time | Domain prefix | Semantic predicate | DAG slot |
+|---|---|---|---|---|---|---|
+| `artifact_contract_inventory/v1` | P1 | external trust anchor | E / inventory validity | `SMART-ADS:ARTIFACT-CONTRACTS:V1\n` | closed unique profiles; bootstrap anchor | trust root |
+| `key_authorization_registry/v1` | P1 | external trust anchor | E / registry validity | `SMART-ADS:KEY-REGISTRY:V1\n` | unique key bytes/hash, roles/actions, monotonic epoch | key authority |
+| `current_key_state/v1` | P1 | external trust anchor | E / fresh-at-effect | `SMART-ADS:CURRENT-KEY-STATE:V1\n` | monotonic predecessor and no rollback/fork | current authority |
+| `gate2_approval_receipt/v1` | P1 | Gate-2 approver | H / issuance | `SMART-ADS:GATE2-RECEIPT:V1\n` | exact ADR Git identity and approved status | genesis |
+| `migration_run_context/v1` | P1 | run initializer | H / creation | `SMART-ADS:RUN-CONTEXT:V1\n` | unique run derived from Gate 2 | run context |
+| `delivery_mode_decision_receipt/v1` | P1 | delivery decision owner | H / issuance | `SMART-ADS:DELIVERY-MODE:V1\n` | manual only and exact ADR identity | delivery decision |
+| `legacy_step2_authorization_receipt/v1` | P1 | legacy Step-2 approver | E / issue-expiry | `SMART-ADS:LEGACY-STEP2:V1\n` | same run, approved; prerequisite not live authority | legacy Step 2 |
+| `decomposition_manifest/v1` | P1 | decomposition owner | H / generation | `SMART-ADS:DECOMPOSITION:V1\n` | full inventory set equality and dispositions | decomposition |
+| `sealed_sandbox_profile/v1` | P1 | security owner | H / profile validity | `SMART-ADS:SANDBOX:V1\n` | exact hermetic profile | GOV1/7A |
+| `wheel_boundary_report/v1` | P1 | build-boundary verifier | H / build execution | `SMART-ADS:WHEEL-BOUNDARY:V1\n` | exact wheel/RECORD/backend and tooling exclusion | GOV1/7A |
+| `negative_security_test_report/v1` | P1 | 7A verifier | H / execution | `SMART-ADS:NEGATIVE-SECURITY:V1\n` | exact lexical case set all passed | GOV1/7A |
+| `mcp_rejection_matrix_report/v1` | P1 | security verifier | H / execution | `SMART-ADS:MCP-REJECTION:V1\n` | exact matrix and zero-I/O counters | GOV1 |
+| `clock_attestation/v1` | P1 | cell clock attestor | E / maximum age | `SMART-ADS:CLOCK:V1\n` | bounded uncertainty and monotonic time | admission |
+| `private_registry_snapshot/v1` | P1 | registry publisher | E / snapshot validity | `SMART-ADS:PRIVATE-REGISTRY:V1\n` | bindings, capabilities, refs, collision checks | admission/transition |
+| `admitted_collection/v1` | P1 | admission runtime | E / admitted query window | `SMART-ADS:ADMITTED-COLLECTION:V1\n` | purpose evidence, exact query, zero-I/O-before-pass | collection |
+| `gate3_evidence_packet/v1` | P1 | Gate-3 verifier | H / revalidation window | `SMART-ADS:GATE3-EVIDENCE:V1\n` | supported-version evidence complete | Gate 3 |
+| `gate3_selection_receipt/v1` | P1 | Gate-3 selector | E / selection validity | `SMART-ADS:GATE3-RECEIPT:V1\n` | exact endpoint/version/scope selected | Gate 3 |
+| `authorization_receipt/v1` | P1 | action-authorized human role | E / issue-expiry | `SMART-ADS:AUTH-RECEIPT:V1\n` | closed action/subject, predecessor, nonce | each authorization slot |
+| `authorization_reservation_record/v1` | P1 | reservation service | E / before effect | `SMART-ADS:AUTH-RESERVATION:V1\n` | unique CAS pair and reserved state | each reservation slot |
+| `execution_receipt/v1` | P1 | action executor | E / execution time | `SMART-ADS:EXEC-RECEIPT:V1\n` | exact auth/reservation/subject/action; success | each execution slot |
+| `authorization_consumption_record/v1` | P1 | consumption ledger | E / append time | `SMART-ADS:AUTH-CONSUMPTION:V1\n` | exact nonce pair and final execution | each consumption slot |
+| `reservation_reconciliation_record/v1` | P1 | reconciliation authority | E / issuance | `SMART-ADS:RESERVATION-RECONCILIATION:V1\n` | quarantines old terminal reservation; never reopens | reconciliation |
+| `effect_proof/v1` | P1 | readiness builder | E / validation time | `SMART-ADS:EFFECT-PROOF:V1\n` | four typed locators agree exactly | each effect-proof slot |
+| `native_request_projection/v1` | P1 | collection executor | H / execution window | `SMART-ADS:NATIVE-REQUEST:V1\n` | closed redacted params and Gate-3 endpoint | 7B side |
+| `tolerance_profile/v1` | P1 | Gate-3 tolerance authority | E / profile validity | `SMART-ADS:TOLERANCE:V1\n` | exact limits/scale/rounding/zero rule | 7B metric |
+| `certification_7b_record/v1` | P1 | independent 7B verifier | H / execution | `SMART-ADS:CERTIFICATION-7B:V1\n` | complete sides/rows/projections/recomputed parity | 7B |
+| `live_certification_transition/v1` | P1 | certification transition authority | E / validity plus max age | `SMART-ADS:LIVE-CERT-TRANSITION:V1\n` | prior/new signed snapshots and successful 7B | live certification |
+| `live_certification_certificate/v1` | P1 | certification transition authority | E / validity plus max age | `SMART-ADS:LIVE-CERTIFICATE:V1\n` | exact transition/new snapshot/fingerprints | operational admission |
+| `formula_bundle/v1` | P1 | semantic registry owner | H / bundle validity | `SMART-ADS:FORMULA-BUNDLE:V1\n` | closed acyclic graph and recomputed topo order | analysis schema |
+| `curation_execution/v1` | P1 | curation executor | H / execution | `SMART-ADS:CURATION:V1\n` | exact-N window and deterministic selection | curation |
+| `generation_manifest/v1` | P1 | generation publisher | H / publication | `SMART-ADS:GENERATION:V1\n` | schema/count/logical/physical digests valid | generation |
+| `partition_head/v1` | P1 | generation publisher | H / CAS time | `SMART-ADS:PARTITION-HEAD:V1\n` | parent/sequence CAS consistency | generation head |
+| `dataset_snapshot/v1` | P1 | snapshot publisher | H / publication | `SMART-ADS:DATASET-SNAPSHOT:V1\n` | sorted heads and double-read/CAS proof | snapshot |
+| `analysis_execution/v1` | P1 | analysis executor | H / execution | `SMART-ADS:ANALYSIS-EXECUTION:V1\n` | exact build inputs and result digests | analysis |
+| `finding/v1` | P1 | analysis executor | H / creation | `SMART-ADS:FINDING:V1\n` | typed analysis/result/policy linkage | finding |
+| `certification_record/v1` | P1 | certification verifier | H / decision | `SMART-ADS:CERTIFICATION:V1\n` | exact findings and output digest | certification |
+| `report_execution/v1` | P1 | report executor | H / execution | `SMART-ADS:REPORT-EXECUTION:V1\n` | transitive graph and canonical result | report |
+| `retention_root/v1` | P1 | retention authority | H / root lifetime | `SMART-ADS:RETENTION-ROOT:V1\n` | transitive pinned-object closure | retention root |
+| `retention_release_proof/v1` | P1 | retention authority | E / release time | `SMART-ADS:RETENTION-RELEASE:V1\n` | no live root reaches released object | retention release |
+| `seam_parity_record/v1` | P1 | seam verifier | H / execution | `SMART-ADS:SEAM-PARITY:V1\n` | exact legacy/canonical projections equal | seam |
+| `acceptance_profile/v1` | P1 | acceptance policy owner | E / shadow interval | `SMART-ADS:ACCEPTANCE-PROFILE:V1\n` | exact calendar/timezone/metrics/roles | acceptance profile |
+| `business_calendar/v1` | P1 | calendar authority | E / covered dates | `SMART-ADS:BUSINESS-CALENDAR:V1\n` | immutable complete local-date calendar | acceptance calendar |
+| `daily_acceptance_token/v1` | P1 | authorized operator | E / shadow interval | `SMART-ADS:DAILY-ACCEPTANCE:V1\n` | accepted consecutive business-date chain | daily acceptance |
+| `weekly_acceptance_token/v1` | P1 | authorized operator | E / shadow interval | `SMART-ADS:WEEKLY-ACCEPTANCE:V1\n` | accepted consecutive week chain | weekly acceptance |
+| `shadow_acceptance_record/v1` | P1 | acceptance verifier | E / readiness time | `SMART-ADS:SHADOW-ACCEPTANCE:V1\n` | exact independent 5/4 chains | shadow acceptance |
+| `rollback_prestate_record/v1` | P1 | rollback verifier | E / protocol start | `SMART-ADS:ROLLBACK-PRESTATE:V1\n` | gateway on and healthy fallback | rollback prestate |
+| `rollback_test_protocol/v1` | P1 | rollback policy owner | E / protocol validity | `SMART-ADS:ROLLBACK-PROTOCOL:V1\n` | fixed 200/400/rate/time/boundary contract | rollback protocol |
+| `rollback_toggle_event/v1` | P1 | toggle executor | E / event time | `SMART-ADS:ROLLBACK-TOGGLE:V1\n` | exact toggle request and boundary IDs | rollback toggle |
+| `feature_flag_ack_record/v1` | P1 | Hermes runtime | E / event time | `SMART-ADS:ROLLBACK-FLAG-ACK:V1\n` | flag false and routed boundary observed | rollback ACK |
+| `rollback_drain_record/v1` | P1 | routing runtime | E / event time | `SMART-ADS:ROLLBACK-DRAIN:V1\n` | drained set complete | rollback drain |
+| `rollback_query_log/v1` | P1 | rollback verifier | E / protocol interval | `SMART-ADS:ROLLBACK-QUERY-LOG:V1\n` | event-derived IDs, routes, exactly-once completion | rollback evidence |
+| `rollback_test_receipt/v1` | P1 | rollback verifier | E / completion | `SMART-ADS:ROLLBACK-RECEIPT:V1\n` | 200/400, 60s dispatch, <=500ms, zero loss | rollback execution |
+| `migration_manifest/v1` | P1 | readiness builder | E / generation | `SMART-ADS:MIGRATION-MANIFEST:V1\n` | exact typed DAG and tripartite equality | readiness manifest |
+| `manifest_validation_record/v1` | P1 | readiness validator | E / validation time | `SMART-ADS:MANIFEST-VALIDATION:V1\n` | recursive complete PASS for exact build | manifest validation |
+| `readiness_attestation/v1` | P1 | readiness attestor | E / attestation time | `SMART-ADS:READINESS-ATTESTATION:V1\n` | manifest/validation/effect proof equalities | readiness attestation |
+| `stabilization_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:STABILIZATION-HOUR:V1\n` | one exact relative hour meets SLO | stabilization bucket |
+| `stabilization_period_completion_record/v1` | P1 | stabilization verifier | E / completion | `SMART-ADS:STABILIZATION-COMPLETION:V1\n` | exact contiguous 336-hour chain | stabilization completion |
+| `retirement_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:RETIREMENT-HOUR:V1\n` | one exact relative hour has zero legacy calls | retirement bucket |
+| `retirement_verification_record/v1` | P1 | retirement verifier | E / completion | `SMART-ADS:RETIREMENT-VERIFICATION:V1\n` | exact contiguous 168-hour chain | retirement verification |
+| `migration_completion_record/v1` | P1 | completion authority | E / completion | `SMART-ADS:MIGRATION-COMPLETION:V1\n` | terminal same-run graph complete | completion |
+
+The generic authorization/reservation/execution/consumption profiles cover
+every action-specific external-effect instance, including workload identity,
+deployment, live calls/provider reads, shadow activation, rollback, readiness
+attestation, cutover, and retirement; `dag_slot` is checked against the closed
+action-to-slot matrix. Acceptance, stabilization, verification, and completion
+records are signed evidence/decisions under their dedicated profiles and do not
+fabricate external-effect reservations. Embedded value objects such as
+`source_inventory/v1`, `canonical_query_contract/v1`,
+`derived_metric_definition/v1`, and `regression_fixture/v1` are validated as
+closed subobjects of their containing profiled artifact; if any is signed or
+resolved through its own locator, it first requires its own inventory profile.
+Unknown schema, unknown action/slot, absent profile, ambiguous profile, or any
+unprofiled resolved object rejects before semantic processing.
 
 ## 13. Governance Status
 
@@ -1312,6 +1628,23 @@ unknown schema/profile is rejected before semantic processing.
 | C21 | Rollback has signed prestate/ACK/drain/readback, 200+400 evidence, and a transition-excluding dispatch clock. |
 | C22 | Independent 5-day/4-week chains and complete 336/168-hour evidence are non-vacuous. |
 | C23 | 7A is a sealed Linux OCI profile with exact mandatory negative cases and no host-path fallback. |
+| C24 | A closed externally anchored artifact-contract inventory profiles every signed/resolved schema and rejects unknowns. |
+| C25 | Gate 4 requires an exact-build recursive `manifest_validation_record/v1` PASS and full four-record effect proofs. |
+| C26 | Metric origin, presence, unknown reason, calculation, value, unit, and currency combinations form an exhaustive matrix. |
+| C27 | Formula bundles reject self-reference/cycles and recompute a deterministic topological order with negative fixtures. |
+| C28 | Curation tie-breaking uses a stable semantic-observation digest independent of all materialization metadata. |
+| C29 | Snapshot-to-report typed lineage binds canonical results and transitive retention roots. |
+| C30 | Both 7B sides seal redacted closed native requests, projection algorithms, and the exact Gate-3 endpoint/version. |
+| C31 | Operational admission requires the current signed 7B-backed registry transition and certificate. |
+| C32 | Content-addressed tolerance profiles are recomputed; Phase 1 defaults to exact equality. |
+| C33 | Tenant-keyed opaque resource refs fail on collisions and raw provider IDs cannot persist or cross MCP. |
+| C34 | Effect-time monotonic current revocation state is mandatory in addition to historical run-pinned provenance. |
+| C35 | Stabilization and retirement start at exact effective times with fixed contiguous relative-hour buckets. |
+| C36 | The 7A negative cases are signed in exact raw-UTF-8 lexical order and prove read-only-rootfs enforcement. |
+| C37 | Declared paths have a canonical sorted array and exact RFC 8785 array-digest preimage. |
+| C38 | Complete discriminated selectors, including ABI/range/raw/AST/source digests, are the canonical source authority. |
+| C39 | Every disposition has a normalized traversal-safe target path/selector; null is nonimplementation-only. |
+| C40 | Step 2 remains a necessary same-run zero-I/O prerequisite for live 7B and operational reads, never sufficient authority. |
 
 ### 13.2 Current Status
 
