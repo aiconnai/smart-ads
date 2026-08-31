@@ -60,13 +60,14 @@ ADR-0001 establishes **exclusively the Read Plane**:
 │ 1. Contracts & Schemas (smart_ads.contracts)                           │
 │    • smart_ads/tenant/v1, front/v1, tenant_execution/v1                │
 │    • smart_ads/analytics_landing/v1, curation_execution/v1            │
-│    • smart_ads/generation_manifest/v1, analysis_execution/v1          │
+│    • smart_ads/generation_manifest/v1, dataset_snapshot/v1             │
 │    • smart_ads/certification_record/v1, finding/v1, report_execution/v1│
 │    • smart_ads/authorization_receipt/v1, execution_receipt/v1          │
 │    • smart_ads/authorization_reservation_record/v1                     │
 │    • smart_ads/authorization_consumption_record/v1                     │
 │    • smart_ads/readiness_attestation/v1                                │
 │    • smart_ads/daily_acceptance_token/v1, weekly_acceptance_token/v1   │
+│    • smart_ads/shadow_acceptance_record/v1                             │
 │    • smart_ads/migration_completion_record/v1                          │
 ├────────────────────────────────────────────────────────────────────────┤
 │ 2. Data Plane (Single Persisted Zone: landing/)                        │
@@ -93,15 +94,16 @@ ADR-0001 establishes **exclusively the Read Plane**:
 Staging Ports, Approval Stores (SQLite/Postgres), CAS Execution Workers, Customer Match uploads, campaign creation/mutation, budget changes, CAPI lead writes, autonomous schedulers, commercial multi-tenant SaaS features, and writable filesystem APIs are **strictly out of scope**.
 
 ### 3.2 Normative Security Defenses
-1. **7A Hermetic Offline Isolation:**
-   * **Sealed Sandbox Profile:** Execution runs in a sterile, temporary runtime environment:
-     * Environment variables strictly pinned: `PATH=/bin:/usr/bin`, `PYTHONPATH=<isolated_src>`, `LANG=C.UTF-8`, `PYTHONNOUSERSITE=1`, `HOME=/tmp/isolated_home`, `TMPDIR=/tmp/isolated_tmp`.
+1. **7A Sealed Sandbox Profile:**
+   * **Process & System Call Isolation:** Execution runs under strict confinement:
+     * `prctl(PR_SET_NO_NEW_PRIVS, 1)` and seccomp-bpf filter blocking `execve`, `execveat`, `fork`, and `clone` (with `CLONE_NEWPID`).
+     * Environment variables strictly allowlisted: `PATH=/bin:/usr/bin`, `PYTHONPATH=<isolated_src>`, `LANG=C.UTF-8`, `PYTHONNOUSERSITE=1`, `HOME=/tmp/isolated_home`, `TMPDIR=/tmp/isolated_tmp`.
      * All cloud, ambient token, and provider environment variables are stripped.
-     * Temporary directories are securely unmounted and wiped immediately after test completion.
-   * **Network Deny-All:** Subprocess execution and socket creation are blocked via network namespace sandboxing with disabled loopback (`lo` down) and process-level socket syscall interceptors raising `PermissionError` before socket initialization.
-   * **Host Credential Deny-All:** File permissions and sandboxing block read access to `~/.netrc`, `~/.aws`, `~/.config`, and macOS Keychain.
-   * Automated negative CI suites assert that any outbound network, subprocess, or ambient credential discovery attempt triggers an immediate test failure.
-2. **MCP Pre-Handler Deny-by-Default & Closed Tool Inventory:**
+     * All non-standard file descriptors ($FD > 2$) are closed before test execution.
+   * **Network Deny-All:** Enforced via network namespace sandbox with disabled loopback (`lo` down) and process-level socket syscall interceptors raising `PermissionError` before socket initialization.
+   * **Host Credential Deny-All:** Read-only root filesystem with isolated ramdisks blocking access to `~/.netrc`, `~/.aws`, `~/.config`, and macOS Keychain.
+   * **Evidence Binding:** Offline certification (`evidence_kind: fixture_7a`) cryptographically binds `sandbox_profile_digest` and `negative_security_test_report_digest`.
+2. **MCP Pre-Handler Deny-by-Default & Transport Parser Bounds:**
    * `smart_ads.transports.mcp` implements a strictly closed inventory of exact tool identifiers:
      * `smart_ads.queries.get_campaign_performance_v1`
      * `smart_ads.queries.get_adset_performance_v1`
@@ -109,11 +111,14 @@ Staging Ports, Approval Stores (SQLite/Postgres), CAS Execution Workers, Custome
      * `smart_ads.queries.get_intelligence_findings_v1`
      * `smart_ads.reports.generate_recurrent_summary_v1`
    * Every tool schema strictly declares `"additionalProperties": false`.
-   * **Pre-Handler Negative Rejection Matrix:**
-     * Single JSON-RPC 2.0 objects only (JSON-RPC batch arrays are rejected immediately with `-32600 Invalid Request`).
-     * Malformed JSON, duplicate JSON keys, non-UTF-8 characters, or undeclared properties are rejected at the transport boundary before any Registry lookup, logging IO, credential resolution, or RPC dispatch occurs.
-     * Unlisted method names or mutation payloads return `-32601 Method not found`.
-   * **Zero Filesystem Exposure:** The MCP server returns purely in-memory structured JSON. No file reading, writing, or path manipulation endpoints are exposed over MCP.
+   * **Transport Parser Pre-Parse Bounds:**
+     * Maximum request body size: $64\text{ KB}$. Maximum JSON nesting depth: $8$.
+     * Exceeding limits or malformed JSON $\longrightarrow$ `-32700 Parse error`.
+     * JSON-RPC batch arrays $\longrightarrow$ `-32600 Invalid Request`.
+     * Method not in closed 5-tool inventory $\longrightarrow$ `-32601 Method not found`.
+     * Parameter schema violation or undeclared properties $\longrightarrow$ `-32602 Invalid params`.
+   * All rejections occur strictly at the transport boundary before any Registry lookup, logging IO, credential resolution, or RPC dispatch.
+   * **Zero Filesystem Exposure:** Returns purely in-memory structured JSON. No filesystem APIs are exposed over MCP.
 
 ---
 
@@ -133,7 +138,7 @@ ad_platform_api_version:
 * **Grounded Operational Scope (Phase 1):** In strict accordance with the frozen baseline configuration (`config/operator/meta_daily_get_insights_v1.yaml:16`), `pipeboard_hosted` in Phase 1 supports exclusively:
   * Resource level: `campaign` (only).
   * Supported core metrics: `impressions`, `clicks`, `spend`.
-  * Date range: `previous_local_day` (single day grain: `start_date == end_date`).
+  * Date range: `previous_local_day` relative to request execution timestamp in `reporting_timezone` (`start_date == end_date`).
   * Attribution window: fixed provider default (no caller modification allowed).
   * Breakdowns: none (`[]`).
   * Capabilities outside this scope (e.g. actions, conversions, reach, frequency, ad-level breakdowns, or custom attribution windows) are declared `capability_state: deferred` in Phase 1.
@@ -145,9 +150,9 @@ ad_platform_api_version:
 def collect(request: CollectionRequest) -> CollectionResult:
     ...
 ```
-* **Preconditions:**
+* **Preconditions (Evaluated in Strict Order):**
   1. `requested_capabilities` must be **strictly non-empty** and satisfy `request.requested_capabilities ⊆ driver_capability_snapshot`.
-  2. For Phase 1 (`pipeboard_hosted`), `request.date_range` must satisfy `start_date == end_date`. Multi-day requests are rejected with error `unsupported_date_range`.
+  2. For Phase 1 (`pipeboard_hosted`), `request.date_range` must satisfy `start_date == end_date == date_of(request_timestamp - 1 day in reporting_timezone)`. Non-previous-day requests are rejected with `status: failed`, `error: unsupported_date_range`.
   3. Any request for uncertified capabilities or breakdowns is rejected at the `ProviderPort` boundary with `outcome_status: failed` and error `capability_unsupported`.
 * **`CollectionRequest`:** Fully freezes the query universe:
   * `request_id`: unique UUIDv4 string.
@@ -164,10 +169,10 @@ def collect(request: CollectionRequest) -> CollectionResult:
 * **`CollectionResult`:**
   * `request_digest`: echoes input request digest.
   * `registry_snapshot_digest`: echoes input registry snapshot digest.
-  * `outcome_status`: strictly closed enum `complete | partial | failed`.
-    * `complete`: 100% of requested capabilities observed and validated without truncation.
-    * `partial`: At least one requested capability observed, but one or more omitted or pagination-truncated.
-    * `failed`: Zero requested capabilities observed due to transport, auth, or schema failure.
+  * **`outcome_status` (Closed Precedence Order):**
+    1. If network/auth/transport error or zero requested metrics observed $\longrightarrow$ `failed`.
+    2. Else if schema validation fails or pagination truncated or any requested metric missing $\longrightarrow$ `partial` (strictly blocked from Parquet storage).
+    3. Else (100% of non-empty requested metrics successfully observed, validated, and non-truncated) $\longrightarrow$ `complete`.
   * `capabilities_requested`: list of requested capability refs.
   * `capabilities_observed`: list of validated capability refs present in candidate.
   * `candidates`: list of validated, sanitized `analytics_landing/v1` observations.
@@ -178,27 +183,32 @@ def collect(request: CollectionRequest) -> CollectionResult:
   2. **Never leaks** raw provider payloads, API tokens, cleartext account IDs, provider request URLs, HTTP headers, or raw provider error bodies.
 
 ### 4.3 Total Discriminative Matrix for Observation & Calculation Dimensions
-Observations and derivations are classified across four orthogonal dimensions:
+Observations and derivations are classified across four orthogonal dimensions using a **singular tagged numeric value representation**:
+
+```text
+value_type: int64_minor_currency | int64_count | decimal_ratio
+raw_numeric_value: string (canonical representation) | null
+```
 
 #### 1. Base Provider Observations (`metric_origin == provider_collected`):
 * `calculation_status: not_applicable`.
 * **Presence & Reason Matrix:**
-  * `presence_status: observed` $\Longleftrightarrow$ `unknown_reason: null`, `value_int64: int64` (non-null count or minor-unit money), `value_decimal: null`.
-  * `presence_status: missing` $\Longleftrightarrow$ `unknown_reason: provider_omitted`, `value_int64: null`, `value_decimal: null`.
-  * `presence_status: unproven_zero` $\Longleftrightarrow$ `unknown_reason: unverified_zero`, `value_int64: null`, `value_decimal: null`.
-  * `presence_status: timeout` $\Longleftrightarrow$ `unknown_reason: connection_timeout`, `value_int64: null`, `value_decimal: null`.
-  * `presence_status: not_applicable_at_level` $\Longleftrightarrow$ `unknown_reason: capability_unsupported`, `value_int64: null`, `value_decimal: null`.
+  * `presence_status: observed` $\Longleftrightarrow$ `unknown_reason: null`, `value_type in { int64_count, int64_minor_currency }`, `raw_numeric_value` is non-null integer string.
+  * `presence_status: missing` $\Longleftrightarrow$ `unknown_reason: provider_omitted`, `value_type: null`, `raw_numeric_value: null`.
+  * `presence_status: unproven_zero` $\Longleftrightarrow$ `unknown_reason: unverified_zero`, `value_type: null`, `raw_numeric_value: null`.
+  * `presence_status: timeout` $\Longleftrightarrow$ `unknown_reason: connection_timeout`, `value_type: null`, `raw_numeric_value: null`.
+  * `presence_status: not_applicable_at_level` $\Longleftrightarrow$ `unknown_reason: capability_unsupported`, `value_type: null`, `raw_numeric_value: null`.
+  * `presence_status: retracted_tombstone` $\Longleftrightarrow$ `unknown_reason: null`, `value_type: null`, `raw_numeric_value: null`.
 
 #### 2. Derived Metrics (`metric_origin == derived_computed`):
 * `presence_status: not_applicable`, `unknown_reason: null`.
 * **Calculation Matrix (Evaluated in Strict Precedence Order):**
-  1. If ANY required base input has `presence_status in { missing, timeout, unproven_zero, not_applicable_at_level }` or `value == null` $\longrightarrow$ `calculation_status: missing_input`, `value_decimal: null`, `value_int64: null`.
-  2. Else if denominator input is numerically equal to 0 $\longrightarrow$ `calculation_status: division_by_zero`, `value_decimal: null`, `value_int64: null`.
-  3. Else if mathematical domain error occurs $\longrightarrow$ `calculation_status: non_computable`, `value_decimal: null`, `value_int64: null`.
+  1. If ANY required base input has `presence_status in { missing, timeout, unproven_zero, not_applicable_at_level, retracted_tombstone }` or `raw_numeric_value == null` $\longrightarrow$ `calculation_status: missing_input`, `value_type: null`, `raw_numeric_value: null`.
+  2. Else if denominator input is numerically equal to 0 $\longrightarrow$ `calculation_status: division_by_zero`, `value_type: null`, `raw_numeric_value: null`.
+  3. Else if mathematical domain error occurs $\longrightarrow$ `calculation_status: non_computable`, `value_type: null`, `raw_numeric_value: null`.
   4. Else $\longrightarrow$ `calculation_status: computed`:
-     * `value_decimal`: exact string representation formatted to 6 decimal places (e.g. `"1.234567"`).
-     * For cost ratios (CPC, CPA, CPL), `value_int64` is also populated with exact minor currency units (centavos) computed via standard half-up integer rounding: `round_half_up(spend_centavos / count)`.
-     * For pure ratios (CTR, ROAS), `value_int64: null`.
+     * For cost ratios (CPC, CPA, CPL): `value_type: int64_minor_currency`, `raw_numeric_value: string(round_half_up(spend_centavos / count))`.
+     * For pure ratios (CTR, ROAS): `value_type: decimal_ratio`, `raw_numeric_value: string(format_decimal(ratio, scale=6))`.
 
 *Invariant:* `unknown != zero`. In regression laws and truth tables, `unknown` denotes any non-observed base state (`presence_status in { missing, timeout, unproven_zero }`). A numerical value of zero is valid only when explicitly returned as `observed`.
 
@@ -230,6 +240,8 @@ Every certification evaluation produces a `certification_record/v1` discriminati
    * Cryptographically binds:
      * `capability_definition_digest`: SHA-256 of capability contract definition.
      * `wheel_digest`: SHA-256 of candidate wheel package.
+     * `sandbox_profile_digest`: SHA-256 of sealed sandbox profile.
+     * `negative_security_test_report_digest`: SHA-256 of negative security assertion report.
      * `parser_code_digest`: SHA-256 of parser implementation.
      * `adapter_code_digest`: SHA-256 of adapter implementation.
      * `mapping_rules_digest`: SHA-256 of mapping rule definitions.
@@ -292,7 +304,7 @@ reconciliation_bundle:
     reference_workload_ref: workload:meta_direct_verifier
     reference_workload_binary_digest: sha256:<64_hex_chars>
     ad_platform_ref: meta
-    source_contract_ref: api-version:<gate3_selected_version>
+    source_contract_ref: api-version:<dynamic_version>
     implementation_kind: official_sdk
     request_digest: sha256:<64_hex_chars>
     canonical_query_projection_digest: sha256:<64_hex_chars>
@@ -371,10 +383,10 @@ A canonical base metric is defined by the immutable tuple:
 ```
 
 ### 5.7 Derived Metrics Contract, Calculation Availability & Certification Lattice
-For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
+For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS), the derivation is governed by an immutable formula contract (`smart_ads/derived_metric_definition/v1`):
 * **Inputs:** Formally declared as an ordered list of certified base metrics.
-* **Rounding:** Versioned rounding mode and decimal precision explicitly recorded.
-* **Formula Integrity:** Digest of the derivation formula is cryptographically bound.
+* **Formula DSL Expression:** Normalized expression (e.g. `"DIVIDE(spend, clicks, scale=6, rounding=ROUND_HALF_UP)"`).
+* **Formula Integrity:** Cryptographically bound via `formula_digest = SHA-256(RFC8785(definition_object))`.
 * **Certification Status Lattice:**
   $$\text{BLOCKED} < \text{UNRECONCILED} < \text{UNAVAILABLE} < \text{DEGRADED} < \text{VERIFIED}$$
   A derived metric inherits the **worst** status among its inputs along this lattice:
@@ -403,7 +415,7 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │                                                                        │
 │ 3. Curation Execution: curation_execution/v1                           │
 │    ├── Embeds curation_anchor_timestamp & restatement_lookback_days    │
-│    └── Merges candidates with deduplication precedence (higher timestamp)│
+│    └── Merges candidates with total-order deduplication precedence     │
 │                                                                        │
 │ 4. Atomic Partition Generation: landing/year=YYYY/month=MM/            │
 │    ├── Written to temporary generation file                            │
@@ -413,12 +425,15 @@ For derived metrics (e.g. CTR, CPC, CPA, CPL, ROAS):
 │    ├── Computes physical_parquet_digest and logical_row_digest         │
 │    └── Promotes generation atomically via partition_head/v1 (CAS)     │
 │                                                                        │
-│ 5. Analysis & Reporting Envelopes (Downstream of Storage Promotion):   │
-│    ├── analysis_execution/v1 (binds generation_manifest_digest + policy)│
+│ 5. Dataset Snapshot Creation: dataset_snapshot/v1                      │
+│    └── Binds all active generation manifests across partitions         │
+│                                                                        │
+│ 6. Analysis & Reporting Envelopes (Downstream of Dataset Snapshot):    │
+│    ├── analysis_execution/v1 (binds dataset_snapshot_digest + policy)  │
 │    ├── finding/v1 (binds analysis_execution_digest)                    │
 │    └── report_execution/v1 (records certified report output)           │
 │                                                                        │
-│ 6. Ephemeral Query Layer: analytics/analytics.duckdb                   │
+│ 7. Ephemeral Query Layer: analytics/analytics.duckdb                   │
 │    └── Rebuildable index over Parquet generations; never source of truth
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -436,8 +451,8 @@ resource_level
 metric_date
 metric_semantic_ref
 source_metric_ref
-value_int64
-value_decimal
+value_type
+raw_numeric_value
 unit
 currency
 attribution_ref
@@ -459,8 +474,8 @@ curation_execution_digest
 * `analysis_execution_digest` is decoupled from storage, allowing re-analysis of the same immutable Parquet generation under new policies without storage mutation.
 
 ### 6.2 Strict Numeric Typing & RFC 8785 Canonical Representation
-* Counts & Money: stored as `value_int64` (minor currency units e.g. BRL centavos) + ISO-4217 currency code as the single canonical storage representation.
-* Derived Ratios/Decimals: stored as `value_decimal` (canonical string e.g. `"12.345600"` without scientific notation).
+* Integer counts & minor units: stored as `value_type: int64_count` or `value_type: int64_minor_currency` with integer string `raw_numeric_value`.
+* Derived Ratios/Decimals: stored as `value_type: decimal_ratio` with fixed-scale decimal string `raw_numeric_value` (e.g. `"0.123456"`).
 * **Prohibition:** `float`, `NaN`, and `Infinity` are strictly forbidden in storage and contracts.
 * **Canonical Hashing Projection:** To satisfy RFC 8785 §3.1 (which restricts native JSON numbers to IEEE-754 double precision), numeric values in row digests are projected into typed string representations `{"_type": "int64", "value": "12345"}` or `{"_type": "decimal", "value": "123.450000"}` prior to JCS SHA-256 computation.
 
@@ -468,9 +483,11 @@ curation_execution_digest
 * **Deterministic Curation Envelope (`curation_execution/v1`):**
   * `curation_anchor_timestamp`: ISO-8601 anchor.
   * `restatement_lookback_days`: integer days (e.g. 7).
-  * `curation_window`: `[curation_anchor_timestamp - 7 days, curation_anchor_timestamp]`.
-  * **Deduplication Precedence:** When merging incoming candidates with historical partition rows on identical `fact_key`, the candidate row with the higher `collected_at` ISO-8601 timestamp supersedes the historical row.
-  * **Tombstones:** Retracted observations are stored with `presence_status: retracted_tombstone`, `value_int64: null`, `value_decimal: null`.
+  * `curation_window`: `[curation_anchor_timestamp - (restatement_lookback_days * 86400 seconds), curation_anchor_timestamp]`.
+  * **Total Order Deduplication Precedence:** When merging incoming candidates with historical partition rows on identical `fact_key`, sort by:
+    1. Higher `collected_at` ISO-8601 timestamp.
+    2. In case of identical `collected_at`, compare `logical_row_digest` lexicographically as a stable tie-breaker.
+  * **Tombstones:** Retracted observations are stored with `presence_status: retracted_tombstone`, `value_type: null`, `raw_numeric_value: null`.
 * **`generation_manifest/v1` Integrity Contract:** Records:
   * `generation_id`: unique generation identifier string.
   * `partition_key`: partition path string (e.g. `"year=2026/month=08"`).
@@ -490,8 +507,22 @@ curation_execution_digest
   * Promotion computes `generation_manifest/v1` containing `parent_generation_manifest_digest`.
   * Atomic CAS replaces `HEAD` pointer **only if** `HEAD.active_generation_manifest_digest == parent_generation_manifest_digest`.
   * Any concurrency conflict or stale parent digest fails closed immediately (`STALE_GENERATION_PROMOTION_CONFLICT`).
-* **Deterministic Row Ordering:** Rows within a generation partition are strictly sorted lexicographically by `fact_key` before computing `logical_row_digest` via RFC 8785 canonical JSON array serialization.
-* **Retention Pinning Rule:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `analysis_execution/v1`, `finding/v1`, `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
+* **Atomic Dataset Snapshot (`dataset_snapshot/v1`):**
+  * Downstream analytics queries across multiple partitions bind an immutable `dataset_snapshot/v1` envelope:
+```json
+{
+  "$schema": "smart_ads/dataset_snapshot/v1",
+      "snapshot_id": "snapshot:20260830-001",
+      "snapshot_digest": "sha256:<64_hex_chars>",
+      "created_at": "<ISO-8601-TIMESTAMP>",
+      "curation_execution_digest": "sha256:<64_hex_chars>",
+      "partition_manifests": [
+        "sha256:<partition_1_generation_manifest_digest>",
+        "sha256:<partition_2_generation_manifest_digest>"
+  ]
+}
+```
+* **Retention Pinning Rule:** Data retention policies must never prune or delete a Parquet generation that is referenced by an active `dataset_snapshot/v1`, `analysis_execution/v1`, `finding/v1`, `report_execution/v1`, `certification_record/v1`, legal hold, or migration receipt.
 * **Privacy & LGPD Boundary:** Zero persistence of raw payloads reduces the data attack surface and exposure risks. It **does not eliminate** privacy obligations (LGPD/GDPR): `landing/`, audit logs, and binding registries remain subject to legal basis, purpose limitation, necessity, security, access controls, and accountability.
 
 ---
@@ -518,8 +549,8 @@ $$\text{Analyze}(\text{LandingDataset},\ \text{TenantThresholdPolicy}) \longrigh
   * `account_ref` is unique per tenant.
   * Provider accounts are unique per `(tenant, transport_provider_ref, ad_platform_ref, private_account_key)`.
 * **Sub-Scope Authorization (`shared_with`):**
-  ```yaml
-  account_bindings:
+```yaml
+account_bindings:
     - binding_ref: binding:opaque-primary-01
       transport_provider_ref: pipeboard
       ad_platform_ref: meta
@@ -529,8 +560,8 @@ $$\text{Analyze}(\text{LandingDataset},\ \text{TenantThresholdPolicy}) \longrigh
           resource_scope_ref: scope:scope-alpha-core
         - front_ref: front:front-beta
           profile_ref: profile:profile-ops
-          resource_scope_ref: scope:scope-beta-ops
-  ```
+        resource_scope_ref: scope:scope-beta-ops
+```
 *Invariant:* Any collision between references, digests, or unauthorized scope cross-talk fails closed.
 
 ---
@@ -561,6 +592,7 @@ Immediately following Gate 2 and delivery mode selection, the formal decompositi
       "source_selector": {
         "selector_kind": "ast_symbol",
         "symbol_name": "conduct_offline_run",
+        "parser_abi": "python:3.12_ast_v1",
         "byte_range": null,
         "raw_span_digest": "sha256:<64_hex_chars>"
       },
@@ -583,7 +615,7 @@ Immediately following Gate 2 and delivery mode selection, the formal decompositi
 * **Normative Hashing Standard:** All JSON digests are computed strictly according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**.
 * **Discriminative `source_selector` Preimages:**
   * For `selector_kind: whole_file`: SHA-256 over raw UTF-8 bytes of the file at `source_path` in `source_sha`.
-  * For `selector_kind: ast_symbol`: SHA-256 of AST unparsed UTF-8 bytes of `symbol_name` definition at `source_path` in `source_sha`.
+  * For `selector_kind: ast_symbol`: SHA-256 of AST unparsed UTF-8 bytes of `symbol_name` definition at `source_path` in `source_sha` using Python 3.12 standard AST unparse format.
   * For `selector_kind: text_region`: SHA-256 of exact byte slice `byte_range: [start_byte, end_byte]` at `source_path` in `source_sha`.
 * **Digest Preimage:** `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the entire manifest object excluding the `manifest_digest` property.
 * **Closed Enums:**
@@ -613,7 +645,7 @@ Immediately following Gate 2 and delivery mode selection, the formal decompositi
 
 ```text
 smart-ads/
-├── pyproject.toml                     # Package metadata and build definitions
+├── pyproject.toml                     # Package metadata and build definitions (src/ only)
 ├── uv.lock                            # Deterministic dependency resolution lockfile
 ├── README.md                          # Operational runbook
 ├── MIGRATION_DECOMPOSITION_MANIFEST.json # Granular decomposition contract (path + symbol)
@@ -653,6 +685,11 @@ smart-ads/
     ├── migration/                     # Seam parity and decomposition manifest validation
     └── rollback/                      # Human-only feature flag toggle automated test
 ```
+
+* **Wheel Packaging Invariant (GOV1 Enforcement):**
+  * `pyproject.toml` strictly packages `src/smart_ads` and explicitly excludes `tooling/`.
+  * AST import checker verifies zero imports matching `tooling.*` within `src/smart_ads`.
+  * Wheel smoke install test installs the built `.whl` in a clean virtual environment and verifies successful import without dev tooling dependencies.
 
 ---
 
@@ -714,7 +751,11 @@ flowchart TD
     SEAM_REC --> HERMES_PR["11. Consumer PR (limaronaldo/hermes-ronaldo):
     Gateway Integration with Feature Flag (Default OFF)"]
 
-    HERMES_PR --> G3["[GATE HUMANO 3]
+    HERMES_PR --> LEGACY_STEP2["[LEGACY ADR STEP 2 HUMAN GO/NO-GO GATE]
+    Formal Human Verification of Legacy Step 2 Policy Compliance
+    Emits legacy_step2_authorization_receipt/v1"]
+
+    LEGACY_STEP2 --> G3["[GATE HUMANO 3]
     Versão exata suportada, revalidada e selecionada
     + Escopo de certificação atestado
     Emits gate3_selection_receipt/v1"]
@@ -745,11 +786,14 @@ flowchart TD
     Compare Direct vs. Gateway Responses"]
 
     SHADOW --> ACC["14. Operational Acceptance:
-    5 relatórios consecutivos em dias úteis aceitos por operador
-    + 4 drafts/ciclos semanais consecutivos aceitos operacionalmente
+    5 relatórios diários consecutivos aceitos (Days 1..5)
+    + 4 drafts semanais consecutivos aceitos (Weeks 1..4)
     Emits daily and weekly acceptance tokens"]
 
-    ACC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]
+    ACC --> SHADOW_REC["14b. Emit shadow_acceptance_record/v1
+    (Consolidates 5 Daily Tokens + 4 Weekly Tokens)"]
+
+    SHADOW_REC --> AUTH_RB["[HUMAN AUTHORIZATION: ROLLBACK TEST]
     Emits rollback_test_authorization_receipt/v1"]
 
     AUTH_RB --> ROLLBACK["15. Human-Only Rollback Test & Validation
@@ -773,7 +817,7 @@ flowchart TD
     AUTH_CUTOVER --> CUTOVER_EXEC["17. Cutover Execution (Toggle Feature Flag to Gateway)
     Emits cutover_execution_receipt/v1"]
 
-    CUTOVER_EXEC --> STABILIZE["18. Post-Cutover Verification & Stabilization Window (14 days)
+    CUTOVER_EXEC --> STABILIZE["18. Post-Cutover Verification & Stabilization Window (14 days / 336h)
     Emits stabilization_period_completion_record/v1"]
 
     STABILIZE --> RETIRE_GATE["[GATE DE RETIRADA]
@@ -785,7 +829,7 @@ flowchart TD
     AUTH_RETIRE --> RETIRE_EXEC["19. Decommission legacy direct read path only
     Emits retirement_execution_receipt/v1"]
 
-    RETIRE_EXEC --> RETIRE_VERIF["20. Post-Retirement Verification Window (7 days zero-traffic)"]
+    RETIRE_EXEC --> RETIRE_VERIF["20. Post-Retirement Verification Window (7 days / 168h zero-traffic)"]
 
     RETIRE_VERIF --> TERMINAL_REC["21. Emit migration_completion_record/v1
     (Signed Terminal Audit Record triggering partial supersession for Read Allowlist)"]
@@ -848,11 +892,41 @@ flowchart TD
   "issued_at": "<ISO-8601-TIMESTAMP>"
 }
 ```
+* **Consolidated Shadow Acceptance Record (`smart_ads/shadow_acceptance_record/v1`):**
+```json
+{
+  "$schema": "smart_ads/shadow_acceptance_record/v1",
+  "record_id": "record:shadow-acceptance-00000000-0000-4000-8000-000000000000",
+  "record_digest": "sha256:<64_hex_chars>",
+  "migration_run_id": "migrun:20260830-001",
+  "daily_token_digests": [
+    "sha256:<day_1_token_digest>",
+    "sha256:<day_2_token_digest>",
+    "sha256:<day_3_token_digest>",
+    "sha256:<day_4_token_digest>",
+    "sha256:<day_5_token_digest>"
+  ],
+  "weekly_token_digests": [
+    "sha256:<week_1_token_digest>",
+    "sha256:<week_2_token_digest>",
+    "sha256:<week_3_token_digest>",
+    "sha256:<week_4_token_digest>"
+  ],
+  "acceptance_profile_ref": "profile:operational-acceptance-pinna-v1",
+  "operator_principal_ref": "principal:operator-authorized",
+  "signature_algorithm": "ed25519",
+  "public_key_ref": "key:ed25519:<sha256_public_key>",
+  "signature_bytes_base64": "<base64_signature>",
+  "issued_at": "<ISO-8601-TIMESTAMP>"
+}
+```
 * **Reset Invariant:** Any single day or week with a pipeline failure, data mismatch, or operator rejection immediately resets the consecutive counter to zero (`consecutive_days = 0` or `consecutive_weeks = 0`).
 
 ### 11.2 Rollback Verification Computable Protocol (`rollback_test_protocol/v1`)
 * **Workload & Per-Query Audit Log:** Dispatches a stream of $N = 600$ distinct sequential queries ($10\text{ req/s}$ for $T = 60\text{s}$), recording per-query log: `{ query_sequence_id, timestamp, route_taken: gateway | direct, latency_ms, http_status }`.
-* **Active Transition:** At $T = 20\text{s}$, the harness flips `SMART_ADS_READ_GATEWAY_ENABLED: true → false`.
+* **Active Transition & In-Flight Drain:**
+  * At $T = 20\text{s}$, the harness initiates feature flag toggle `SMART_ADS_READ_GATEWAY_ENABLED: true → false`.
+  * In-flight drain window of $500\text{ms}$ ensures all in-flight queries finish.
 * **Strict Per-Query Assertions:**
   1. Queries $1..200$ routed to Gateway with $100\%$ success.
   2. Queries $201..600$ routed to Legacy Direct with $100\%$ success.
@@ -860,13 +934,13 @@ flowchart TD
 * Emits `rollback_test_receipt/v1` binding `detailed_query_log_digest`, total submitted count ($600$), completed count ($600$), and zero error count.
 
 ### 11.3 14-Day Stabilization, Post-Retirement & Terminal Audit Record
-* **14-Day Post-Cutover Stabilization Window:**
-  * Gateway actively serves 100% of production traffic for 14 continuous calendar days.
+* **14-Day Post-Cutover Stabilization Window (336 Continuous Hours):**
+  * Gateway actively serves 100% of production traffic for 336 continuous hours.
   * Asserts hourly heartbeat telemetry: query volume $\ge \text{baseline\_min\_queries}$, error rate $< 0.001\%$, and write plane operational.
-  * Emits `stabilization_period_completion_record/v1` binding `telemetry_timeseries_digest`.
-* **Post-Retirement Verification Window (7 days):**
+  * Emits `stabilization_period_completion_record/v1` binding `stabilization_timeseries_336h_digest`.
+* **Post-Retirement Verification Window (168 Continuous Hours):**
   * Following legacy read decommissioning (`retirement_execution_receipt/v1`), active socket/HTTP monitoring verifies exactly $0$ inbound calls to legacy direct read endpoints over 168 continuous hours while Gateway query volume remains normal.
-  * Emits `post_retirement_telemetry_digest`.
+  * Emits `zero_traffic_telemetry_168h_digest`.
 * **Terminal Signed Audit Record (`smart_ads/migration_completion_record/v1`):**
 ```json
 {
@@ -877,10 +951,10 @@ flowchart TD
   "readiness_manifest_digest": "sha256:<64_hex_chars>",
   "readiness_attestation_digest": "sha256:<64_hex_chars>",
   "cutover_execution_receipt_digest": "sha256:<64_hex_chars>",
-  "stabilization_period_completion_record_digest": "sha256:<64_hex_chars>",
+  "stabilization_timeseries_336h_digest": "sha256:<64_hex_chars>",
   "retirement_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "retirement_execution_receipt_digest": "sha256:<64_hex_chars>",
-  "post_retirement_telemetry_digest": "sha256:<64_hex_chars>",
+  "zero_traffic_telemetry_168h_digest": "sha256:<64_hex_chars>",
   "completed_at": "<ISO-8601-TIMESTAMP>",
   "operator_principal_ref": "principal:operator-authorized",
   "signature_algorithm": "ed25519",
@@ -905,6 +979,8 @@ Every cryptographic signature in the system is verified against a cell-protected
       "principal_ref": "principal:operator-authorized",
       "tenant_ref": "tenant:mbras-group",
       "authorized_actions": [
+        "legacy_step2_authorization",
+        "gate3_selection",
         "workload_identity_provisioning",
         "deployment_config",
         "live_7b_call",
@@ -914,6 +990,7 @@ Every cryptographic signature in the system is verified against a cell-protected
         "readiness_attestation",
         "daily_acceptance_token",
         "weekly_acceptance_token",
+        "shadow_acceptance_record",
         "retirement_execution",
         "migration_completion"
       ],
@@ -952,6 +1029,8 @@ Every cryptographic signature in the system is verified against a cell-protected
 }
 ```
 
+*Note on `subject_manifest_digest`:* For pre-readiness receipts (PR1..15, Gate 3, 7B, Shadow, Rollback), `subject_manifest_digest` is `null`. For readiness attestation, cutover authorization, and cutover execution receipts, `subject_manifest_digest` equals `manifest_digest` of `MIGRATION_MANIFEST.json`.
+
 ### 12.3 Standard Verifiable Execution Receipt Schema
 ```json
 {
@@ -984,7 +1063,11 @@ Every cryptographic signature in the system is verified against a cell-protected
 ### 12.4 Strict Non-Expiring Reservation & `in_doubt` Quarantine
 To guarantee strict anti-replay before any external effect occurs:
 1. **Phase 1 (Pre-Execution Reservation):** Prior to executing the authorized action, the worker atomically writes `authorization_reservation_record/v1` to cell storage indexed on `(authorization_receipt_digest, single_use_nonce)`. Any attempt to reserve a consumed or active nonce fails closed immediately.
-2. **Fail-Closed `in_doubt` Policy:** A reservation **never automatically reopens or expires**. If an execution fails, crashes, or produces an ambiguous network outcome, the reservation transitions permanently to `lifecycle_state: in_doubt`. Automated retry is strictly prohibited; resolving an `in_doubt` reservation requires an explicit operator-signed `reservation_reconciliation_receipt/v1`.
+2. **Fail-Closed `in_doubt` Quarantine Policy:**
+   * A reservation **never automatically reopens or expires**.
+   * If a worker crashes or encounters an ambiguous network response during execution, supervisor heartbeat detects the timeout ($> 300\text{s}$) and marks the reservation `reservation_state: in_doubt`.
+   * An `in_doubt` reservation is permanently quarantined. Automated retry is strictly prohibited.
+   * To retry the action, the operator must issue a **new authorization receipt with a fresh `single_use_nonce`**, while emitting an operator-signed `reservation_reconciliation_record/v1` that documents the aborted prior attempt.
 3. **Phase 2 (Append-Only Consumption):** Upon verified completion, the worker commits `authorization_consumption_record/v1`:
 
 ```json
@@ -1010,6 +1093,7 @@ The `MIGRATION_MANIFEST.json` and its companion signed attestation are generated
   "decomposition_manifest_digest": "sha256:<64_hex_chars>",
   "source_packet_digest": "sha256:<64_hex_chars>",
   "delivery_mode_decision_receipt_digest": "sha256:<64_hex_chars>",
+  "legacy_step2_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "gate3_selection_receipt_digest": "sha256:<64_hex_chars>",
   "workload_identity_authorization_receipt_digest": "sha256:<64_hex_chars>",
   "workload_identity_execution_receipt_digest": "sha256:<64_hex_chars>",
@@ -1066,12 +1150,14 @@ The `MIGRATION_MANIFEST.json` and its companion signed attestation are generated
   * `manifest_digest` is computed as the SHA-256 over RFC 8785 canonical JSON bytes of the manifest object excluding the `manifest_digest` property.
   * `subject_manifest_digest` in the attestation envelope equals `manifest_digest` identically.
   * **Signing Preimages with Strict Domain Separation:**
-    * For Authorization Receipt: `Preimage = "SMART-ADS:AUTH-RECEIPT:V1\n" || RFC8785(payload)`
-    * For Execution Receipt: `Preimage = "SMART-ADS:EXEC-RECEIPT:V1\n" || RFC8785(payload)`
-    * For Readiness Attestation: `Preimage = "SMART-ADS:READINESS-ATTESTATION:V1\n" || RFC8785(payload)`
-    * For Daily Token: `Preimage = "SMART-ADS:DAILY-TOKEN:V1\n" || RFC8785(payload)`
-    * For Weekly Token: `Preimage = "SMART-ADS:WEEKLY-TOKEN:V1\n" || RFC8785(payload)`
-    * For Migration Completion Record: `Preimage = "SMART-ADS:MIG-COMPLETION:V1\n" || RFC8785(payload)`
+    * For Authorization Receipt: `Preimage = "SMART-ADS:AUTH-RECEIPT:V1\n" || D`
+    * For Execution Receipt: `Preimage = "SMART-ADS:EXEC-RECEIPT:V1\n" || D`
+    * For Gate 3 Receipt: `Preimage = "SMART-ADS:GATE3-RECEIPT:V1\n" || D`
+    * For Readiness Attestation: `Preimage = "SMART-ADS:READINESS-ATTESTATION:V1\n" || D`
+    * For Daily Token: `Preimage = "SMART-ADS:DAILY-TOKEN:V1\n" || D`
+    * For Weekly Token: `Preimage = "SMART-ADS:WEEKLY-TOKEN:V1\n" || D`
+    * For Shadow Acceptance Record: `Preimage = "SMART-ADS:SHADOW-ACCEPTANCE:V1\n" || D`
+    * For Migration Completion Record: `Preimage = "SMART-ADS:MIG-COMPLETION:V1\n" || D`
   * **Closed Verifier Predicate:** Gate 4 and execution workers verify:
     1. Resolve `public_key_ref` in `key_authorization_registry/v1`.
     2. Confirm `key.revoked == false`.
@@ -1080,8 +1166,8 @@ The `MIGRATION_MANIFEST.json` and its companion signed attestation are generated
     5. Confirm `authorizer_principal_ref == key.principal_ref`.
     6. Confirm `action_subject.tenant_ref == key.tenant_ref`.
     7. Confirm `action_subject.action_name in key.authorized_actions`.
-    8. Compute `expected_receipt_digest` and assert `receipt.receipt_digest == expected_receipt_digest`.
-    9. Verify Ed25519 signature over `DomainPrefix || RFC8785(payload)`.
+    8. Compute `expected_digest = SHA-256(RFC8785(envelope_without_digest_and_sig))` and assert `envelope.digest == expected_digest`.
+    9. Verify Ed25519 signature over `DomainPrefix || expected_digest`.
     10. In `execution_receipt/v1`, assert `action_subject == authorization_receipt.action_subject` (byte-for-byte RFC 8785 equality).
 
 ---
