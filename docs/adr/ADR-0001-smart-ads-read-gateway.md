@@ -533,19 +533,37 @@ and normalized errors; it is the exact result artifact required by the effect-
 action matrix for provider calls.
 
 Every complete result contains one closed `normalized_fact_set` and its digest.
-Each embedded `normalized_collection_fact/v1` has exactly:
+`normalized_collection_fact/v1` is the single complete normalized-fact schema;
+no reduced, alternate, or second normalized-fact schema exists. Each embedded
+`normalized_collection_fact/v1` has exactly:
 
 ```text
-reconciliation_row_key: {resource_ref, metric_date, resource_level,
-                         breakdown_signature}
-canonical_metric_ref
-source_metric_ref
+fact_key: {binding_ref, account_ref, resource_ref, resource_level,
+           metric_date, metric_semantic_ref, source_metric_ref,
+           attribution_ref, breakdown_signature}
 presence_status
 value_type
 raw_numeric_value
 unit
 currency
 ```
+
+`fact_key` is the complete nine-field canonical key of section 6.1, named in
+this exact member order, and is required in full; no member is omitted, added,
+or reordered. `reconciliation_row_key` is not a stored member but a derived
+closed four-member projection
+`{resource_ref, metric_date, resource_level, breakdown_signature}` of
+`fact_key`, referenced by other sections; any use of
+`f.reconciliation_row_key.<m>` denotes exactly `f.fact_key.<m>` for that same
+member `m`.
+
+Metric-identity naming is a single normative bijection: `canonical_metric_ref`
+and `metric_semantic_ref` are two names for one value, and every occurrence of
+`f.canonical_metric_ref` denotes exactly `f.fact_key.metric_semantic_ref` for
+the same fact. Equality of two facts' metric identity is exact byte equality of
+that one `metric:<versioned_ref>` string; no name, tuple, or comparator
+substitutes for it. There is no independent `canonical_metric_ref` storage
+member.
 
 For a fact `f`, its set-identity value is the exact JSON array
 `I(f) = [f.reconciliation_row_key.resource_ref,
@@ -568,9 +586,19 @@ normalized_fact_set_digest =
 It contains no raw provider ID, payload, header, URL, token, or account key. A
 7B set remains quarantined inside its result/effect chain.
 
-Let `U` be the non-empty unique set of resource-observation keys
+Let `U` be the non-empty unique set of expected resource-observation keys
 `[binding_ref, account_ref, resource_ref, resource_level, metric_date,
-attribution_ref, breakdown_signature]` after date and identity validation.
+attribution_ref, breakdown_signature]`. `U` is not derived from the decoded
+observations. It is derived from a source independent of the response: the
+`expected_resource_inventory/v1` resolved from the exact registry snapshot bound
+in `admitted_collection/v1` for this tenant, binding, account, and resource
+scope, intersected with the admitted date range. That inventory enumerates every
+resource expected to report for the admitted scope and window, so a response
+that omits a resource entirely — including an empty or all-omitting response —
+still contributes that resource's expected keys to `U` and is therefore
+detectable rather than silently absent. The observed candidate keys are compared
+against `U`, never used to define it; an observed key outside `U` is itself a
+set-inequality defect.
 Let `M` be the non-empty, unique, canonically sorted union of
 `required_metrics` resolved from every requested capability in the exact
 driver-capability snapshot. Each member of `M` resolves one canonical
@@ -582,11 +610,14 @@ is exactly that set of complete fact-key objects. The
 verifier recomputes these mutually exclusive predicates; producer status is
 never trusted:
 
-1. `failed` iff admission, network, authentication, or transport failed, or a
-   structurally decoded response cannot produce a non-empty `U`;
+1. `failed` iff admission, network, authentication, or transport failed, or the
+   independent `expected_resource_inventory/v1` cannot be resolved to a non-empty
+   `U`;
 2. `partial` iff `failed` is false and schema failure, truncation, a non-empty
    continuation, duplicate fact key, unknown requested value, or set inequality
-   between actual candidate `fact_key` objects and the expected fact universe exists; and
+   between actual candidate `fact_key` objects and the expected fact universe
+   exists — including any expected resource for which the response produced no
+   candidate at all; and
 3. `complete` iff `failed` and `partial` are false, actual and expected fact-
    key sets are equal, exactly one observed candidate exists for every expected
    key, and no extra candidate exists.
@@ -681,6 +712,9 @@ declared -> deferred
 unavailable -> revalidation_pending
 deferred -> revalidation_pending
 revalidation_pending -> declared
+fixture_certified -> invalidated
+live_certified -> invalidated
+invalidated -> revalidation_pending
 ```
 
 Each capability has a non-empty, unique `required_metrics` set and an exact
@@ -690,17 +724,43 @@ resource scope. 7A can promote a real capability only to `fixture_certified`.
 `not_comparable`, `UNRECONCILED`, `UNAVAILABLE`, or `BLOCKED` result denies
 promotion. Semantic disagreement is never `DEGRADED`.
 
-No registry state is changed in place. Recovery from `unavailable` or
-`deferred` requires a signed immutable
+No registry state is changed in place. Recovery from `unavailable`,
+`deferred`, or `invalidated` requires a signed immutable
 `capability_revalidation_transition/v1` containing the exact prior snapshot
 locator/digest/state, capability semantic version, required metrics, scope,
 driver-contract and pinned-source digests, fresh evidence locators, reason,
 new snapshot locator/digest, signer, time, and monotonic CAS sequence. All
-three recovery states deny credentials, transport, and provider I/O. Re-entry
+four non-promoted states — `unavailable`, `deferred`, `invalidated`, and
+`revalidation_pending` — deny credentials, transport, and provider I/O. Re-entry
 to `declared` requires fresh offline 7A prerequisites; changed scope, required
 metrics, driver contract, or semantic version creates a new capability
 declaration instead. Stale or replayed snapshots reject, and live promotion
 still requires separately authorized 7B.
+
+A certified capability does not stay certified after disqualifying evidence. A
+signed immutable `capability_invalidation_transition/v1` moves a
+`fixture_certified` or `live_certified` capability to `invalidated` and is
+mandatory whenever disqualifying evidence appears, including: a
+`capability_revalidation_transition/v1` whose fresh 7A prerequisites fail; a 7B
+bundle for that capability whose `bundle_outcome` is not `verified`, or any
+required metric that resolves to `UNRECONCILED`, `UNAVAILABLE`, `BLOCKED`, or a
+mismatch; expiry of the covering `live_certification_certificate/v1` without
+timely recertification; a driver-contract, pinned-source, official-source,
+schema-bundle, mapping, parser, or adapter change that alters the
+certification fingerprint; or a `retracted_tombstone`/`not_applicable_at_level`
+signal that removes a required metric at the certified scope. The transition
+binds the exact prior certified snapshot locator/digest/state, the disqualifying
+evidence locator(s) and reason, the new `invalidated` snapshot
+locator/digest, signer, time, and monotonic CAS sequence, and — for a
+`live_certified` source — the exact `live_certification_head/v1` it invalidates
+so operational admission can no longer resolve a stale certified head. An
+`invalidated` capability denies all credentials, transport, and provider I/O; it
+cannot re-enter `fixture_certified` or `live_certified` directly. It returns to
+service only through `invalidated -> revalidation_pending -> declared` followed
+by fresh offline 7A and, for live use, separately authorized 7B and a new
+certification transition and head CAS. Recertification never regresses or
+silently overwrites state; it either finalizes a new certified snapshot from
+`declared` or leaves the capability non-promoted.
 
 `certification_7a_record/v1` is the offline capability record. It binds the
 capability, wheel, parser, adapter, mappings, fixtures, sandbox, and mandatory
@@ -777,6 +837,7 @@ revalidation. A newer version is not presumed compatible.
   "certification_fingerprint": {
     "selected_meta_api_version": "<EXACT_VERSION_SELECTED_AT_GATE_3>",
     "reference_client_identity_digest": "sha256:<64_lowercase_hex>",
+    "official_source_locators_digest": "sha256:<64_lowercase_hex>",
     "candidate_driver_contract_digest": "sha256:<64_lowercase_hex>",
     "canonical_query_digest": "sha256:<64_lowercase_hex>",
     "parser_code_digest": "sha256:<64_lowercase_hex>",
@@ -825,8 +886,29 @@ locator resolves an earlier certification-role selection and every member of
 `certification_fingerprint` must equal the resolved selection byte-for-byte.
 A renewal cannot select, replace, downgrade, or broaden a version.
 The fingerprint is complete: any parser, adapter, mapping-rule, schema-bundle,
-or resource-mapping change is a semantic replacement rather than an equivalent
-renewal.
+resource-mapping, or official-source change is a semantic replacement rather
+than an equivalent renewal.
+
+`official_source_locators_digest` anchors the independent Meta reference
+comparator to immutable official sources by their content digests, not merely to
+the selected api-version string. It is exactly
+`"sha256:" || lowercase_hex(SHA-256(RFC8785(L_off)))`, where `L_off` is the
+non-empty, unique array of canonical six-member `git_artifact_provenance/v1`
+locators for the exact official Meta SDK / REST client source artifacts used by
+the reference — including the pinned upstream reference of section 4.1
+(`pipeboard-co/meta-ads-mcp@2ef198e266ca6a37b6dc2c42335f0a0885002771`, path
+`meta_ads_mcp/core/insights.py`, symbol `get_insights`) and the exact official
+SDK package or direct-REST client identified by
+`reference_client_identity` — sorted by ascending raw bytes of
+`RFC8785(locator)` with duplicates rejected. Each locator resolves to an
+immutable object whose repository, commit, path, blob OID, and file-content
+SHA-256 equal the resolved provenance byte-for-byte; a bare digest, mutable
+package name, unpinned tag, or unresolved locator rejects. The
+`gate3_evidence_packet/v1` binds the same resolved `L_off` array, and the
+verifier recomputes `official_source_locators_digest` from it. Because this
+member is inside `certification_fingerprint`, an operational renewal must repeat
+it byte-for-byte and any change to an official comparator source forces a fresh
+certification-role selection and fresh 7B rather than a renewal.
 
 Both roles retain the 900-second action-time interval. Candidate/reference 7B
 calls use one current certification-role selection; an operational provider
@@ -906,6 +988,18 @@ candidate_execution:
   row_count: "<nonnegative integer>"
   row_universe_digest: "sha256:<64_lowercase_hex>"
   normalized_fact_set_digest: "sha256:<64_lowercase_hex>"
+  gate3_certification_fingerprint:
+    selected_meta_api_version: "<EXACT_VERSION_SELECTED_AT_GATE_3>"
+    reference_client_identity_digest: "sha256:<64_lowercase_hex>"
+    official_source_locators_digest: "sha256:<64_lowercase_hex>"
+    candidate_driver_contract_digest: "sha256:<64_lowercase_hex>"
+    canonical_query_digest: "sha256:<64_lowercase_hex>"
+    parser_code_digest: "sha256:<64_lowercase_hex>"
+    adapter_code_digest: "sha256:<64_lowercase_hex>"
+    mapping_rules_digest: "sha256:<64_lowercase_hex>"
+    schema_bundle_digest: "sha256:<64_lowercase_hex>"
+    resource_mapping_contract_digest: "sha256:<64_lowercase_hex>"
+    authorized_certification_scope: "scope:<opaque>"
 reference_execution:
   reference_workload_ref: workload:independent_meta_reference_harness
   provider_target_ref: provider-target:independent-meta-reference
@@ -926,10 +1020,22 @@ reference_execution:
   row_universe_digest: "sha256:<64_lowercase_hex>"
   normalized_fact_set_digest: "sha256:<64_lowercase_hex>"
   reference_run_digest: "sha256:<64_lowercase_hex>"
+  gate3_certification_fingerprint:
+    selected_meta_api_version: "<EXACT_VERSION_SELECTED_AT_GATE_3>"
+    reference_client_identity_digest: "sha256:<64_lowercase_hex>"
+    official_source_locators_digest: "sha256:<64_lowercase_hex>"
+    candidate_driver_contract_digest: "sha256:<64_lowercase_hex>"
+    canonical_query_digest: "sha256:<64_lowercase_hex>"
+    parser_code_digest: "sha256:<64_lowercase_hex>"
+    adapter_code_digest: "sha256:<64_lowercase_hex>"
+    mapping_rules_digest: "sha256:<64_lowercase_hex>"
+    schema_bundle_digest: "sha256:<64_lowercase_hex>"
+    resource_mapping_contract_digest: "sha256:<64_lowercase_hex>"
+    authorized_certification_scope: "scope:<opaque>"
 row_pairing:
-  canonical_key: "resource_ref,metric_date,resource_level,breakdown_signature"
-  aggregation_rule: sum_by_canonical_fact_key
-  deduplication_rule: canonical_fact_key_unique
+  canonical_key: "resource_ref,metric_date,resource_level,breakdown_signature,canonical_metric_ref"
+  aggregation_rule: sum_by_canonical_fact_key_and_metric
+  deduplication_rule: canonical_fact_key_and_metric_unique
   maximum_retrieval_skew_seconds: 300
 fact_reconciliations: "<non-empty sorted array of fact_reconciliation/v1 objects>"
 logical_fact_reconciliation_digest: "sha256:<64_lowercase_hex>"
@@ -943,8 +1049,9 @@ is the exact JSON array
 `K(f) = [C(f).resource_ref, C(f).metric_date, C(f).resource_level,
 C(f).breakdown_signature]`. Let `U7` be the unique array of complete `C(f)`
 objects sorted by ascending raw bytes of `RFC8785(K(f))`; a duplicate `K(f)`
-is one row, but conflicting `C(f)` bytes reject. The row-universe digest on
-each side is exactly:
+is one row, but conflicting `C(f)` bytes reject. `U7` is a resource-key
+universe only and carries no metric identity; it never pairs or counts facts by
+itself. The row-universe digest on each side is exactly:
 
 ```text
 row_universe_digest =
@@ -953,8 +1060,22 @@ row_universe_digest =
             0x00 || RFC8785(U7)))
 ```
 
-Candidate and reference row counts equal `length(U7)`, and their recomputed
-universe digests must match, with no truncation. Both retrieval timestamps must
+Pairing and counting are keyed by full metric identity, never by `U7` alone.
+For a fact `f`, its metric-scoped identity is the exact five-member JSON array
+`Kfive(f) = [C(f).resource_ref, C(f).metric_date, C(f).resource_level,
+C(f).breakdown_signature, f.canonical_metric_ref]`, adding the
+`f.fact_key.metric_semantic_ref` value (section 4.2 bijection). Let `U7M` be the
+unique array of complete `{canonical_fact_key: C(f), canonical_metric_ref}`
+objects sorted by ascending raw bytes of `RFC8785(Kfive(f))`; a duplicate
+`Kfive(f)` is one entry, but conflicting bytes reject. Distinct metrics under
+the same `C(f)` are distinct `U7M` entries and are never collapsed. `U7M` on
+each side must equal the required-metric cross-product `U7 x required_metrics`,
+so a missing or extra metric for any resource key is a set defect.
+
+Candidate and reference row counts each equal `length(U7M)`, which equals
+`length(U7) * length(required_metrics)` — the per-metric count, not the
+metric-blind `length(U7)`. Their recomputed `U7` and `U7M` universes must both
+match across sides, with no truncation. Both retrieval timestamps must
 be inside the allowed skew and belong to the same admitted query window.
 
 The candidate contract locator resolves the exact Phase-1 packet in section
@@ -962,8 +1083,29 @@ The candidate contract locator resolves the exact Phase-1 packet in section
 `source_contract_ref` must be exactly
 `opaque-driver-contract:<driver_contract_digest>`. Both sides resolve the
 same fresh Gate-3 selection, but only the independent reference inherits its
-selected Meta API version. The selected-version, driver-contract, canonical-
-query, run, and scope equalities are recomputed before both effects.
+selected Meta API version.
+
+Each execution record — both `candidate_execution` and `reference_execution` —
+binds a complete `gate3_certification_fingerprint` member that is byte-identical
+to the full `certification_fingerprint` object of section 5.3, with all eleven of
+its members present: `selected_meta_api_version`,
+`reference_client_identity_digest`, `official_source_locators_digest`,
+`candidate_driver_contract_digest`,
+`canonical_query_digest`, `parser_code_digest`, `adapter_code_digest`,
+`mapping_rules_digest`, `schema_bundle_digest`,
+`resource_mapping_contract_digest`, and `authorized_certification_scope`. No
+member is omitted, blanked, or replaced by a subset; per-member digests already
+carried elsewhere in the execution record (for example
+`driver_contract_digest`, `canonical_query_digest`, `adapter_code_digest`,
+`parser_code_digest`, `mapping_rules_digest`) must equal the corresponding
+fingerprint members exactly. The recheck is over the whole object: before both
+effects the verifier recomputes byte-for-byte equality of each execution
+record's `gate3_certification_fingerprint` against the resolved
+certification-role Gate-3 selection's `certification_fingerprint` and against
+the other side's fingerprint, in addition to the run and scope equalities. Any
+single-member difference — including `schema_bundle_digest`,
+`resource_mapping_contract_digest`, or `reference_client_identity_digest` —
+fails 7B; a partial or subset fingerprint match is never sufficient.
 
 The two live calls are distinct external effects. The candidate and reference
 each require their own `authorization_receipt/v1` and successful pre-I/O
@@ -1161,6 +1303,54 @@ The fixture emits no `certification_record/v1`, capability state transition,
 provider evidence, or live execution. Before and after registry digests must be
 equal. The two metrics are never aliases, fallbacks, or imputations.
 
+### 5.5.1 Base Metric Identity Contract
+
+Every base (provider-observation) metric named by a `metric_semantic_ref` has an
+immutable identity fixed by a signed content-addressed
+`base_metric_definition/v1`, resolved from the pinned driver-capability
+snapshot. `metric_semantic_ref` is not an opaque token: its identity is this
+closed object, which contains exactly the canonical name, unit, dimensions, and
+aggregation semantics:
+
+```json
+{
+  "$schema": "smart_ads/base_metric_definition/v1",
+  "metric_semantic_ref": "metric:impressions_v1",
+  "canonical_name": "impressions",
+  "value_type": "int64_count",
+  "unit": "count",
+  "currency_rule": "must_be_null",
+  "dimensions": ["resource_ref", "resource_level", "metric_date",
+                 "attribution_ref", "breakdown_signature"],
+  "aggregation_semantics": "additive_across_none",
+  "metric_definition_digest": "sha256:<64_lowercase_hex>"
+}
+```
+
+`value_type`/`unit`/`currency_rule` are drawn from the closed union of section
+4.3: a count uses `int64_count`/`count`/`must_be_null`, minor currency uses
+`int64_minor_currency`/`minor_currency`/`must_be_query_currency`, and a ratio
+uses `decimal_ratio`/`ratio`/`must_be_null`. `dimensions` is a non-empty,
+unique, canonically sorted set drawn only from the closed `fact_key` resource
+members; it fixes the exact grain at which the metric is defined.
+`aggregation_semantics` is the closed enum
+`additive_across_none | additive_within_resource | non_additive`; Phase-1
+`impressions`, `clicks`, and `spend` are each `additive_across_none`, matching
+the section 4.1 rule that campaign rows are never aggregated across
+`resource_ref`. `metric_definition_digest` is exactly
+`"sha256:" || lowercase_hex(SHA-256(RFC8785(base_metric_definition without its
+metric_definition_digest member)))`; the member is deleted, never blanked. The
+identity is versioned through `metric_semantic_ref`: any change to canonical
+name, value type, unit, currency rule, dimensions, or aggregation semantics
+requires a new `metric:<name>_v<n+1>` ref and a new definition, never a silent
+edit of an existing one. Every base fact and every `analytics_landing_row/v1`
+whose `metric_semantic_ref` names a base metric must satisfy that metric's
+resolved value type, unit, currency rule, and dimension grain, and the driver
+contract's `source_metric_ref` for that metric must resolve to exactly this
+definition; a value type, unit, currency, or grain inconsistent with the
+resolved definition rejects. Derived metrics reuse this same identity for every
+input named in `input_metrics`.
+
 ### 5.6 Derived Metric Definitions
 
 ```json
@@ -1300,6 +1490,32 @@ permitted by the exhaustive matrix in section 4.3:
   "row_digest": "sha256:<64_lowercase_hex>"
 }
 ```
+
+The landing row is a deterministic total projection of exactly one
+`normalized_collection_fact/v1` of section 4.2 together with the enclosing
+`collection_result/v1` retrieval context; the mapping is field-by-field and
+admits no inference:
+
+- `fact_key` is copied byte-for-byte from the fact's nine-field `fact_key`,
+  member for member in the same order;
+- `value_type`, `raw_numeric_value`, `unit`, `currency`, and `presence_status`
+  are copied byte-for-byte from the fact's members of those exact names;
+- `metric_origin`, `unknown_reason`, and `calculation_status` are the exact
+  values the section 4.3 matrix assigns to that fact's `(metric_origin,
+  presence/calculation state)` row — one row of that closed matrix, never a
+  free choice;
+- `collected_at_utc` is the canonical section 6.1 timestamp derived from the
+  result's `retrieved_at_utc`; `source_observation_ref`, `adapter_version`, and
+  `semantic_version` are copied from the result's retrieval context; and
+- `semantic_observation_digest` and `row_digest` are recomputed by their
+  section 6.1 equations and are never copied or asserted.
+
+Every landing-row member has exactly one such source; there is no landing-row
+member without a defined projection source, and no fact member is dropped. The
+projection is therefore reproducible byte-for-byte from the fact plus context,
+and the verifier recomputes it rather than trusting a producer-supplied row.
+The fact's `source_metric_ref` (provider or `formula:` arm) is copied into the
+landing row's `fact_key.source_metric_ref` unchanged.
 
 Duplicate `fact_key` objects in a promoted generation are forbidden. A
 tombstone is represented only by the closed `presence_status:
@@ -1467,6 +1683,24 @@ physical_parquet_set_digest =
             0x00 || RFC8785(Q)))
 ```
 
+Every `partition_key` is a deterministic function of the `metric_date` of the
+rows it labels, not a producer-chosen string. The normative rule is
+`partition_key(metric_date) = "year=" || YYYY || "/month=" || MM`, where `YYYY`
+and `MM` are exactly the four-digit year and zero-padded two-digit month of the
+`metric_date` (`YYYY-MM-DD`) under the reporting calendar; no other separator,
+component order, width, or additional segment is valid. Because Phase-1
+`date_rule` is `previous_local_day`, every landing row in one generation shares
+one `metric_date` and therefore one derived `partition_key`. The verifier
+recomputes `partition_key(row.fact_key.metric_date)` for every decoded row and
+requires equality with the generation manifest `partition_key`, with every
+embedded `parquet_object_locator/v1.partition_key`, with the
+`active_partition_head/v1.partition_key` in the published catalog entry, and
+with the `dataset_snapshot/v1` `partition_heads[].partition_key` that resolves
+this generation. A row whose derived label differs from any of these stage
+labels, or any two stages that disagree, rejects before promotion; a
+`partition_key` that is not the derivation of the rows' `metric_date` is never
+accepted at any stage.
+
 `row_schema` is mandatory and equals exactly
 `smart_ads/analytics_landing_row/v1`. Collection candidates, sanitized
 candidates, logical-row projections, and decoded Parquet rows are complete
@@ -1614,7 +1848,32 @@ P1 profile and must equal the inline column/type constraints byte-for-byte.
 Each cell is a closed tagged
 scalar `null | boolean | int64 | decimal6 | utf8 | date | timestamp | opaque_ref`;
 null has only a null value, boolean uses a JSON boolean, and all other variants
-use their canonical string grammar. The bound query definition fixes column
+use their canonical string grammar. The canonical string grammar for each
+tagged scalar is exact and sufficient for byte-for-byte reproduction; the value
+is always a JSON string (never a native number) encoded as UTF-8, normalized to
+Unicode NFC, with no surrounding whitespace, no thousands separators, no sign on
+zero, and no escaping beyond the mandatory JSON escapes for `"`, `\`, and the
+C0 controls:
+
+- `int64`: `^(0|-?[1-9][0-9]*)$`, parsed in `-9223372036854775808 ..
+  9223372036854775807`; no `+`, no leading zero, no `-0`.
+- `decimal6`: `^(0|-?[1-9][0-9]*)\.[0-9]{6}$` — exactly six fractional digits,
+  a single `.` separator, no exponent, no `-0.000000`.
+- `utf8`: any valid UTF-8 string in NFC; the only transformations are NFC
+  normalization and the mandatory JSON escapes above.
+- `date`: `^[0-9]{4}-[0-9]{2}-[0-9]{2}$` (proleptic Gregorian `YYYY-MM-DD`).
+- `timestamp`: the section 6.1 canonical fixed-width RFC 3339 UTC form with
+  exactly six fractional digits and a literal `Z`
+  (`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z$`); no
+  offset other than `Z`, no width variation.
+- `opaque_ref`: `^[a-z][a-z0-9_]*:[A-Za-z0-9._:-]+$` — a lowercase-kind prefix,
+  a single `:`, then the opaque body; no whitespace, no NUL.
+
+Numbers use ASCII digits only; `NaN`, `Infinity`, exponents, and native floats
+are forbidden in every variant. Because every non-null non-boolean cell is one
+of these fixed grammars, the RFC 8785 serialization of a cell is reproducible
+byte-for-byte and the byte-for-byte comparisons and digests over results are
+well defined. The bound query definition fixes column
 order and deterministic row ordering. Unknown columns/types, unordered output,
 native floats, duplicate rows where the schema requires uniqueness, and extra
 members reject.
@@ -2271,8 +2530,17 @@ proof. Any mismatch, absent readback, or receipt/effect substitution rejects.
 contiguous hourly buckets. Each signed bucket binds start/end, gateway query
 count greater than zero, error count/rate below `0.001%`, expected baseline and baseline
 source, feature-flag/routing evidence from two independent sources, telemetry
-source, and monitor heartbeat. The record contains the ordered bucket locators,
-coverage start/end, `bucket_count: 336`, and `gap_count: 0`.
+source, and monitor heartbeat. Each bucket also binds the exact cutover
+identity — the `cutover_execution_result/v1` locator/digest, its
+`tripartite_digest`, the consumer feature-flag/delegation routing target, and
+the effective cutover time — and proves byte-for-byte equality with that same
+identity: the routing/feature-flag evidence observed in the bucket must equal
+the cutover result's verified target, so every bucket demonstrates the
+post-cutover state is unchanged from the exact cutover, not merely healthy. A
+bucket whose observed routing target, feature-flag state, or tripartite identity
+differs from the cutover result rejects. The record contains the ordered bucket
+locators, the single cutover-identity locator/digest/tripartite-digest repeated
+by every bucket, coverage start/end, `bucket_count: 336`, and `gap_count: 0`.
 
 Coverage starts at the exact effective cutover time recorded by the matching
 cutover consumption/execution pair, with no selectable delay. Bucket 0 is the
@@ -2280,6 +2548,28 @@ half-open interval from that instant to one hour later; the next 335 buckets
 continue in exact one-hour increments. Thus a partial wall-clock hour is still
 a full relative one-hour bucket, and no rounding to civil-hour boundaries is
 permitted. The last interval ends exactly 336 hours after effective cutover.
+
+If any stabilization bucket detects drift from the exact cutover identity or a
+breach of its SLO, the record fails closed and a post-cutover incident rollback
+is available and testable. Unlike the readiness `rollback_test_protocol/v1` of
+section 11.2 — which is a pre-cutover exercise proving the toggle mechanism —
+the incident rollback is a real reversion of an already-cut-over gateway to the
+direct legacy read path. It is a distinct human-authorized effect on the closed
+matrix using the `rollback_target` subject and the same feature-flag/delegation
+locators as the cutover, and it produces a signed
+`incident_rollback_receipt/v1` binding the migration run, the exact cutover
+identity being reverted, the disqualifying stabilization bucket(s) or incident
+evidence, a signed prestate proving the gateway flag is currently true, the
+toggle/ACK/drain/readback events proving the flag is observed false under the
+same routing target, per-query zero-loss/exactly-once evidence across the
+toggle boundary, and the final legacy-path readback. Its transition bound is the
+same at-most-500-ms toggle/ACK/drain interval as section 11.2, and it is testable
+by the identical event-derived ID-set equality method; success returns
+authoritative reads to the direct legacy path without retiring or mutating any
+Write Plane or `/ibvi-ads` surface. An incident rollback does not by itself
+resume the migration; re-cutover requires a fresh cutover authorization and a
+new stabilization period. Stabilization completion is valid only when no
+incident rollback occurred within its 336-hour window.
 
 After stabilization, `legacy_read_endpoint_inventory/v1` is finalized from
 the exact protected `legacy_seam_release/v1` Git artifacts and one resolved
@@ -2294,6 +2584,20 @@ refs, deployed release commit, runtime binary digest,
 capture-method version and algorithm digest, a non-empty canonical six-member
 deployment-source locator array, its digest, and a complete canonical
 effective-operation array.
+
+Retirement is verified against the seam release that is actually deployed, not
+merely the one recorded in Git. The readback carries a mandatory equality:
+`seam_release == deployed_release`. Concretely, the readback's `deployed release
+commit` and `runtime binary digest`, and the same fields inside the resolved
+`legacy_deployment_state_snapshot/v1`, must equal the protected-release Git
+identity `{repository, commit_sha, tree_oid}` of the bound
+`legacy_seam_release/v1` (section 9.2) byte-for-byte, and the readback's
+`seam-release locator and digest` must be that exact release record. The
+verifier recomputes this equality; a deployed commit, tree, or runtime binary
+that differs from the protected seam release, or a seam-release locator/digest
+that does not resolve the bound release, fails closed before the inventory is
+accepted. A readback that proves surface enumeration against a deployment other
+than the approved-and-deployed seam release is invalid.
 
 `legacy_deployment_state_snapshot/v1` is a separately profiled P1 envelope
 signed by the legacy deployment control plane. Its closed payload binds the
@@ -2404,6 +2708,21 @@ route, or classification; a readback/inventory mismatch; a duplicate; or a
 Read/Write overlap rejects before retirement authorization. After this
 inventory is verified, a separate human gate may authorize retirement of
 exactly its `retire_read` set. Write Plane and `/ibvi-ads` remain active.
+
+Retirement never executes against a stale surface. Immediately before the
+retirement authorization is issued, and again at the retirement reservation and
+immediate pre-effect boundary, the verifier re-enumerates the current deployed
+legacy surface by resolving a fresh `legacy_deployment_readback/v1` under the
+same pinned `legacy_surface_enumeration_contract/v1` and capture-tool identity,
+and requires its effective-operation array, static Git source set, and the three
+set/disjointness digests to be byte-identical to the finalized
+`legacy_read_endpoint_inventory/v1`. Any drift — a new, removed, reclassified,
+or re-routed operation, a changed deployed release or runtime binary, or an
+altered source set — aborts: no retirement authorization is issued, or an
+already-issued reservation is quarantined terminal `in_doubt` with zero changed
+operations, and a fresh inventory must be finalized and re-gated before
+retirement may be reconsidered. Only a current re-enumeration equal to the
+finalized inventory permits the retirement effect to proceed.
 
 `retirement_verification_record/v1` covers exactly 168 unique, contiguous
 hourly buckets after the retirement execution receipt. Every bucket proves
@@ -2601,10 +2920,18 @@ and their mandatory fields are:
   readiness-attestation, readiness-attestation-effect-proof, signed
   `gate4_verification_record/v1`, and protected `legacy_seam_release/v1`
   locators plus exact digests; tripartite cutover digest; tenant; binding;
-  consumer Git identity; and exact verified feature-flag/delegation target;
+  consumer Git identity; exact verified feature-flag/delegation target; the
+  current `live_certification_head/v1` locator/epoch/digest and its
+  certification-fingerprint digest; the covering
+  `live_certification_certificate/v1` locator and its `valid_until_utc`; and the
+  Gate-4 PASS TTL/`valid_until_utc`, all rechecked at cutover reservation and
+  immediate pre-I/O;
 - `retirement_target`: run-context and
   `stabilization_period_completion_record_locator`, exact
-  `legacy_read_endpoint_inventory/v1` locator and digest, decommission
+  `legacy_read_endpoint_inventory/v1` locator and digest, the fresh
+  pre-effect re-enumeration `legacy_deployment_readback/v1` locator/digest whose
+  effective-operation, static-source, and disjointness digests equal that
+  inventory, decommission
   configuration digest, tenant, binding, and target resource. Final retirement telemetry is
   deliberately absent because it can exist only after the effect; and
 - `retention_release_target`: run-context, cell, expected root-set head locator,
@@ -2625,7 +2952,7 @@ from these eleven rows rather than asserted elsewhere:
 | `rollback_toggle` | `rollback_target` | shadow acceptance, signed protocol/prestate, rollback authorization | `rollback_toggle_result/v1` | `rollback_test_effect_proof` |
 | `readiness_attestation_sign` | `readiness_attestation_target` | finalized pre-authorized payload and recursive manifest-validation PASS | `readiness_attestation/v1` | `readiness_attestation_effect_proof` |
 | `cutover_execution` | `cutover_target` | signed same-run Gate-4 verification PASS plus a fresh human authorization over the byte-identical target | `cutover_execution_result/v1` | `cutover_effect_proof` |
-| `legacy_read_retirement` | `retirement_target` | completed 336-hour stabilization, exact disjoint legacy inventory, and retirement gate | `retirement_execution_result/v1` | `retirement_effect_proof` |
+| `legacy_read_retirement` | `retirement_target` | completed 336-hour stabilization, exact disjoint legacy inventory, current pre-effect re-enumeration equal to that inventory, and retirement gate | `retirement_execution_result/v1` | `retirement_effect_proof` |
 | `retention_release` | `retention_release_target` | current root-set head and complete before/after reachability recomputation | `retention_release_result/v1` | `retention_release_effect_proof` |
 
 For every row, the authorization profile, subject discriminator, predecessor
@@ -2686,6 +3013,32 @@ authoritative root set but authorizes no physical object deletion. Physical
 garbage collection is a separate future destructive action with its own human
 authorization, reservation, execution, result, consumption, and effect proof;
 it is outside ADR-0001.
+
+Root admission is atomic and symmetric to release. A new retention root enters
+the live set only through a `retention_root_admission` effect on the same
+one-way chain and the same `retention_root_set_head/v1`. After reservation and
+immediately before mutation, the executor re-resolves the head, requires exact
+equality with the authorized subject, recomputes complete transitive
+reachability, and proves that every object transitively reachable from the
+admitted root already resolves as an immutable predecessor — no admitted root
+may reach an unresolved or not-yet-created object. Admission is one linearizable
+CAS from the authorized `(epoch, head digest)` to `(epoch + 1, proposed
+root-set digest)` that adds exactly the authorized root(s); a graph gap, an
+unresolved reachable object, a stale head, or a CAS conflict admits nothing and
+cannot retry under the same nonce. `retention_root_admission_result/v1` and
+`retention_root_admission_proof/v1` mirror the release result and proof, binding
+the four-record effect proof, before/after heads, the
+`retention_root_set_cas_receipt/v1` locator, reachability graphs, and admitted
+roots/objects.
+
+The transitive pinning invariant therefore holds in both directions and at
+every epoch: immediately after any admission or release CAS, an object is pinned
+if and only if it is transitively reachable from some live root in the new
+head. Admission establishes that every object reachable from an admitted root is
+pinned; release establishes that no retained root reaches any released object,
+so released objects become unpinned exactly. No object is left half-pinned by a
+partial mutation, and the two operations are the only ways the live root set
+changes.
 
 `retention_release_result/v1` is the action-specific result emitted immediately
 after the successful root-set CAS and before execution finalization; it binds
@@ -2902,6 +3255,27 @@ allowed internal MCP inventory, and deny-by-default direct-route behavior from
 the same protected consumer commit. Shadow, rollback, and cutover subjects must
 use these same locators and equal key/routes/delegation/consumer identity.
 
+The consumer Git policy above proves what was approved in source; it is not
+sufficient on its own, because approved Git bytes do not prove what is running
+in the deployed Hermes runtime. Before shadow activation and again before
+cutover, the verifier resolves one `consumer_deployment_readback/v1` — a
+separately profiled P1 envelope signed by the Hermes deployment control plane —
+and requires it to bind, and prove byte-for-byte equality with, the approved
+consumer identity: the exact consumer repository and 40-character commit SHA;
+the deployed release/build and runtime binary digest; a readback of the live
+adapter and feature-flag artifacts whose resolved path, blob OID, and
+file-content SHA-256 equal the tripartite `consumer_side` Git artifacts; the
+live `flag_key` and its `default_enabled: false` and route table; and the
+resolved `consumer_feature_flag_contract/v1` and `ibvi_ads_delegation_contract/v1`
+digests. The readback is captured under an authenticated clock and enumerated by
+a pinned capture tool with its own Git/build provenance, replayed by the
+verifier rather than trusted as a label. A deployed release, runtime binary,
+adapter/feature-flag bytes, flag key, route, delegation, or contract digest that
+differs from the approved Git identity fails closed; a bare digest or asserted
+readback label is invalid. Shadow, rollback, and cutover subjects each repeat
+this readback locator/digest and its equality to the approved consumer
+identity.
+
 The adapter artifact and feature-flag artifact are distinct roles; no equality
 between their bytes, paths, blobs, or digests is asserted.
 
@@ -3037,6 +3411,27 @@ Gate-4 verification record -> fresh human cutover authorization -> reservation
 -> finalized cutover result -> execution -> consumption -> cutover effect proof
 ```
 
+A Gate-4 PASS is not a durable licence to cut over. The `gate4_verification_record/v1`
+carries a bound TTL and is bound to the exact `live_certification_head/v1`
+locator/epoch/digest and its certificate validity that it verified; the
+`cutover_target` additionally carries that current head locator/epoch/digest and
+the certificate's `valid_until_utc`. At both the cutover reservation and again at
+the immediate pre-I/O boundary, the executor re-resolves the protected current
+`live_certification_head/v1` and the covering `live_certification_certificate/v1`
+and requires: the re-resolved head to be byte-identical to the head bound in the
+Gate-4 record and `cutover_target`; the certification fingerprint to be
+unchanged; the certificate to be currently valid with the authenticated-clock
+interval and `now + uncertainty` strictly inside `valid_until_utc`; and the
+Gate-4 PASS to be within its TTL relative to the same authenticated clock. A head
+that advanced, forked, or was invalidated (section 5.1), a certificate that
+expired or was replaced, a changed fingerprint, or an expired Gate-4 TTL fails
+closed before reservation on the first check and before any cutover I/O on the
+second; a first-check failure leaves reservation and all downstream counters at
+zero, and a second-check failure quarantines the reservation as terminal
+`in_doubt` and requires a fresh authorization and nonce. An obsolete Gate-4 PASS
+can therefore never authorize a cutover after the certification it relied on has
+changed or expired.
+
 Gate 4 remains the sole readiness-verification gate. The later human receipt is
 the sole cutover-effect authority, not a second readiness gate. No node points
 to a later artifact, and no nonce, reservation, or effect slot is duplicated.
@@ -3147,7 +3542,8 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `gov1_convergence_record/v1` | P1 | GOV1 convergence verifier | H / PR3 finalization | `SMART-ADS:GOV1-CONVERGENCE:V1\n` | same run/build/wheel across boundary, sandbox, negative, MCP and 7A evidence | GOV1 convergence |
 | `clock_attestation/v1` | P1 | cell clock attestor | E / maximum age | `SMART-ADS:CLOCK:V1\n` | bounded uncertainty and monotonic time | admission |
 | `private_registry_snapshot/v1` | P1 | registry publisher | E / snapshot validity | `SMART-ADS:PRIVATE-REGISTRY:V1\n` | bindings, capabilities, refs, collision checks | admission/transition |
-| `capability_revalidation_transition/v1` | P1 | capability registry authority | E / transition time | `SMART-ADS:CAPABILITY-REVALIDATION:V1\n` | append-only unavailable/deferred to revalidation-pending to declared replacement | capability recovery |
+| `capability_revalidation_transition/v1` | P1 | capability registry authority | E / transition time | `SMART-ADS:CAPABILITY-REVALIDATION:V1\n` | append-only unavailable/deferred/invalidated to revalidation-pending to declared replacement | capability recovery |
+| `capability_invalidation_transition/v1` | P1 | capability registry authority | E / transition time | `SMART-ADS:CAPABILITY-INVALIDATION:V1\n` | append-only fixture/live-certified to invalidated on disqualifying evidence, binding invalidated head | capability invalidation |
 | `ibvi_ads_delegation_context/v1` | P1 | host conductor | E / request interval | `SMART-ADS:IBVI-ADS-DELEGATION-CONTEXT:V1\n` | runtime-owned exact tenant/binding/scope/method nonce under sole `/ibvi-ads` route | admission |
 | `ibvi_ads_delegation_contract/v1` | P1 | consumer routing verifier | H / Git resolution | `SMART-ADS:IBVI-ADS-DELEGATION-CONTRACT:V1\n` | protected host conductor policy and no direct Smart Ads business-route bypass | consumer integration |
 | `admitted_collection/v1` | P1 | admission runtime | E / admitted query window | `SMART-ADS:ADMITTED-COLLECTION:V1\n` | purpose evidence, exact query, zero-I/O-before-pass | collection |
@@ -3179,6 +3575,8 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `live_certification_transition/v1` | P1 | certification transition authority | E / validity plus max age | `SMART-ADS:LIVE-CERT-TRANSITION:V1\n` | prior/new signed snapshots and successful 7B; no certificate edge | live certification |
 | `live_certification_certificate/v1` | P1 | certification transition authority | E / validity plus max age | `SMART-ADS:LIVE-CERTIFICATE:V1\n` | one-way reference to finalized transition/new snapshot/fingerprints | operational admission |
 | `live_certification_head/v1` | P1 | certification head service | E / current-head CAS | `SMART-ADS:LIVE-CERTIFICATION-HEAD:V1\n` | exact finalized transition/certificate fingerprint and monotonic epoch CAS | operational admission |
+| `base_metric_definition/v1` | P1 | semantic registry owner | H / definition validity | `SMART-ADS:BASE-METRIC-DEFINITION:V1\n` | immutable canonical name, value type, unit, currency rule, dimensions and aggregation semantics under a versioned ref | metric identity |
+| `expected_resource_inventory/v1` | P1 | private registry publisher | E / snapshot validity | `SMART-ADS:EXPECTED-RESOURCE-INVENTORY:V1\n` | independent complete expected resource-key universe for the admitted scope and window | completeness source |
 | `formula_bundle/v1` | P1 | semantic registry owner | H / bundle validity | `SMART-ADS:FORMULA-BUNDLE:V1\n` | closed source-metric union, formula digest mapping, acyclic graph and recomputed topo order | analysis schema |
 | `sanitized_candidate_fact_set/v1` | P1 | curation admission verifier | H / input finalization | `SMART-ADS:SANITIZED-CANDIDATES:V1\n` | complete unique analytics_landing_row/v1 universe with exact semantic-observation preimages; no raw payload | curation input |
 | `curation_execution/v1` | P1 | curation executor | H / execution | `SMART-ADS:CURATION:V1\n` | exact-N window, complete candidate/history/catalog, replayed semantic winner and algorithm identity | curation |
@@ -3201,12 +3599,15 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `retention_root_set_cas_receipt/v1` | P1 | retention root-set service | E / CAS linearization | `SMART-ADS:RETENTION-ROOT-CAS:V1\n` | expected old head, committed successor, success and linearization ID | retention root CAS |
 | `retention_release_result/v1` | P1 | retention executor | E / CAS linearization time | `SMART-ADS:RETENTION-RELEASE-RESULT:V1\n` | exact root-set CAS result and released object set | retention action result |
 | `retention_release_proof/v1` | P1 | retention authority | E / release time | `SMART-ADS:RETENTION-RELEASE:V1\n` | exact effect chain, root-set CAS and retained-root non-reachability | retention release |
+| `retention_root_admission_result/v1` | P1 | retention executor | E / CAS linearization time | `SMART-ADS:RETENTION-ADMISSION-RESULT:V1\n` | exact root-set CAS result and admitted root/object set | retention action result |
+| `retention_root_admission_proof/v1` | P1 | retention authority | E / admission time | `SMART-ADS:RETENTION-ADMISSION:V1\n` | exact effect chain, root-set CAS and admitted-root full-reachability pinning | retention admission |
 | `seam_parity_record/v1` | P1 | seam verifier | H / execution | `SMART-ADS:SEAM-PARITY:V1\n` | exact protected legacy-seam release/decomposition lineage and canonical projections equal | seam |
 | `acceptance_profile/v1` | P1 | acceptance policy owner | E / shadow interval | `SMART-ADS:ACCEPTANCE-PROFILE:V1\n` | exact calendar/timezone/metrics/roles and one head/fingerprint covering acceptance through readiness | acceptance profile |
 | `business_calendar/v1` | P1 | calendar authority | E / covered dates | `SMART-ADS:BUSINESS-CALENDAR:V1\n` | immutable complete local-date calendar | acceptance calendar |
 | `operational_read_evidence/v1` | P1 | collection evidence verifier | E / collection completion | `SMART-ADS:OPERATIONAL-READ-EVIDENCE:V1\n` | exact admission/result/four-record effect equality | operational collection evidence |
 | `operational_read_proof_set/v1` | P1 | acceptance verifier | E / readiness time | `SMART-ADS:OPERATIONAL-READ-PROOF-SET:V1\n` | canonical complete same-run operational evidence/effect union under one unchanged live-certification head/fingerprint | readiness operational evidence |
 | `consumer_feature_flag_contract/v1` | P1 | consumer routing verifier | H / Git resolution | `SMART-ADS:CONSUMER-FEATURE-FLAG:V1\n` | exact flag key/default false and `/ibvi-ads` delegated Smart Ads route with no direct bypass from resolved Git bytes | consumer integration |
+| `consumer_deployment_readback/v1` | P1 | Hermes deployment-surface verifier | E / pre-effect capture | `SMART-ADS:CONSUMER-DEPLOYMENT-READBACK:V1\n` | deployed release/runtime and live adapter/flag/route/delegation equal the approved consumer Git identity | consumer integration |
 | `daily_acceptance_token/v1` | P1 | authorized operator | E / shadow interval | `SMART-ADS:DAILY-ACCEPTANCE:V1\n` | accepted business date, exact head/fingerprint and operational proof set | daily acceptance |
 | `weekly_acceptance_token/v1` | P1 | authorized operator | E / shadow interval | `SMART-ADS:WEEKLY-ACCEPTANCE:V1\n` | accepted consecutive week, exact head/fingerprint and operational proof set | weekly acceptance |
 | `shadow_acceptance_record/v1` | P1 | acceptance verifier | E / readiness time | `SMART-ADS:SHADOW-ACCEPTANCE:V1\n` | exact independent 5/4 chains, unchanged head/fingerprint and canonical operational union | shadow acceptance |
@@ -3218,11 +3619,12 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `rollback_drain_record/v1` | P1 | routing runtime | E / event time | `SMART-ADS:ROLLBACK-DRAIN:V1\n` | drained set complete | rollback drain |
 | `rollback_query_log/v1` | P1 | rollback verifier | E / protocol interval | `SMART-ADS:ROLLBACK-QUERY-LOG:V1\n` | event-derived IDs, routes, exactly-once completion | rollback evidence |
 | `rollback_test_receipt/v1` | P1 | rollback verifier | E / completion | `SMART-ADS:ROLLBACK-RECEIPT:V1\n` | 200/400, 60s dispatch, <=500ms, zero loss | rollback execution |
+| `incident_rollback_receipt/v1` | P1 | rollback verifier | E / completion | `SMART-ADS:INCIDENT-ROLLBACK-RECEIPT:V1\n` | exact reverted cutover identity, disqualifying evidence, toggle/ACK/drain/readback, zero-loss and <=500ms transition to legacy path | post-cutover incident rollback |
 | `migration_manifest/v1` | P1 | readiness builder | E / generation | `SMART-ADS:MIGRATION-MANIFEST:V1\n` | exact 19-slot typed DAG, live-certification head, live activation, operational union, rollback receipt and tripartite equality | readiness manifest |
 | `manifest_validation_record/v1` | P1 | readiness validator | E / validation time | `SMART-ADS:MANIFEST-VALIDATION:V1\n` | recursive complete PASS for exact build | manifest validation |
 | `readiness_attestation_payload/v1` | P1 | readiness validator | E / payload finalization | `SMART-ADS:READINESS-PAYLOAD:V1\n` | exact manifest/validation/graph/tripartite/effect-set identity | readiness payload |
 | `readiness_attestation/v1` | P1 | readiness attestor | E / attestation time | `SMART-ADS:READINESS-ATTESTATION:V1\n` | exact pre-authorized payload and no later-artifact edge | readiness attestation |
-| `gate4_verification_record/v1` | P1 | independent Gate-4 verifier | E / verification time | `SMART-ADS:GATE4-VERIFICATION:V1\n` | complete same-run recursive readiness equality, current live-cert/seam identity, verifier profile and PASS; explicitly no effect authority | cutover predecessor |
+| `gate4_verification_record/v1` | P1 | independent Gate-4 verifier | E / verification time plus bound TTL | `SMART-ADS:GATE4-VERIFICATION:V1\n` | complete same-run recursive readiness equality, current live-cert head/epoch/fingerprint and certificate validity, seam identity, verifier profile, bound PASS TTL and PASS; explicitly no effect authority | cutover predecessor |
 | `stabilization_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:STABILIZATION-HOUR:V1\n` | one exact relative hour meets SLO | stabilization bucket |
 | `stabilization_period_completion_record/v1` | P1 | stabilization verifier | E / completion | `SMART-ADS:STABILIZATION-COMPLETION:V1\n` | exact contiguous 336-hour chain | stabilization completion |
 | `retirement_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:RETIREMENT-HOUR:V1\n` | one exact relative hour has zero calls to the unchanged typed retired-read inventory | retirement bucket |
