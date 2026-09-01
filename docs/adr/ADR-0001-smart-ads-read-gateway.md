@@ -2933,13 +2933,16 @@ and their mandatory fields are:
   effective-operation, static-source, and disjointness digests equal that
   inventory, decommission
   configuration digest, tenant, binding, and target resource. Final retirement telemetry is
-  deliberately absent because it can exist only after the effect; and
+  deliberately absent because it can exist only after the effect;
 - `retention_release_target`: run-context, cell, expected root-set head locator,
   epoch and digest, sorted release-root/object and retained-root locator arrays,
-  before/after reachability-graph digests, and proposed root-set digest.
+  before/after reachability-graph digests, and proposed root-set digest; and
+- `retention_root_admission_target`: run-context, cell, expected root-set head locator,
+  epoch and digest, sorted admitted-root locator array, reachable object set and
+  reachability-graph digests, and proposed root-set digest.
 
 The closed effect-action matrix is authoritative; its action count is derived
-from these eleven rows rather than asserted elsewhere:
+from these matrix rows rather than asserted elsewhere:
 
 | Action | Subject discriminator | Mandatory predecessor evidence | Finalized action-result artifact type | Effect-proof/DAG slot |
 |---|---|---|---|---|
@@ -2954,6 +2957,7 @@ from these eleven rows rather than asserted elsewhere:
 | `cutover_execution` | `cutover_target` | signed same-run Gate-4 verification PASS plus a fresh human authorization over the byte-identical target | `cutover_execution_result/v1` | `cutover_effect_proof` |
 | `legacy_read_retirement` | `retirement_target` | completed 336-hour stabilization, exact disjoint legacy inventory, current pre-effect re-enumeration equal to that inventory, and retirement gate | `retirement_execution_result/v1` | `retirement_effect_proof` |
 | `retention_release` | `retention_release_target` | current root-set head and complete before/after reachability recomputation | `retention_release_result/v1` | `retention_release_effect_proof` |
+| `retention_root_admission` | `retention_root_admission_target` | current root-set head and complete reachable predecessor object recomputation | `retention_root_admission_result/v1` | `retention_root_admission_effect_proof` |
 
 For every row, the authorization profile, subject discriminator, predecessor
 types, action-result artifact type, action slot, reservation, execution,
@@ -3395,9 +3399,17 @@ Successful independent verification emits one immutable signed
 `gate4_verification_record/v1`. It binds the complete resolved input-locator
 set, exact run/manifest/live-certification-head/legacy-seam-release,
 graph/tripartite/effect-set digests, verifier build/profile identities,
-verification time, and `verification_status: PASS`. It is non-effect evidence:
+`gate4_freshness_profile_locator` and `gate4_freshness_profile_digest`,
+`verified_at_utc` (ISO-8601 UTC timestamp from the authenticated runtime clock),
+`valid_until_utc` computed as `min(verified_at_utc + 300s, certificate.valid_until_utc)`,
+and `verification_status: PASS`. It is non-effect evidence:
 it contains no authorization nonce, reservation, execution, consumption, or
 authority to perform cutover.
+
+`gate4_freshness_profile/v1` is an immutable signed profile issued by the Gate-4
+policy owner (`SMART-ADS:GATE4-FRESHNESS:V1\n`). It fixes `maximum_age_seconds: 300`
+(5 minutes) and defines the exact freshness validation rules for Gate-4 verification
+records.
 
 Only after that record finalizes may an authorized human issue one fresh
 `authorization_receipt/v1` for action `cutover_execution` over the byte-
@@ -3412,25 +3424,23 @@ Gate-4 verification record -> fresh human cutover authorization -> reservation
 ```
 
 A Gate-4 PASS is not a durable licence to cut over. The `gate4_verification_record/v1`
-carries a bound TTL and is bound to the exact `live_certification_head/v1`
-locator/epoch/digest and its certificate validity that it verified; the
-`cutover_target` additionally carries that current head locator/epoch/digest and
-the certificate's `valid_until_utc`. At both the cutover reservation and again at
-the immediate pre-I/O boundary, the executor re-resolves the protected current
-`live_certification_head/v1` and the covering `live_certification_certificate/v1`
-and requires: the re-resolved head to be byte-identical to the head bound in the
-Gate-4 record and `cutover_target`; the certification fingerprint to be
-unchanged; the certificate to be currently valid with the authenticated-clock
-interval and `now + uncertainty` strictly inside `valid_until_utc`; and the
-Gate-4 PASS to be within its TTL relative to the same authenticated clock. A head
-that advanced, forked, or was invalidated (section 5.1), a certificate that
-expired or was replaced, a changed fingerprint, or an expired Gate-4 TTL fails
-closed before reservation on the first check and before any cutover I/O on the
-second; a first-check failure leaves reservation and all downstream counters at
-zero, and a second-check failure quarantines the reservation as terminal
-`in_doubt` and requires a fresh authorization and nonce. An obsolete Gate-4 PASS
-can therefore never authorize a cutover after the certification it relied on has
-changed or expired.
+carries a bound TTL defined by its `gate4_freshness_profile/v1` (`maximum_age_seconds: 300`)
+and `valid_until_utc = min(verified_at_utc + 300s, certificate.valid_until_utc)`, and is bound
+to the exact `live_certification_head/v1` locator/epoch/digest and its certificate validity that
+it verified; the `cutover_target` additionally carries that current head locator/epoch/digest and
+the certificate's `valid_until_utc`. At both the cutover reservation and again at the immediate
+pre-I/O boundary, the executor re-resolves the protected current `live_certification_head/v1` and
+the covering `live_certification_certificate/v1` and requires: the re-resolved head to be byte-identical
+to the head bound in the Gate-4 record and `cutover_target`; the certification fingerprint to be
+unchanged; the certificate to be currently valid with the authenticated-clock interval and
+`now + uncertainty` strictly inside `valid_until_utc`; and the Gate-4 PASS to be within its
+`valid_until_utc` relative to the same authenticated clock (`now + uncertainty <= valid_until_utc`).
+A head that advanced, forked, or was invalidated (section 5.1), a certificate that expired or was
+replaced, a changed fingerprint, or an expired Gate-4 TTL fails closed before reservation on the first
+check and before any cutover I/O on the second; a first-check failure leaves reservation and all
+downstream counters at zero, and a second-check failure quarantines the reservation as terminal
+`in_doubt` and requires a fresh authorization and nonce. An obsolete Gate-4 PASS can therefore never
+authorize a cutover after the certification it relied on has changed or expired.
 
 Gate 4 remains the sole readiness-verification gate. The later human receipt is
 the sole cutover-effect authority, not a second readiness gate. No node points
@@ -3624,7 +3634,8 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `manifest_validation_record/v1` | P1 | readiness validator | E / validation time | `SMART-ADS:MANIFEST-VALIDATION:V1\n` | recursive complete PASS for exact build | manifest validation |
 | `readiness_attestation_payload/v1` | P1 | readiness validator | E / payload finalization | `SMART-ADS:READINESS-PAYLOAD:V1\n` | exact manifest/validation/graph/tripartite/effect-set identity | readiness payload |
 | `readiness_attestation/v1` | P1 | readiness attestor | E / attestation time | `SMART-ADS:READINESS-ATTESTATION:V1\n` | exact pre-authorized payload and no later-artifact edge | readiness attestation |
-| `gate4_verification_record/v1` | P1 | independent Gate-4 verifier | E / verification time plus bound TTL | `SMART-ADS:GATE4-VERIFICATION:V1\n` | complete same-run recursive readiness equality, current live-cert head/epoch/fingerprint and certificate validity, seam identity, verifier profile, bound PASS TTL and PASS; explicitly no effect authority | cutover predecessor |
+| `gate4_freshness_profile/v1` | P1 | Gate-4 policy owner | E / profile validity | `SMART-ADS:GATE4-FRESHNESS:V1\n` | exact 300s max age, uncertainty, dispatch deadline and valid_until_utc derivation rule | Gate 4 policy |
+| `gate4_verification_record/v1` | P1 | independent Gate-4 verifier | E / verification time plus bound TTL | `SMART-ADS:GATE4-VERIFICATION:V1\n` | complete same-run recursive readiness equality, current live-cert head/epoch/fingerprint and certificate validity, seam identity, verifier profile, gate4_freshness_profile, verified_at_utc, valid_until_utc and PASS; explicitly no effect authority | cutover predecessor |
 | `stabilization_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:STABILIZATION-HOUR:V1\n` | one exact relative hour meets SLO | stabilization bucket |
 | `stabilization_period_completion_record/v1` | P1 | stabilization verifier | E / completion | `SMART-ADS:STABILIZATION-COMPLETION:V1\n` | exact contiguous 336-hour chain | stabilization completion |
 | `retirement_hour_bucket/v1` | P1 | monitoring verifier | H / bucket interval | `SMART-ADS:RETIREMENT-HOUR:V1\n` | one exact relative hour has zero calls to the unchanged typed retired-read inventory | retirement bucket |
@@ -3710,7 +3721,7 @@ unprofiled resolved object rejects before semantic processing.
 | C43 | Candidate and reference 7B calls have independent authorization, reservation, execution, consumption, and effect proofs. |
 | C44 | 7B resolves each fact through its CollectionResult container plus exact embedded selector and recomputes the complete sorted metric reconciliation. |
 | C45 | Readiness binds typed GOV1 convergence and exact 7A certification under one run/build/wheel identity. |
-| C46 | A closed eleven-row role/action/side/subject/predecessor/result/slot matrix governs every human-authorization-controlled external effect and excludes non-effect evidence. |
+| C46 | A closed role/action/side/subject/predecessor/result/slot matrix governs every human-authorization-controlled external effect and excludes non-effect evidence. |
 | C47 | P1 separates RFC 8785 content digest from the domain-separated Ed25519 message using one `0x00` separator and canonical padded base64. |
 | C48 | Snapshot-to-generation-to-Parquet provenance uses one six-member locator shape; Git provenance lives in resolved artifacts and a relative path or bare digest is insufficient. |
 | C49 | Formula identity has one explicit SHA-256/RFC 8785 preimage and maps to the closed formula arm of `source_metric_ref`. |
@@ -3727,7 +3738,7 @@ unprofiled resolved object rejects before semantic processing.
 | C60 | R05: derived analytical certification has a closed enum including tightly constrained `DEGRADED`; provider mismatches remain unreconciled. |
 | C61 | R06: readiness resolves both rollback effect proof and the full recomputable rollback receipt. |
 | C62 | R07: attestation uses a finalized pre-authorized payload and never points to its later execution/effect proof. |
-| C63 | R08: retention release is the eleventh effect action and requires a complete root-set epoch CAS/reachability proof. |
+| C63 | R08: retention release is an authorized effect action and requires a complete root-set epoch CAS/reachability proof. |
 | C64 | R09: the decomposition active tip is a monotonic CAS head; competing successors require authorized adjudication and rebase. |
 | C65 | R10: the 44-path legacy universe is tree-derived at `d26c73d`; nonexistent or worktree-only paths reject. |
 | C66 | R11: consumer and tripartite digests have exact closed role-tagged array preimages. |
