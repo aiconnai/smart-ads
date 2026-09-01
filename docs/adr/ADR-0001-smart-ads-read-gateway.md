@@ -2937,12 +2937,12 @@ and their mandatory fields are:
 - `retention_release_target`: run-context, cell, expected root-set head locator,
   epoch and digest, sorted release-root/object and retained-root locator arrays,
   before/after reachability-graph digests, and proposed root-set digest; and
-- `retention_root_admission_target`: run-context, cell, expected root-set head locator,
-  epoch and digest, sorted admitted-root locator array, reachable object set and
-  reachability-graph digests, and proposed root-set digest.
+- `retention_root_admission_target`: run-context, cell, expected root-set head
+  locator, epoch and digest, sorted admitted-root/object locator arrays,
+  before/after reachability-graph digests, and proposed root-set digest.
 
 The closed effect-action matrix is authoritative; its action count is derived
-from these matrix rows rather than asserted elsewhere:
+from these twelve rows rather than asserted elsewhere:
 
 | Action | Subject discriminator | Mandatory predecessor evidence | Finalized action-result artifact type | Effect-proof/DAG slot |
 |---|---|---|---|---|
@@ -2957,7 +2957,7 @@ from these matrix rows rather than asserted elsewhere:
 | `cutover_execution` | `cutover_target` | signed same-run Gate-4 verification PASS plus a fresh human authorization over the byte-identical target | `cutover_execution_result/v1` | `cutover_effect_proof` |
 | `legacy_read_retirement` | `retirement_target` | completed 336-hour stabilization, exact disjoint legacy inventory, current pre-effect re-enumeration equal to that inventory, and retirement gate | `retirement_execution_result/v1` | `retirement_effect_proof` |
 | `retention_release` | `retention_release_target` | current root-set head and complete before/after reachability recomputation | `retention_release_result/v1` | `retention_release_effect_proof` |
-| `retention_root_admission` | `retention_root_admission_target` | current root-set head and complete reachable predecessor object recomputation | `retention_root_admission_result/v1` | `retention_root_admission_effect_proof` |
+| `retention_root_admission` | `retention_root_admission_target` | current root-set head and complete admitted-root full-reachability recomputation proving every reachable object resolves as an immutable predecessor | `retention_root_admission_result/v1` | `retention_root_admission_effect_proof` |
 
 For every row, the authorization profile, subject discriminator, predecessor
 types, action-result artifact type, action slot, reservation, execution,
