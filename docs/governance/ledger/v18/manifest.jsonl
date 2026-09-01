@@ -1,0 +1,22 @@
+{"path": "candidates.jsonl", "sha256": "9b39ed2e0fff62a216aeb96e3f63cc9460e8da71494f3e0a28e6488a35bad2fc", "bytes": 1760}
+{"path": "checks.json", "sha256": "b4a0f91c6b3e0e2ab0dc5a3f25ffb6ab8b5feddde012d6940cccf42c5317090a", "bytes": 1247}
+{"path": "coverage.json", "sha256": "83f8d16652d59129f4be2f0134fc658e845e62a65d883f1628572826bd027032", "bytes": 1569}
+{"path": "gates/deterministic-checks.json", "sha256": "11b0342feb474d74500711824908c96e4c29e4772c165d1092e95bb6ceac9ede", "bytes": 943}
+{"path": "gates/git-inventory-HEAD.nulsafe", "sha256": "e64b8372450d9c93bee99b3f6aa4622fbc4372b26f641d49d6f356714723fa24", "bytes": 97}
+{"path": "lanes/contracts-data.json", "sha256": "ca07e1bde524eead22a4c4617e01b7b2e521329be3f79961cdaaca21e9da96ba", "bytes": 12764}
+{"path": "lanes/deep-behavior.json", "sha256": "d69684dd5d12014d2227699cd50112ed77921bb94129c442352c9e52db3ab8ad", "bytes": 8186}
+{"path": "lanes/history-migration.json", "sha256": "536a301ba457a6a42d2d484d36843bd0a4da5a324fc74130dd14b659a7ba1717", "bytes": 11889}
+{"path": "lanes/provider-semantics.json", "sha256": "9aa13d6a2b3cb171e332d44d24cafefaf863fdb7f2ccd8d9b73d857e9f77713b", "bytes": 14445}
+{"path": "lanes/security-crypto-ops.json", "sha256": "6a5af2c96b912e246251819737135e17f8a17357167eebd0541607d1cd0ff488", "bytes": 16596}
+{"path": "lanes/shallow-diff.json", "sha256": "7b0295c79e69535e30e62e9028d8704d3b1e7380168ccb1844bafa52d3131090", "bytes": 21668}
+{"path": "lanes/trusted-policy.json", "sha256": "de7fd47591174ba21d0cc4ec9ef39c4cdfd4ad492adb79b1e00da3e63e2a6796", "bytes": 22189}
+{"path": "policy-corpus/AGENTS.md", "sha256": "3678de41e356ce3847603a1af177ac489b47af09c9b2a40de5ec4af3eda0937f", "bytes": 5659}
+{"path": "policy-corpus/DOCUMENTATION__AUTONOMY.md", "sha256": "90f6b9449fe79928aeb0a3ca32b3332ea65468a4b1db1f3c35299a5bcec850f7", "bytes": 3481}
+{"path": "policy-corpus/DOCUMENTATION__IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md", "sha256": "6df2eae935a9d0b7c57a4028f2a37fc1b74ac5bec22f4e1a7c1e34da84382260", "bytes": 41301}
+{"path": "policy-corpus/DOCUMENTATION__IBVI_ADS_OPERATOR_ADR.md", "sha256": "9838f77a9f381873050fbc3a8f62d521e52fe2deb9871c9c7c9b2c48196cb7c9", "bytes": 17115}
+{"path": "snapshots/adr-base-4015c15.md", "sha256": "97e1131ffec7ecad10187497ff579d33837c5bc57571155db0be84ebfa566739", "bytes": 200674}
+{"path": "snapshots/adr-head-83a22d8.md", "sha256": "78aa33a52315a12358fac4938eb2e7bcca600c7b9298a5dae3ee44e2353e2b8a", "bytes": 229833}
+{"path": "snapshots/pr-diff-4015c15..83a22d8.patch", "sha256": "5960d50aba46ca89842a956819600ff9568f112c3356d6c1af3b216ab6856837", "bytes": 58057}
+{"path": "target.json", "sha256": "7fde77a4c0717bbdfb8b2bd481a44ddaa45e705b55fce24ce80c3957fa872b40", "bytes": 2676}
+{"path": "validation.json", "sha256": "b04777f76c0ad7a10c1fb9ccb96f75b6ca9071a3179daf4298e40784d75a1833", "bytes": 6378}
+{"path": "decisions/acceptance-sdf-003.json", "sha256": "784aeb177db6de00feb5f1dc93079069b77dd2e23854cdf6f9f63c91dac19cf0", "bytes": 697, "appended_after_terminal_receipt": true}

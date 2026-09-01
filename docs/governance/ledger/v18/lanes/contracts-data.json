@@ -1,0 +1,69 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "contracts-data",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "items": [
+    {
+      "id": "cd-001",
+      "title": "X(f) at ~1170-1182 does not use stale flat members; it composes reconciliation_row_key + canonical_metric_ref, both of which section 4.2 defines as exact projections/aliases of fact_key",
+      "reeval_of": "sd-001/ct-002",
+      "severity": "None",
+      "confidence": 0.97,
+      "evidence_lines": "385-631 (section 4.2 full), 551-566 (fact_key / reconciliation_row_key / canonical_metric_ref definitions), 1045-1067 (C(f)/Kfive(f) use of reconciliation_row_key and canonical_metric_ref), 1163-1182 (X(f) definition and fact_projection_digest)",
+      "causal_chain": "Section 4.2 (lines 551-558) defines fact_key as the complete nine-field canonical key and explicitly defines reconciliation_row_key as 'not a stored member but a derived closed four-member projection {resource_ref, metric_date, resource_level, breakdown_signature} of fact_key', with the equivalence rule 'any use of f.reconciliation_row_key.<m> denotes exactly f.fact_key.<m> for that same member m'. Lines 560-566 similarly define canonical_metric_ref as a normative bijection: 'every occurrence of f.canonical_metric_ref denotes exactly f.fact_key.metric_semantic_ref for the same fact... There is no independent canonical_metric_ref storage member.' X(f) at line 1170-1174 is defined as 'the complete normalized_collection_fact/v1 object defined in section 4.2 -- its closed reconciliation_row_key plus canonical_metric_ref, source_metric_ref, presence_status, value_type, raw_numeric_value, unit, and currency, with no wrapper, omitted member, or extra member.' Both terms it uses (reconciliation_row_key, canonical_metric_ref) are the exact vocabulary section 4.2 itself introduces and immediately aliases to fact_key/metric_semantic_ref; X(f) is not citing an older flat schema independent of fact_key, it is citing 4.2's own derived-projection language. A verifier implementing fact_projection_digest per lines 1177-1182 would read fact_key (the stored member, per 4.2) and mechanically substitute the row-key projection and metric alias per the two equivalence rules already given -- there is no second, contradictory flat schema for it to consult, and no step in the digest computation requires a member that fact_key lacks. The literal reconciliation_row_key/canonical_metric_ref/source_metric_ref triple named in X(f) is also reused without incident by C(f)/K(f)/Kfive(f) in section 5.4 (lines 1045-1067), which explicitly cites 'section 4.2 bijection' as its own authority (line 1067) -- confirming this vocabulary is the current, load-bearing cross-reference target, not a stale artifact.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 551-566 (section 4.2 defines reconciliation_row_key as an exact derived projection of fact_key, and canonical_metric_ref as an exact bijection alias of fact_key.metric_semantic_ref, with explicit equivalence rules 'f.reconciliation_row_key.<m> denotes exactly f.fact_key.<m>' and 'f.canonical_metric_ref denotes exactly f.fact_key.metric_semantic_ref'); section 5.4 lines 1045-1067 independently reuses the same aliases and cites 'section 4.2 bijection' at line 1067, confirming reconciliation as intentional current design, not legacy drift"
+    },
+    {
+      "id": "cd-002",
+      "title": "Gate-3 freshness table row (line 3562) promises 'exact age, uncertainty, dispatch deadline and interval containment' -- section 5.3 prose (lines 926-950) defines all four via maximum_age_seconds, maximum_clock_uncertainty_ms, maximum_provider_dispatch_deadline_seconds, and the I-interval-containment check; no normative gap",
+      "reeval_of": "ct-001/sd-002",
+      "severity": "None",
+      "confidence": 0.93,
+      "evidence_lines": "811-950 (section 5.3 Gate 3 Selection, full), 926-932 (gate3_freshness_profile field-by-field definition), 934-950 (pre-reservation/pre-I/O freshness check using the interval I and valid_until_utc), 3562 (table row for gate3_freshness_profile/v1)",
+      "causal_chain": "The table row at line 3562 is one row of the domain-separator/schema inventory (section header at ~3524-3529: Schema | Preimage | Signer role | Revocation/time | Domain prefix | Semantic predicate | DAG slot), and its 'Semantic predicate' column is explicitly a short gloss, not a self-contained definition -- the inventory's own preamble (lines 3505-3511) states these codes are 'literal expanded fields in the inventory, not verifier defaults', i.e. the inventory documents which checks exist, the operative rules live in the referenced sections. Section 5.3 prose fully instantiates every term the gloss uses: 'age' = maximum_age_seconds: 900 (line 927) with valid_until_utc = revalidated_at_utc + 900s (line 930-931); 'uncertainty' = maximum_clock_uncertainty_ms: 1000 (line 927) consumed by the interval I = [now - uncertainty, now + uncertainty] (line 939); 'dispatch deadline' = maximum_provider_dispatch_deadline_seconds: 60 (line 928) consumed by 'now + uncertainty + 60 seconds must not exceed valid_until_utc' (lines 940); 'interval containment' = 'I must lie inside that named receipt's validity interval' (line 939-940). A verifier implementing Gate 3 freshness checks has every field and every comparison spelled out in the prose with concrete numbers and an explicit formula (lines 934-950), so the table row's promise is fully backed -- there is no field named in the gloss that the verifier cannot resolve from prose.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 926-950 (section 5.3 defines maximum_age_seconds, maximum_clock_uncertainty_ms, maximum_provider_dispatch_deadline_seconds and the exact I-interval/valid_until_utc containment check referenced by the table gloss); domain-separator table preamble at lines 3505-3511 establishes the table's semantic-predicate column is a summary of externally-defined rules, not a self-sufficient spec surface"
+    },
+    {
+      "id": "cd-003",
+      "title": "Gate-4 freshness table row (line 3637) promises a 'dispatch deadline' member that gate4_freshness_profile/v1 never defines -- Gate 4 is a pure verification/attestation gate with no provider dispatch anywhere in its prose; likely copy-paste from the Gate-3 row template",
+      "reeval_of": null,
+      "severity": "Low",
+      "confidence": 0.72,
+      "evidence_lines": "3395-3437 (Gate 4 verification-record and gate4_freshness_profile/v1 prose), 3409-3412 (profile fixes only maximum_age_seconds: 300), 3426-3437 (operative TTL/uncertainty check using only maximum_age_seconds and the general authenticated-clock uncertainty, not a profile-specific dispatch deadline), 3637 (table row), 3562 (sibling Gate-3 row with near-identical wording)",
+      "causal_chain": "Line 3637's Semantic predicate reads 'exact 300s max age, uncertainty, dispatch deadline and valid_until_utc derivation rule' -- textually parallel to the Gate-3 row at line 3562 ('exact age, uncertainty, dispatch deadline and interval containment'), suggesting the Gate-4 row was derived from the Gate-3 template. But Gate 4 (section around 3395-3437) is defined as an independent verification/attestation step over already-finalized artifacts (manifest, validation PASS, live-certification head, effect proofs); it issues gate4_verification_record/v1 and explicitly contains 'no authorization nonce, reservation, execution, consumption, or authority to perform cutover' (line 3406-3407) -- it never dispatches to an external provider, unlike Gate 3's candidate/reference 7B calls which the maximum_provider_dispatch_deadline_seconds field exists to bound. The gate4_freshness_profile/v1 prose (3409-3412) says only that it 'fixes maximum_age_seconds: 300 ... and defines the exact freshness validation rules for Gate-4 verification records' -- a vague catch-all, not an enumerated field list. The one operative check that follows (3426-3437) uses exactly two quantities: maximum_age_seconds (profile-specific) and the ambient authenticated-clock uncertainty (not shown to be a gate4_freshness_profile member; it is the same general clock-attestation uncertainty used throughout the ADR, e.g. section 4.2 line 427/819, not a value the Gate-4 profile itself carries). No 'dispatch deadline' quantity or check appears anywhere in the Gate-4 prose. This is a genuine table-vs-prose overclaim: a verifier trying to validate 'dispatch deadline' as a gate4_freshness_profile/v1 field per the table gloss would find no defining rule to implement it against. Severity is Low rather than Medium/High because (a) the operative Gate-4 freshness check (3426-3437) is fully specified without needing a dispatch-deadline field, so no verifier is actually blocked or under-specified for the checks the ADR requires it to perform; (b) the gloss is a compressed one-line summary in an inventory table, not a schema definition, and the inventory preamble frames these predicates as descriptive, not prescriptive; the defect is an editorial overclaim/copy-paste residue rather than a missing normative rule with a concrete failure mode.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [
+      [1, 34],
+      [380, 660],
+      [811, 970],
+      [1000, 1260],
+      [1426, 1430],
+      [3370, 3440],
+      [3500, 3650]
+    ],
+    "sections_examined": [
+      "1. Context & Decision (skim)",
+      "4.2 External Intent and Trusted Admission (full)",
+      "4.3 Closed Numeric Discriminated Union (partial)",
+      "5.3 Gate 3 Selection (full)",
+      "5.4 Recomputable 7B Bundle (full, incl. fact_reconciliation/v1, X(f), fact_projection_digest, canonical_fact_key_digest)",
+      "6.1 Lifecycle and Long Fact Grain (header located)",
+      "Gate 4 verification-record / gate4_freshness_profile prose (~3395-3440)",
+      "Domain-separator / schema-inventory table (~3500-3650), including bootstrap preamble"
+    ]
+  },
+  "limitations": [
+    "Did not read the document end-to-end line-by-line (1-3790); targeted high-yield sections (4.2, 5.3, 5.4, Gate-4 prose, domain-separator table) based on the two assigned candidates plus grep-driven discovery of adjacent risk (Gate 4 dispatch-deadline row). Sections outside contracts-data scope (e.g. rollback protocol 2480-2520, retirement/stabilization 3639+, analysis-plane sections) were not read in full and could contain additional table-vs-prose or membership-invariant issues outside this sweep.",
+      "cd-003 is a newly-surfaced item, not one of the two mandated re-evaluations; flagged as PLAUSIBLE/Low per the task's own causal-mechanism bar -- no concrete verifier failure was demonstrated, only an unresolved table field with no backing prose rule, which is short of 'CONFIRMED' but exceeds pure textual noise.",
+      "Did not independently verify base_metric_definition/v1, formula_bundle/v1, or other P1 schema rows in the inventory table against their own defining prose; sampling was concentrated on rows sharing vocabulary with the two assigned candidates."
+  ],
+  "summary": "Both mandated re-evaluations are REFUTED under a causal standard. (1) sd-001/ct-002: X(f) at lines 1170-1182 uses reconciliation_row_key and canonical_metric_ref, which section 4.2 (lines 551-566) explicitly defines as an exact derived projection and an exact bijection alias of fact_key -- not an independent legacy flat schema. Section 5.4 (line 1067) independently cites 'section 4.2 bijection' when reusing the same terms, confirming intentional, current cross-referencing rather than textual drift. No verifier reading fact_key per 4.2 and applying the two stated equivalence rules would fail against X(f). (2) ct-001/sd-002: the Gate-3 freshness table row (line 3562) promising 'age, uncertainty, dispatch deadline, interval containment' is fully backed by section 5.3 prose (lines 926-950), which defines maximum_age_seconds, maximum_clock_uncertainty_ms, maximum_provider_dispatch_deadline_seconds, and the exact I-interval/valid_until_utc containment formula with concrete numbers -- no gap for a verifier to fall into. While investigating this pattern, the lane surfaced one adjacent, non-mandated finding: the sibling Gate-4 freshness table row (line 3637) copies the same 'dispatch deadline' gloss, but Gate 4 (lines 3395-3437) is a pure verification/attestation gate with no provider dispatch anywhere in its prose and no defined dispatch-deadline field -- filed as cd-003, PLAUSIBLE/Low, since the operative Gate-4 freshness check is otherwise fully specified without that field, so no concrete verifier failure results, only an overclaiming table gloss."
+}

@@ -1,0 +1,170 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "trusted-policy",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "policy_baseline": {
+    "commit": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+    "files": {
+      "AGENTS.md": "4d4ed7929955a13026ee33c9a95d62785099f5a9",
+      "DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md": "64f2029197392d1ab55dcbe02c26b593817f8dc9",
+      "DOCUMENTATION/AUTONOMY.md": "129f43d7825411558f2a9de78540923a9de51621",
+      "DOCUMENTATION/IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md": "43b960364b60865601648e7975f2ab5c17a2e0d4"
+    }
+  },
+  "items": [
+    {
+      "id": "tp-001",
+      "title": "ADR does not name a reviewer identity for its own PR review",
+      "severity": "Low",
+      "confidence": 0.35,
+      "policy_source": "AGENTS.md lines 68-79 (sonnet-5-medium designated mandatory primary reviewer); IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md Section 4.3 lines 148-196 (designated mandatory primary reviewer route, activation predicates)",
+      "evidence_lines": "2335, 3785",
+      "causal_chain": "AGENTS.md and the execution plan bind routine autonomous PR delivery to a designated mandatory reviewer identity (Claude Sonnet 5 medium via the sonnet-5-medium route), currently inactive/frozen_human_only. The ADR's own migration DAG (line 2335) and Governance Status (line 3785) reference only a generic 'Fresh MAX review on exact PR head' / 'fresh MAX review of the exact documentation PR head' without naming a reviewer identity, route, or binding to the sonnet-5-medium activation predicates.",
+      "verdict": "REFUTED",
+      "refutation_locus": "The cited reviewer-identity binding in AGENTS.md/EXECUTION_PLAN.md Section 4.3 governs 'routine autonomous PR delivery' for coding tasks under the autonomous delivery protocol; ADR-0001 Section 11 (lines 2406-2410) explicitly states 'This v1 selects only manual delivery... Autonomous delivery would require a future amended decision... it has no branch in this remediation.' Because this is a manual-delivery documentation PR, not autonomous coding delivery, the sonnet-5-medium reviewer-identity binding does not attach to it; the generic 'Fresh MAX review' language is consistent with (and is in fact satisfied by) this very external multi-lane MAX review process being conducted around the ADR, which is a human-initiated review activity outside the document's own text."
+    },
+    {
+      "id": "tp-002",
+      "title": "ADR's Gate 2 genesis mechanics functionally implement the anti-self-approval invariant",
+      "severity": null,
+      "confidence": 0.85,
+      "policy_source": "AUTONOMY.md lines 65-71 ('a policy must not approve itself'); IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md Section 13 'Merge gate' lines 896-918 and Section 17 'Hard-block conditions' lines 992-1023",
+      "evidence_lines": "2831-2892 (Section 12.2 Gate 2 Genesis), 2870-2881 (protected_merge_evidence/v1 and gate2_authority_policy/v1)",
+      "causal_chain": "AUTONOMY.md requires that governance documents (including this ADR class of document) 'require independent human review before merge — a policy must not approve itself.' The literal phrase 'self-approve' does not appear in the ADR, which could suggest an omission.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 12.2 (lines 2870-2881) defines `protected_merge_evidence/v1` as recursively proving 'repository, protected branch, PR number, reviewed head SHA, protected merge SHA, the complete ADR Git identity, required CI results, mandatory exact-head review evidence, and the applied branch-protection/review policy locator and digest,' cross-checked against an externally anchored `gate2_authority_policy/v1` binding 'sorted designated Gate-2 human principals.' The text explicitly states: 'A branch head, unmerged PR SHA, self-declared approver, or generic review label cannot initialize a run' (line 2880-2881). This is a stronger, cryptographically-bound implementation of the same anti-self-approval invariant AUTONOMY.md demands in prose."
+    },
+    {
+      "id": "tp-003",
+      "title": "ADR correctly gates Step 2 / live-read activation behind a separate protected human decision, consistent with legacy ADR's Step 2 NO-GO and execution plan's W1-GATE",
+      "severity": null,
+      "confidence": 0.9,
+      "policy_source": "DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md (legacy) final section (Step 2 remains NO-GO until Step 0/1 accepted); IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md Section 8 'W1-GATE' lines 559-591 and 'Step 2 authorization boundary' lines 589-598 ('the controller cannot infer or create approval')",
+      "evidence_lines": "2412-2436 (Legacy Step 2 resolution and live-read activation receipt), 2406-2410 (WAITING_HUMAN_GATE)",
+      "causal_chain": "The legacy policy requires Step 2 (live/production ad-account action) to remain NO-GO absent explicit human authorization, and forbids any controller from inferring or self-creating that approval.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Lines 2427-2436 require that 'Before Gate 3, credential lookup, workload-identity provisioning, deployment, provider I/O, shadow mode, or operational reads, a separate protected human decision must issue smart_ads_live_read_activation_receipt/v1,' explicitly scoped as authorizing 'only eligibility to request later action-specific authorizations; it does not authorize or execute an external effect.' Lines 2412-2416 further clarify that legacy Step 2 completion at the pinned commit is resolved as historical evidence only and 'does not reissue it, reopen a legacy waiting-authorization state, reuse the legacy activation schema, or create a second legacy Step 2 authorization' — directly refuting any concern that the ADR treats legacy Step 2 completion as blanket authorization for new live action."
+    },
+    {
+      "id": "tp-004",
+      "title": "ADR merge/authorization chain excludes the ADR document's own current state from any effect authority, consistent with 'documentation cannot self-authorize downstream action'",
+      "severity": null,
+      "confidence": 0.85,
+      "policy_source": "IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md Section 18 'Completion definitions' lines 1025-1063 ('Wave 1/Wave 2 engineering completion do NOT equal Step 2 authorization or operational acceptance'; 'the controller may collect and summarize acceptance evidence, but cannot self-approve it')",
+      "evidence_lines": "3775-3790 (Section 13.2 Current Status)",
+      "causal_chain": "The execution plan draws a hard line between engineering/documentation completion and operational or Step-2 authorization, forbidding any self-approval of acceptance evidence by the same process that produced it.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 13.2 (lines 3777-3790) is an explicit self-declaration by the ADR that reads: 'ADR status: PROPOSED / AWAITING GATE HUMANO 2 ... Gate 2: NOT GRANTED ... Implementation: NOT STARTED ... Credentials/provider calls: NOT AUTHORIZED / NOT PERFORMED ... Merge: NOT AUTHORIZED / NOT PERFORMED,' and the closing paragraph states 'This remediation and its PR do not grant Gate 2, merge themselves, implement product code, create or access credentials, call providers, deploy, execute 7B or shadow, cut over traffic, retire a legacy path, or authorize any later gate.' This is the document explicitly disclaiming self-authorization of every one of the escalating gates it defines, directly matching the policy's completion/acceptance boundary."
+    },
+    {
+      "id": "tp-005",
+      "title": "ADR's Read-Plane scope boundary correctly excludes and defers Write Plane / mutation surfaces reserved by legacy policy",
+      "severity": null,
+      "confidence": 0.9,
+      "policy_source": "AGENTS.md lines 29-46 (`/ibvi-ads` sole entrypoint; preserve deterministic lead/naming/feed/CAPI/Customer Match/funnel/campaign-structure tools until parity permits retirement); DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md (legacy) non-goals list and `/ibvi-ads` sole-entrypoint clause",
+      "evidence_lines": "34-67 (Section 2 Supersession & Scope Boundary), 2660-2667 (preserved-write classification), 71-75 (Section 3.1 Explicit Non-Goals)",
+      "causal_chain": "Legacy policy reserves `/ibvi-ads` as the sole Pinna business entrypoint and requires deterministic mutation tooling (CAPI, Customer Match, campaign/budget mutation) to be preserved until parity is measured, i.e., these must not be silently superseded or reinterpreted by a new architecture document.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 2 (lines 45-59) explicitly carves out as 'legacy-governed until a separate Write Plane ADR is approved': `/ibvi-ads`, campaign and budget mutation, Customer Match, CAPI, commercial funnel contracts, Pinna mutation scripts, service-account disablement packets, and autonomous-controller policy. Section 9's disposition table (lines 2660-2667) classifies every preserved operation into exactly one closed class including `ibvi_ads | campaign_budget_mutation | customer_match | capi | commercial_funnel | pinna_mutation | service_account_disablement | autonomous_controller`, all mapped to `preserve_write` / `defer_to_write_plane`, not touched by this ADR's Read-Plane migration."
+    },
+    {
+      "id": "tp-006",
+      "title": "ADR does not restate the Fugu Ultra / GROK Build advisory-only and non-merge-gate status from AGENTS.md",
+      "severity": "Low",
+      "confidence": 0.3,
+      "policy_source": "AGENTS.md lines 80-85 (Fugu Ultra permanently retired from mandatory review, advisory_non_binding only, never a fallback or merge gate; GROK Build not a merge gate)",
+      "evidence_lines": "N/A (absent from ADR)",
+      "causal_chain": "AGENTS.md fixes the coding-worker/reviewer role assignments including explicit exclusions for Fugu Ultra and GROK Build as merge gates. The ADR is silent on these roles entirely.",
+      "verdict": "REFUTED",
+      "refutation_locus": "ADR-0001 is a Read-Plane architecture/governance document, not a delivery-execution or reviewer-role policy document; it does not purport to define or redefine coding-worker or reviewer assignments anywhere in its text (confirmed by full-file search: no mention of 'fugu', 'grok', or 'sonnet'). Silence on a topic entirely outside the document's declared scope (Section 1, architecture decision; Section 2, Read-Plane-only scope boundary) is not a conflict with AGENTS.md, which remains independently authoritative and unmodified by this ADR."
+    },
+    {
+      "id": "tp-007",
+      "title": "Cutover / go-live effect chain requires fresh, non-inferred, non-durable human authorization at every escalation step, consistent with 'checkpoint, not blanket approval' requirement",
+      "severity": null,
+      "confidence": 0.9,
+      "policy_source": "DOCUMENTATION/AUTONOMY.md lines 30-52 (Boundaries That Still Need a Checkpoint: live/production mutation, activating/reconfiguring/bypassing reviewer routes); IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md Section 2 'Honest autonomy boundary' lines 38-59",
+      "evidence_lines": "2360-2404 (mermaid flow: LIVE_READ_GATE through COMPLETE), 3414-3447 (Section 12.6 Gate 4 to cutover chain), 3426-3443 (Gate-4 PASS TTL and re-verification)",
+      "causal_chain": "AUTONOMY.md requires explicit, per-instance human authorization for live/production ad-account mutation and forbids treating any prior approval as durable/blanket. The execution plan's honest-autonomy-boundary section similarly requires that risk-bearing action always requires a fresh checkpoint, not an inferred or reused one.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 12.6 (lines 3414-3447) is explicit that 'A Gate-4 PASS is not a durable licence to cut over' and requires a 'fresh human execute-cutover authorization over exact Gate-4 PASS and cutover_target' with a bound TTL (`maximum_age_seconds: 300`) re-verified at both reservation and immediate pre-I/O boundaries; 'An obsolete Gate-4 PASS can therefore never authorize a cutover after the certification it relied on has changed or expired.' Nine further distinct human authorization checkpoints are chained through the mermaid diagram (lines 2360-2404: LIVE_READ_GATE, G3, IDAUTH, DEPAUTH, CANDAUTH/REFAUTH, SHADOWAUTH, RB_AUTH, ATTESTAUTH, CUTAUTH, RETIREGATE), each single-use and non-transferable per Section 12.4's one-way anti-replay state machine (lines 2977-2993)."
+    },
+    {
+      "id": "tp-008",
+      "title": "ADR's credential/workload-identity provisioning is gated behind explicit human authorization, consistent with the credential-handling checkpoint requirement",
+      "severity": null,
+      "confidence": 0.85,
+      "policy_source": "DOCUMENTATION/AUTONOMY.md line 42 ('creating, rotating, revealing, or revoking credentials/secrets' always requires explicit human authorization)",
+      "evidence_lines": "2365-2368 (IDAUTH/IDEXEC/DEPAUTH/DEPEXEC in mermaid), 2949 (workload_identity_provision row in effect-action matrix)",
+      "causal_chain": "AUTONOMY.md places credential creation/rotation/reveal/revocation on the fixed list of actions that can never be covered by default/ambient authorization and always need an explicit human checkpoint.",
+      "verdict": "REFUTED",
+      "refutation_locus": "The effect-action matrix (Section 12.3, line 2949) requires `workload_identity_provision` to have as mandatory predecessor evidence 'same-run live-read activation eligibility and fresh action-time authorization,' and the migration DAG (lines 2365-2368) places 'Human workload-identity authorization' strictly before 'Provision and verify workload identity,' and 'Human deployment/config authorization' strictly before deployment execution — i.e., credential/identity provisioning is authorization-gated, not autonomously triggered by the ADR or any prior gate."
+    }
+  ],
+  "not_applicable": [
+    {
+      "obligation": "Solo-coder default authorization for ordinary implementation tasks (code, tests, docs, config) without repeated checkpoints",
+      "source": "AGENTS.md lines 48-58; DOCUMENTATION/AUTONOMY.md lines 10-28 (Default Authorization)",
+      "reason": "This obligation describes when an agent may proceed without asking again for bounded implementation tasks; it constrains agent behavior during authoring, not the content or governance claims of a finished ADR document, and the ADR under audit is a static, previously-authored artifact, not an in-progress implementation task."
+    },
+    {
+      "obligation": "Google live reads remain blocked until equivalent enforcement to Meta's local gate is proven",
+      "source": "AGENTS.md line 44; DOCUMENTATION/IBVI_ADS_OPERATOR_ADR.md (legacy), Google-reads-blocked clause",
+      "reason": "This obligation governs the legacy IBVI Ads Operator's live-read enforcement for Google Ads specifically; ADR-0001's declared scope (Section 2, lines 40-43) is limited to the Smart Ads Read-Plane gateway for Meta/Pipeboard analytics and explicitly leaves campaign/budget mutation and other Google-specific live-read enforcement to the legacy-governed surface, which this ADR does not touch or reinterpret."
+    },
+    {
+      "obligation": "Preserve deterministic lead, naming, feed, CAPI, Customer Match, funnel, and campaign-structure tools until measured parity permits retirement",
+      "source": "AGENTS.md lines 45-46",
+      "reason": "Directly addressed and honored as an explicit deferral in Section 2 (lines 45-48) and the Section 9 disposition table (lines 2660-2667), which classify these as preserve_write / defer_to_write_plane; there is no retirement of any of these tools proposed anywhere in the ADR, so no conflict-check applies beyond the REFUTED item tp-005 already covering the scope-boundary claim."
+    },
+    {
+      "obligation": "Money-moving actions, budget changes, or anything affecting billing require explicit human authorization",
+      "source": "DOCUMENTATION/AUTONOMY.md line 41",
+      "reason": "ADR-0001 is declared read-only / analytics-only in scope (Section 1, item 1: 'read-only media intelligence gateway'; Section 3.1 Explicit Non-Goals excludes budget changes and campaign creation). No budget, billing, or money-moving action is described, authorized, or implied anywhere in the 3790-line document, so this obligation has no corresponding ADR content to audit against."
+    },
+    {
+      "obligation": "Force-pushing shared history or destructive cleanup requires explicit human authorization",
+      "source": "DOCUMENTATION/AUTONOMY.md line 43",
+      "reason": "The ADR's cryptographic effect chain includes a 'physical garbage collection' concept (Section 12.4, lines 3016-3019) but explicitly places it out of scope: 'Physical garbage collection is a separate future destructive action with its own human authorization... it is outside ADR-0001.' No force-push or destructive git operation is described anywhere in the document."
+    },
+    {
+      "obligation": "Terra/Luna coding-worker routing requires a proven real adapter, model identity, version, capabilities, permissions, timeout behavior, and fixture canary before use",
+      "source": "AGENTS.md lines 65-67",
+      "reason": "This obligation governs coding-worker model routing during autonomous implementation delivery; ADR-0001 is a manual-delivery documentation artifact (Section 11, line 2341) and contains no coding-worker routing content of any kind."
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [[1, 2299], [1500, 1999], [2300, 3790]],
+    "sections_examined": [
+      "1. Context & Decision",
+      "2. Supersession & Scope Boundary",
+      "3. Security & Repository Governance (3.1 Non-Goals, 3.2 Hermetic 7A Sandbox)",
+      "4. ProviderPort & Admission (Phase-1 driver contract, legacy commit pins)",
+      "5. Certification & Metric Semantics",
+      "6. Data Plane (6.1 landing rows/semantic observation, 6.2 Deterministic Curation, 6.3 Atomic Generations and Snapshots, 6.4 Rebuildable DuckDB Analysis)",
+      "7. Pure Intelligence Layer",
+      "8. Private Registry Authority",
+      "9. Migration Decomposition Contract",
+      "10. Canonical Repository & GOV1",
+      "11. Migration DAG & Operational Evidence (11.1 Independent Operational Acceptance Series, 11.2 Non-Vacuous Rollback Protocol, 11.3 Stabilization, Retirement, and Completion)",
+      "12. Cryptographic Authority & Readiness (12.1 External Trust Anchor, 12.2 Typed Artifact Locators and Gate 2 Genesis, 12.3 Discriminated Authorization Subjects, 12.4 One-Way Anti-Replay, 12.5 Tripartite Readiness Graph, 12.6 Readiness Attestation and Gate 4, 12.7 Schema-Specific Verification Profiles)",
+      "13. Governance Status (13.1 Gate 2 Remediation Closure Map, 13.2 Current Status)"
+    ],
+    "policy_files_read": [
+      "/tmp/smart-ads-v18-pr-final/policy-corpus/AGENTS.md",
+      "/tmp/smart-ads-v18-pr-final/policy-corpus/DOCUMENTATION__AUTONOMY.md",
+      "/tmp/smart-ads-v18-pr-final/policy-corpus/DOCUMENTATION__IBVI_ADS_OPERATOR_ADR.md",
+      "/tmp/smart-ads-v18-pr-final/policy-corpus/DOCUMENTATION__IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md"
+    ]
+  },
+  "limitations": [
+    "All four policy documents were read in full: AGENTS.md (98 lines), DOCUMENTATION__AUTONOMY.md (71 lines), DOCUMENTATION__IBVI_ADS_OPERATOR_ADR.md (360 lines), DOCUMENTATION__IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md (1090 lines) — no partial reads.",
+    "The ADR (3790 lines) was read in full via sequential chunked reads covering the complete line range 1-3790 with no gaps; a full-file keyword grep (human|gate 2|approv|merge|self-approv|reviewer|sonnet|credential|secret|token|autonomous|authoriz|activation|/ibvi-ads|delegation|service.account|write plane|mutation|PII|governance|sign-off) was additionally used as a cross-check to ensure no governance-relevant passage was missed by the sequential read.",
+    "Section 12.7's large schema-verification-profile table (lines 3527-3643, ~117 rows) was read in full but audited at a summary level rather than row-by-row against policy obligations, since its content is cryptographic/schema plumbing rather than autonomy/authorization policy; no governance-relevant claims were identified in that table beyond what is already covered by items tp-002, tp-003, tp-007, and tp-008.",
+    "This lane audits policy/governance compliance only; it does not independently verify the internal cryptographic/schema self-consistency of the ADR's gate machinery (covered by other MAX-review lanes per the v18 protocol), only whether the ADR's stated governance posture conflicts with, omits, or contradicts the four pinned legacy policy documents.",
+    "No CONFIRMED or PLAUSIBLE findings were produced. All eight substantive items resolved to REFUTED because the ADR's own internal gate/authorization apparatus (Gate 2 through retirement gate, Sections 11-13) independently and more rigorously implements every applicable obligation drawn from the four policy documents; two items (tp-001, tp-006) are Low-severity REFUTED notes about topics the ADR is silent on but which fall outside its declared scope, included for completeness rather than as unresolved risk."
+  ],
+  "summary": "Full-file sequential read of the 3790-line ADR-0001 against all four pinned legacy policy documents (AGENTS.md, AUTONOMY.md, IBVI_ADS_OPERATOR_ADR.md, IBVI_ADS_AUTONOMOUS_EXECUTION_PLAN.md, commit d26c73d) produced 8 items, all verdict REFUTED, and 6 not_applicable obligations outside the ADR's declared Read-Plane scope. The ADR's own gate machinery (Gate 2 genesis with anti-self-approval binding, the smart_ads_live_read_activation_receipt eligibility-only gate, the one-way anti-replay authorization/reservation/execution/consumption chain, the Gate-4-then-fresh-cutover-authorization split, and the explicit 'not yet authorized' self-declaration in Section 13.2) implements every applicable autonomy-limit, human-gate, and no-self-approval obligation derived from the policy corpus, generally with materially stronger cryptographic and procedural rigor than the prose-level policy documents require. No CONFIRMED or PLAUSIBLE governance conflicts were found in this rerun."
+}

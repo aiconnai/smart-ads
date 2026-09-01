@@ -1,0 +1,114 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "security-crypto-ops",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "items": [
+    {
+      "id": "sco-001",
+      "title": "Gate-4 PASS TTL/dual-checkpoint recheck prevents stale-attestation cutover (proactively closed, not a gap)",
+      "severity": "None",
+      "confidence": 0.95,
+      "evidence_lines": "3396-3447, 2919-2928",
+      "causal_chain": "Candidate concern: a Gate-4 verification PASS (gate4_verification_record/v1) could become stale relative to a later-advanced live_certification_head/v1 or an expired certificate, letting an executor authorize cutover_execution against readiness evidence that no longer reflects current certification state. The document instead specifies: (1) gate4_freshness_profile/v1 fixes maximum_age_seconds=300 and valid_until_utc = min(verified_at_utc+300s, certificate.valid_until_utc); (2) cutover_target itself carries the bound live_certification_head locator/epoch/digest, certificate valid_until_utc, and Gate-4 TTL; (3) at BOTH cutover reservation and immediate pre-I/O, the executor re-resolves the current live_certification_head/v1 and covering certificate and requires byte-identical head, unchanged fingerprint, certificate validity under the authenticated-clock interval, and Gate-4 PASS still within valid_until_utc; (4) any mismatch/expiry fails closed pre-reservation (zero downstream counters) or quarantines the reservation as terminal in_doubt at the pre-I/O check, requiring a fresh authorization and nonce. This closes the causal path a stale-attestation finding would need (verifier accepts outdated readiness state and performs an unauthorized/unsafe cutover).",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 3426-3443 (\"A Gate-4 PASS is not a durable licence to cut over\" ... \"An obsolete Gate-4 PASS can therefore never authorize a cutover after the certification it relied on has changed or expired\"), reinforced by cutover_target subject definition at lines 2919-2928"
+    },
+    {
+      "id": "sco-002",
+      "title": "Anti-rollback current-key-state authority correctly excludes historical/run-pinned registry snapshot from present-effect authorization",
+      "severity": "None",
+      "confidence": 0.92,
+      "evidence_lines": "2769-2809, 3494-3499",
+      "causal_chain": "Candidate concern: if a signed key_authorization_registry/v1 snapshot pinned at run start could itself authorize a later effect, a compromised-but-not-yet-revoked key from an earlier epoch could still sign an authorization for a present external effect (classic run-pinned-credential rollback/replay risk). The document instead defines current_key_state_head/v1 as the sole current authority: immediately before every reservation/credential resolution/RPC/deployment/cutover/retirement, the verifier must fetch a monotonically newer-or-equal current_key_state/v1 under the external trust anchor, verify epoch + predecessor chain, and check historical signing key and every authority key against current lifecycle/revocation state; a revoked key, rolled-back/forked epoch, or stale current-state proof fails before I/O. An anti-rollback checkpoint additionally CAS-updates the highest-seen epoch/digest and rejects lower epochs, same-epoch different digests, or missing links. The 'E'/'H'/'T' verification-mode definitions (lines 3494-3499) make explicit that historical (H) validation must additionally apply E before contributing to a new effect, and that replay never authorizes a new effect. This closes the causal path a rollback/stale-credential finding would need.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 2773-2782 (\"The run-pinned registry remains immutable historical provenance but never establishes current authority for an effect\"...) and lines 3494-3496 (E/H mode definitions)"
+    },
+    {
+      "id": "sco-003",
+      "title": "protected_merge_evidence/v1 and gate2_approval_receipt/v1 do not require or reference Git commit signing as a control",
+      "severity": "None",
+      "confidence": 0.97,
+      "evidence_lines": "2811-2893, 3535-3536",
+      "causal_chain": "Checked whether the Gate-2 genesis schemas (protected_merge_evidence/v1, gate2_approval_receipt/v1, gate2_authority_policy/v1) assert or depend on Git commit-level cryptographic signatures (e.g. GPG-signed commits) as part of their verification predicate, which would conflict with binding Rule 1 (git commit signing of intermediate branch commits is explicitly not required). Reviewed the full gate2_approval_receipt/v1 JSON schema (lines 2834-2868) and the protected_merge_evidence/v1 narrative (lines 2870-2881): the controls are protected branch name, PR number, reviewed head SHA, protected merge SHA, CI results, review-policy digest, designated Gate-2 principal, and Ed25519 artifact-envelope signature (P1) over the receipt itself -- never a Git commit signature. The inventory table entry for protected_merge_evidence/v1 (line 3535) lists signer role 'protected-merge verifier' with semantic predicate 'exact PR/head/merge, ADR identity, CI/review and policy equality', again with no commit-signature member. This is consistent with, not merely silent on, binding Rule 1; no finding is warranted.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 2834-2868 (full gate2_approval_receipt/v1 schema, no commit-signature field) and line 3535 (inventory row for protected_merge_evidence/v1)"
+    },
+    {
+      "id": "sco-004",
+      "title": "HMAC-SHA-256 tenant_resource_key protection is asserted only at the registry-boundary level; no key-rotation/storage schema is specified for this specific secret",
+      "severity": "Low",
+      "confidence": 0.55,
+      "evidence_lines": "1986-1998",
+      "causal_chain": "Section 8 defines resource_ref = base32(HMAC-SHA-256(tenant_resource_key, mapping_version || 0x00 || ad_platform_ref || 0x00 || resource_level || 0x00 || raw_provider_id)) and states the private reversible mapping, raw provider ID, and key bytes 'remain only in the registry boundary', with resource_ref_mapping_version closed and a 'non-secret key_identity'. Unlike every other cryptographic material in the document (Ed25519 trust-anchor keys, current_key_state, key_authorization_registry), the tenant_resource_key has no dedicated signed artifact profile in the section-12.7/artifact_contract_inventory table (lines 3527-3644): there is no tenant_resource_key rotation record, no key-compromise/revocation transition, and no explicit storage/HSM/KMS requirement. If this HMAC key were ever leaked from the registry boundary, the document does not specify a rotation or invalidation mechanism analogous to current_key_state_head/v1's anti-rollback epoch chain for Ed25519 keys, so all historically derived resource_ref values would remain silently un-repudiable/un-rotatable under the ADR's own normative apparatus. However, this key is explicitly a private-registry-internal implementation detail (opaque derivation only, never a signed/verified artifact in the P1 protocol), and the whole registry snapshot is itself signed and access-controlled (Section 8, section 12.1), so the absence may be intentional scoping (the ADR governs signed artifacts and effect authorization, not registry-internal secret management, which could be delegated to normal secret-manager operational practice outside the ADR's chartered surface). No other passage in the document (including 13.1 C33) discusses tenant_resource_key rotation, so this is not clearly REFUTED by the text, but the causal chain to actual harm depends on an out-of-scope assumption (that the ADR is meant to be the sole normative source for this secret's lifecycle), which is uncertain enough to keep severity low.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    },
+    {
+      "id": "sco-005",
+      "title": "Ed25519 algorithm is hardcoded with no negotiation/agility path; no algorithm-downgrade surface exists",
+      "severity": "None",
+      "confidence": 0.9,
+      "evidence_lines": "2755-2756, 3451-3492, 3527-3644",
+      "causal_chain": "Checked whether the document permits any signature-algorithm selection, negotiation, or fallback (a classic downgrade-attack surface) across the ~90 profiled artifact types in the section-12.7 inventory table. cell_trust_anchor_config/v1 pins a single Ed25519 trust-anchor ID and public key (lines 2755-2756); the P1 canonicalization/signing protocol (lines 3472-3492) hardcodes Ed25519.sign/M with a fixed 64-byte decoded-signature-length check and explicit rejection of base64url/unpadded encodings -- there is no algorithm identifier field in the P1 envelope construction and no branch for an alternate curve or hash. The inventory table's 'preimage_rule' column is uniformly 'P1' for all ~90 entries with no per-entry algorithm override field. Because there is no negotiable or caller-selectable algorithm parameter anywhere in the signing/verification path, there is no downgrade surface to find.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 3451-3492 (fixed Ed25519-only P1 protocol, no algorithm parameter); artifact_contract_inventory table lines 3527-3644 shows uniform preimage_rule=P1 with no per-entry algorithm field"
+    },
+    {
+      "id": "sco-006",
+      "title": "P1 envelope 'delete, never blank' rule for content_digest/signature_base64 is unambiguous and closes canonicalization-injection surface",
+      "severity": "None",
+      "confidence": 0.9,
+      "evidence_lines": "3472-3492",
+      "causal_chain": "Checked whether leaving content_digest/signature_base64 present-but-null or present-but-empty-string during P preimage construction (rather than deleting the JSON members) could let an attacker craft a second valid preimage P' that RFC8785-canonicalizes identically to the true P while the envelope differs in a verifier that blanks instead of deletes (a classic canonicalization-ambiguity/duplicate-preimage attack). The document is explicit and singular on this point: 'let P be E after deleting exactly the two members ... not blanking them and not deleting any sibling' (lines 3474-3475), and the same delete-not-blank pattern is stated as a general recurring rule for every other content-addressed digest field in the document (e.g. Section 12.2 locator digest, Section 6.3 dataset digests) with no counter-example found in the full 3790-line read. No verifier is ever specified to accept a blanked variant. No causal path to a forgeable duplicate preimage exists under the stated rule.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 3472-3475 (explicit delete-not-blank instruction), consistent with same pattern throughout the document (e.g. lines 1920-1922 for canonical_result_digest)"
+    },
+    {
+      "id": "sco-007",
+      "title": "Coverage confirmation: no unsigned-commit or missing-commit-message-body findings raised, per binding rules 1 and 2",
+      "severity": "None",
+      "confidence": 1.0,
+      "evidence_lines": "1-3790",
+      "causal_chain": "Per binding rule 1 (Git signing of intermediate branch commits is not required by the ADR; the control is protected_merge_evidence/v1 and a future protected merge) and binding rule 2 (a commit lacking a message body is not a functional/normative failure), this lane deliberately did not evaluate or report on git commit signature presence/absence or commit message body completeness anywhere in the document, including the Section 4.1 Pipeboard driver Git artifact table (five rows with Git blob OID + file SHA-256, no signature field) and the d26c73d8508c7c3d43161fe36a80c44a46bf0f2d legacy baseline references throughout. This item documents that exclusion explicitly so the absence of such findings is legible as a scoping decision, not an oversight.",
+      "verdict": "REFUTED",
+      "refutation_locus": "binding rules 1 and 2 of the lane assignment (human decisions this session); no in-document locus applicable"
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [[1, 3790]],
+    "sections_examined": [
+      "1-2 (front matter / summary)",
+      "3.2 Hermetic 7A Sandbox (sealed_sandbox_profile/v1, negative_security_test_report/v1)",
+      "4.1 Pipeboard driver contract (Git artifact provenance table)",
+      "4.2-4.3 admitted_collection/v1, normalized_fact_set_digest formula",
+      "5.1-5.6 Gate 3 selection, certification_fingerprint, certification_7b_record/v1",
+      "6.1 analytics_landing_row/v1, semantic_observation_digest, row_digest",
+      "6.3 parquet_object_locator/v1, dataset_catalog/v1 CAS, dataset_snapshot/v1",
+      "6.4 report/retention lineage, canonical_result_digest formula",
+      "7 Pure Intelligence Layer",
+      "8 Private Registry Authority (HMAC-SHA-256 resource_ref derivation)",
+      "9.1 Factual Baseline (legacy commit d26c73d)",
+      "9.2 decomposition_manifest/v1, legacy_seam_release/v1, legacy_seam_contract/v1",
+      "11.2 rollback_test_protocol/v1, rollback_test_receipt/v1",
+      "11.3 stabilization/retirement records, legacy_deployment_readback/v1, migration_completion_record/v1",
+      "12.1 External Trust Anchor and Key Registry (current_key_state anti-rollback)",
+      "12.2 Typed Artifact Locators and Gate 2 Genesis (artifact_locator/v1, gate2_approval_receipt/v1)",
+      "12.3 Discriminated Authorization Subjects and closed effect-action matrix",
+      "12.4 One-Way Anti-Replay reservation state machine",
+      "12.5 Tripartite Readiness Graph (MIGRATION_MANIFEST.json 19 slots)",
+      "12.6 Readiness Attestation and Gate 4 (gate4_freshness_profile/v1, dual-checkpoint recheck)",
+      "12.7 Schema-Specific Verification Profiles (artifact_contract_inventory/v1, P1 protocol, full ~90-row inventory table)",
+      "13.1 Gate 2 Remediation Closure Map (C01-C95)",
+      "13.2 Current Status"
+    ]
+  },
+  "limitations": [
+    "Review is textual/normative analysis of the ADR document only; no implementation code, CI configuration, or actual key material was inspected, since none exists yet (ADR status: PROPOSED / Gate 2 NOT GRANTED / Implementation NOT STARTED per Section 13.2).",
+    "git cat-file -t on the stated blob SHA (94b119693147d9d90a12c56ee5f28a990a2c1974) against the local repository failed to resolve ('could not get object info'); the review proceeded against the materialized markdown file content directly rather than verifying it against a live git object store, since the local repo does not have that blob fetched.",
+    "sco-004 (tenant_resource_key lifecycle) is the only non-REFUTED, non-None item; its severity is kept Low and confidence moderate specifically because the causal chain depends on treating the ADR as the sole normative source for a registry-internal secret's rotation, which is a scoping assumption rather than a demonstrated verification failure.",
+    "This lane did not examine budget/bidding, creative, tracking-pixel, or campaign-performance content elsewhere in the repository (e.g. MBRAS marketing plan documents referenced in the project's own CLAUDE.md); scope was strictly the ADR document per the assignment."
+  ],
+  "summary": "Full sequential read of all 3790 lines completed. The security-crypto-ops surface of this ADR (Ed25519 P1 signing envelope, RFC 8785 canonicalization, SHA-256 content digests, external trust anchor / current-key-state anti-rollback, Gate-2 protected-merge genesis, Gate-4 freshness-bound non-authorizing readiness verification, CAS-protected heads/catalogs, and the closed ~90-entry artifact_contract_inventory/v1) is internally consistent and unusually thorough: every candidate concern investigated under the causal-chain requirement (stale Gate-4 PASS authorizing cutover; historical key registry snapshot authorizing a present effect; git-commit-signing as an implicit control; canonicalization ambiguity from blanked vs. deleted digest fields; algorithm-downgrade surface) is explicitly and proactively closed by the document's own text, with the resolving locus cited per item. The sole non-REFUTED item (sco-004, Low severity) flags that the Section 8 HMAC-SHA-256 tenant_resource_key lacks a dedicated signed lifecycle/rotation artifact analogous to current_key_state_head/v1, unlike every other key material in the document; this is plausible but not confirmed as a gap, since the key is explicitly registry-internal and outside the P1-signed-artifact surface the ADR charters. No findings were raised regarding unsigned intermediate commits or missing commit message bodies, per binding rules 1 and 2."
+}

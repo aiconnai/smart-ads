@@ -1,0 +1,48 @@
+{
+ "schema": "terminal_receipt/v1",
+ "protocol": "pr-final-v18",
+ "generated_utc": "2026-09-01T19:11:00+00:00",
+ "target": {
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "pr_base": "4015c15e25f4121d63ebc45456fe37f953962a8c",
+  "policy_corpus_commit": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d"
+ },
+ "verdict": "COMMENT",
+ "counts": {
+  "High": 0,
+  "Medium": 0,
+  "Low": 1,
+  "confirmed": 1,
+  "plausible": 0,
+  "refuted": 17,
+  "not_applicable": 6
+ },
+ "residuals": [
+  {
+   "id": "sdf-003",
+   "severity": "Low",
+   "verdict": "CONFIRMED",
+   "blocking": false,
+   "summary": "nova acao retention_root_admission (linha 12 da matriz) sem C-item proprio no closure map C01-C95; controle integralmente especificado em 12.3-12.4 e schema-profiles 3612-3613; sem promessa 1:1 no documento"
+  }
+ ],
+ "gates": {
+  "deterministic": "PASS (YAML=lacuna)",
+  "lanes": "2/2 aceitas",
+  "validator": "1/1 executado"
+ },
+ "limitations": [
+  "gate YAML nao executado (pyyaml ausente)",
+  "hunk count corrigido 29->33 e documentado",
+  "CI inexistente no PR — gates locais deterministas substituem"
+ ],
+ "human_gates_pending": [
+  "aceite do residual sdf-003",
+  "ledger",
+  "abertura/atualizacao de PR",
+  "merge",
+  "Gate 2"
+ ],
+ "manifest_sha256": "c9a0d3351dc154e8d04883ac095e1b6be4ad30a81d290081491d152ad8a45f8f"
+}

@@ -1,0 +1,84 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "history-migration",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "items": [
+    {
+      "id": "hm-001",
+      "title": "retention_root_set_head/v1 has no defined genesis artifact/authorization, unlike the analogous dataset_catalog bootstrap",
+      "severity": "Medium",
+      "confidence": 0.68,
+      "evidence_lines": "2999-3037, 3608, 3594-3597",
+      "causal_chain": "Section 12.4 (lines 2999-3037) specifies that both retention_release and retention_root_admission are one-way CAS transitions from an authorized (epoch, head_digest) pair to (epoch+1, proposed root-set digest), and that the executor must 're-resolve that head' and 'require exact equality with the authorized subject' before mutating (lines 3003-3004, 3023-3024). Line 3000 acknowledges a 'predecessor head except at genesis' — so a genesis case exists — but no artifact, signer role, or authorization contract defines how the epoch-0 retention_root_set_head/v1 is minted, what its initial root set is, or who is authorized to create it. This is asymmetric with the parallel dataset_catalog subsystem, which has an explicit two-artifact genesis pair (dataset_catalog_genesis_record/v1 signed by an 'external catalog bootstrap authority' plus dataset_catalog_genesis_consumption_record/v1 proving 'unique genesis digest, epoch-0 equality, first successor and cut ID' — lines 3594-3595) and an explicit 12.7 verification-profile row for each. retention_root_set_head/v1's own profile row (line 3608) only describes ongoing CAS behavior ('complete live roots and monotonic epoch/head CAS'), not genesis admission. Concrete failure mechanism: the retention executor at first-ever admission has no signed predecessor to re-resolve and compare against 'the authorized subject' (there is no prior head to authorize against), so the described re-resolution/equality check at lines 3003-3004 cannot execute as written for the very first admission — an implementer must invent an ad hoc genesis path outside what the ADR profiles, and any resulting genesis artifact is unprofiled per the closing rule at lines 3670-3671 ('absent profile ... rejects before semantic processing'), which would make the very first retention root inadmissible under the ADR's own closure rule.",
+      "verdict": "CONFIRMED",
+      "refutation_locus": null
+    },
+    {
+      "id": "hm-002",
+      "title": "Decomposition fork adjudication staleness between issuance and rebase-manifest CAS is closed by re-validation at commit time, not by adjudication expiry",
+      "severity": "None",
+      "confidence": 0.8,
+      "evidence_lines": "2165-2172",
+      "causal_chain": "Initial reading raised a concern that decomposition_fork_adjudication/v1 (lines 2165-2168) could become stale between issuance and the rebase manifest's CAS, allowing an adjudication computed against an outdated head to wrongly promote a fork. On full re-read, lines 2168-2172 close this: 'the selected fork is never promoted directly: a new immutable rebase manifest must descend from the currently active tip ... and win a fresh CAS.' The descent check ('must descend from the currently active tip') is evaluated at the moment of the rebase manifest's own CAS attempt, not against the head captured at adjudication time, so any intervening tip change is caught by the fresh CAS itself (a losing CAS 'does not create an active tip', line 2163). No causal path exists where a stale adjudication silently promotes a fork, because promotion is gated by the tip state current at CAS time, not by the adjudication's frozen view.",
+      "verdict": "REFUTED",
+      "refutation_locus": "lines 2168-2172: 'a new immutable rebase manifest must descend from the currently active tip, reference the adjudication, preserve source/scope, and win a fresh CAS' — descent and CAS success are both evaluated against the live tip at rebase-commit time, closing the staleness gap."
+    },
+    {
+      "id": "hm-003",
+      "title": "Retirement re-enumeration equality is scoped to effective-operation array and source/disjointness digests, not full deployment-surface identity — potentially masking a redeployed-but-operation-identical legacy surface",
+      "severity": "Low",
+      "confidence": 0.35,
+      "evidence_lines": "2712-2725",
+      "causal_chain": "Lines 2712-2725 require the fresh pre-retirement legacy_deployment_readback/v1 to be byte-identical to the finalized legacy_read_endpoint_inventory/v1 specifically on 'its effective-operation array, static Git source set, and the three set/disjointness digests.' Line 2720 does separately list 'a changed deployed release or runtime binary' as a drift condition that aborts retirement, so a redeploy is in fact covered as an explicit named drift class alongside operation-set changes — this closes the scenario initially flagged (a new deployment with the same effective operations silently passing). On inspection this is adequately specified: drift detection is disjunctive across operation-set AND deployment-identity dimensions, not scoped only to operations as the causal concern presupposed. Retained at Low/REFUTED-leaning confidence only because 'changed deployed release or runtime binary' is not accompanied by its own preimage formula in this excerpt the way the three set/disjointness digests are (formulas shown at approx. lines 2670-2704 for the digests, but no explicit digest formula for release/runtime-binary identity is shown in this passage) — a residual documentation-completeness observation, not a demonstrated causal failure.",
+      "verdict": "REFUTED",
+      "refutation_locus": "line 2720: 'Any drift — a new, removed, reclassified, or re-routed operation, a changed deployed release or runtime binary, or an altered source set — aborts' explicitly names deployment/runtime-binary change as an independent, mandatory drift trigger alongside operation-set changes, closing the gap between 'same operations' and 'different deployment'."
+    },
+    {
+      "id": "hm-004",
+      "title": "No schema-version upgrade/compatibility path is defined for any smart_ads/*/v1 artifact family",
+      "severity": "None",
+      "confidence": 0.55,
+      "evidence_lines": "2018, 2836, 3067, 3608-3643, 3670-3671",
+      "causal_chain": "Every profiled schema in the document (the full verification-profile table, lines ~2836-3643, and every embedded $schema literal, e.g. decomposition_manifest/v1 at line 2018, migration_manifest/v1 at line 3067) is pinned at v1 with no defined v1-to-v2 migration, upgrade, or dual-version acceptance mechanism, and the closing rule (lines 3670-3671) states 'Unknown schema ... rejects before semantic processing.' Considered as a candidate finding for 'schema-version compatibility across versions' (explicit lane scope), but the document's own status (13.2, lines 3775-3786) states implementation is NOT STARTED and only v1 has ever been defined or produced — there is no claim anywhere in the document that a v2 exists, is planned, or must interoperate with v1. Absent an affirmative claim of multi-version support that the mechanism fails to deliver, there is no causal failure to demonstrate: a system that has only ever emitted one schema version, and which correctly rejects any schema it does not recognize, is not violating any stated compatibility guarantee. This is a forward-looking design gap (worth raising as an implementation-phase concern) rather than a defect in the ADR's current claims.",
+      "verdict": "REFUTED",
+      "refutation_locus": "13.2 Current Status (lines 3775-3786): 'Implementation: NOT STARTED' — no v2 schema is claimed to exist or to require compatibility with v1, so the 'unknown schema rejects' rule (lines 3670-3671) is consistent with, not contradictory to, the document's own scope."
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [[1, 3790]],
+    "sections_examined": [
+      "1. Purpose and Scope (approx.)",
+      "4.x Fact key / reconciliation semantics",
+      "5.2 Canonical Query Contract",
+      "5.3 Gate 3 Selection",
+      "9. Migration Decomposition Contract",
+      "9.1 Factual Baseline",
+      "9.2 Complete Source Inventory",
+      "10. Canonical Repository & GOV1",
+      "11. Migration DAG & Operational Evidence",
+      "11.1 Independent Operational Acceptance Series",
+      "11.2 Non-Vacuous Rollback Protocol",
+      "11.3 Stabilization, Retirement, Completion",
+      "12. Cryptographic Authority & Readiness",
+      "12.1 External Trust Anchor and Key Registry",
+      "12.2 Gate 2 Genesis",
+      "12.3 Authorization Subjects",
+      "12.4 One-Way Anti-Replay Effect Chain (retention_root_admission core text)",
+      "12.5 Tripartite Readiness Graph",
+      "12.6 Readiness Attestation and Gate 4",
+      "12.7 Schema-Specific Verification Profiles (full table)",
+      "13. Governance Status",
+      "13.1 Gate 2 Remediation Closure Map",
+      "13.2 Current Status"
+    ]
+  },
+  "limitations": [
+    "Analysis performed by a single lane scoped to migration/decomposition/retention/re-enumeration/schema-version/irreversible-transition concerns only; findings outside this scope (e.g. pure cryptographic, provider-semantics, or behavioral concerns) were intentionally not pursued even where noticed in passing, per lane assignment.",
+    "Per binding rules, unsigned-commit and empty-commit-body observations were excluded a priori as non-findings, and no textual-correspondence-only observation was retained as CONFIRMED/PLAUSIBLE without an explicit causal chain; three of four drafted items were ultimately REFUTED after full-document cross-checking, leaving one CONFIRMED structural gap (hm-001).",
+    "hm-001 (retention genesis) is assessed against the document's own internal consistency (the parallel dataset_catalog genesis pattern) rather than against an external formal specification; it is possible an implementer would treat epoch-0 admission as an out-of-band one-time bootstrap outside the ADR's artifact-profile closure rule, in which case the gap is a documentation-completeness issue rather than a runtime safety violation — reflected in confidence 0.68 rather than higher.",
+    "This lane did not independently re-verify SHA-256/RFC 8785 preimage formulas cited in other lanes' scope (cryptographic correctness is out of this lane's remit); only the causal/structural completeness of migration-specific mechanics was assessed."
+  ],
+  "summary": "Full 3790-line document read. Within the history-migration lane scope, three of four candidate concerns identified during reading were REFUTED on full cross-checking: the decomposition fork-adjudication staleness concern is closed by re-validating tip descent at CAS-commit time rather than at adjudication-issuance time (hm-002); the retirement re-enumeration equality check explicitly includes deployment/runtime-binary identity as an independent drift trigger alongside operation-set identity, so a same-operations-different-deployment scenario is not silently masked (hm-003); and the apparent absence of schema-version compatibility mechanics is consistent with the document's own NOT STARTED status, which has never produced or claimed a second schema version (hm-004). One structural gap was CONFIRMED: retention_root_set_head/v1 has no defined genesis artifact, signer role, or bootstrap authorization contract, unlike the parallel dataset_catalog subsystem which has an explicit two-artifact genesis/genesis-consumption pair — the described re-resolve-and-compare-to-authorized-subject mechanic (12.4) has no predecessor to compare against at the very first admission, and any ad hoc genesis path an implementer might invent would be unprofiled and therefore rejected under the document's own closed-profile rule (hm-001, Medium severity, confidence 0.68)."
+}

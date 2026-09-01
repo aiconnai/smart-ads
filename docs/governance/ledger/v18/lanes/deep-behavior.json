@@ -1,0 +1,64 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "deep-behavior",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "items": [
+    {
+      "id": "db-001",
+      "title": "in_doubt terminal branch has no bounded recovery TTL or reconciliation liveness guarantee",
+      "severity": "Medium",
+      "confidence": 0.55,
+      "evidence_lines": "section 12.4 (one-way anti-replay effect chain); section 11.3 (retirement re-enumeration quarantine); section 12.6/12.7 (cutover pre-I/O quarantine)",
+      "causal_chain": "The anti-replay effect chain is one-way: absent --CAS--> reserved --success--> consumed, with an alternate in_doubt terminal branch reached on ambiguous effect outcome, worker loss, or a post-reservation freshness failure (e.g., cutover reservation freshness passes but immediate pre-I/O freshness fails, or retirement re-enumeration drift is detected after an already-issued reservation). The document states recovery from in_doubt occurs only via a signed reservation_reconciliation_record/v1 that never reopens the old reservation. However, no maximum_age_seconds, timeout, or escalation trigger is specified for how long a reservation may remain in_doubt before a reconciliation authority must act. A verifier checking system state at any point after quarantine cannot distinguish 'reconciliation pending, in-window' from 'reconciliation never occurred' because no TTL or liveness bound exists to violate. Concretely: an operator or the readiness builder inspecting migration_manifest/v1 slots has no artifact-level signal that an in_doubt reservation has been stuck for an unbounded period, so a stalled or forgotten reconciliation can silently block forward progress (e.g., retirement authorization) indefinitely without tripping any freshness or age check, since in_doubt reservations are explicitly outside the two-phase freshness-check pattern that governs live effects.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    },
+    {
+      "id": "db-002",
+      "title": "7B candidate/reference dual dispatch within the 900s Gate-3 selection window could race on fingerprint drift",
+      "severity": "Low",
+      "confidence": 0.3,
+      "evidence_lines": "section 5.3 (Gate 3 Selection, 900s window); section 5.4 (Recomputable 7B Bundle, maximum_retrieval_skew_seconds: 300); fact_reconciliations pairing rules",
+      "causal_chain": "Candidate and reference 7B execution records are independently authorized, reserved, and dispatched (C43), and the Gate-3 selection receipt they must byte-match has a 900-second validity window. If the two dispatches were unbounded in relative timing, a Gate-3 fingerprint replacement (fingerprint-changing certification-role selection) occurring between the candidate dispatch and the reference dispatch could in principle let the two sides certify against different resolved versions, breaking the eleven-member gate3_certification_fingerprint byte-identity invariant. This is the apparent race.",
+      "verdict": "REFUTED",
+      "refutation_locus": "section 5.4 explicitly bounds row/side pairing with maximum_retrieval_skew_seconds: 300, and both execution records are independently required to carry the byte-identical gate3_certification_fingerprint resolved from the same certification-role Gate-3 selection; any drift between the two sides' resolved fingerprint fails the eleven-member equality check at 7B verification time (section 5.4/5.5.1), so a fingerprint change mid-dispatch is caught by the verifier rather than silently certifying mismatched versions."
+    },
+    {
+      "id": "db-003",
+      "title": "Shadow-acceptance series reset asymmetry (operational-renewal does not reset 5/4 chains) does not create a staleness gap",
+      "severity": "Low",
+      "confidence": 0.25,
+      "evidence_lines": "section 11.1 (shadow acceptance record, 5 daily / 4 weekly chains, reset rule); section 5.3 (operational_renewal selection role, byte-match requirement)",
+      "causal_chain": "Section 11.1 states any head change, certificate replacement, fingerprint change, failure, or rejection resets both the daily and weekly acceptance chains to zero, but explicitly carves out an exception: an operational-renewal receipt with an unchanged fingerprint does not change the head and does not reset either series. The apparent risk is that repeated operational renewals could let acceptance tokens accumulate against a certification whose underlying live data path has silently drifted without ever tripping a reset, since renewal is not itself gated by the same rigor as a fresh certification.",
+      "verdict": "REFUTED",
+      "refutation_locus": "section 5.3 requires every operational_renewal selection to byte-match the resolved certification-role fingerprint at renewal time and undergo the same two-phase (reservation + immediate pre-I/O) freshness check against the current live_certification_head/v1; because renewal cannot select, replace, downgrade, or broaden a version and must reproduce the exact certified fingerprint, an operational renewal that would reflect a drifted path is definitionally impossible without first becoming a fingerprint-changing event, which section 11.1 already defines as reset-triggering."
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [[1, 3790]],
+    "sections_examined": [
+      "1 Context & Decision",
+      "2 Supersession & Scope Boundary",
+      "3 Security & Repository Governance",
+      "4 ProviderPort & Admission",
+      "5 Certification & Metric Semantics",
+      "6 Data Plane",
+      "7 Pure Intelligence Layer",
+      "8 Private Registry Authority",
+      "9 Migration Decomposition Contract",
+      "10 Canonical Repository & GOV1",
+      "11 Migration DAG & Operational Evidence",
+      "12 Cryptographic Authority & Readiness",
+      "13 Governance Status"
+    ]
+  },
+  "limitations": [
+    "Review is document-only (static textual analysis); no runtime, code, or test execution was performed to confirm behavior matches the specified contracts.",
+    "db-001 is the sole surviving Medium-severity finding after applying the db-001-discipline (checking for elsewhere-resolved bindings); two other initially plausible candidates (7B dual-dispatch race, shadow-acceptance reset asymmetry) were REFUTED with populated refutation_locus after locating explicit resolving text elsewhere in the document.",
+    "No unsigned-commit or missing-body findings were applicable; this review is confined to the ADR prose itself, not to git commit history.",
+    "Confidence on db-001 is capped at 0.55 because absence of a stated TTL is an argument from silence; the document may intend organizational/operational SLAs for reconciliation that are out of scope for a document-only ADR and would not appear as a formal artifact field."
+  ],
+  "summary": "Full 3790-line read completed. Within the deep-behavior scope (TTLs, freshness windows, races, effect ordering, retention/re-enumeration, reconciliation, gate-blocking, idempotency, late-binding formulas), one Medium-confidence PLAUSIBLE finding survives: the in_doubt terminal branch of the one-way anti-replay effect chain (section 12.4) has no specified maximum duration or liveness guarantee before reservation_reconciliation_record/v1 must resolve it, creating a theoretical unbounded-stall window not covered by any freshness or age check. Two other initially promising candidates (7B candidate/reference dispatch race across the 900s Gate-3 window; shadow-acceptance-series reset asymmetry for operational renewals) were investigated and REFUTED, each with a populated refutation_locus, because the document resolves the apparent gap elsewhere (maximum_retrieval_skew_seconds: 300 bounds 7B pairing; the byte-match/two-phase-freshness requirement on operational_renewal makes an unnoticed drift definitionally impossible without triggering the existing reset rule). This mirrors the exact db-001 caution given at task start: apparent gaps found by first-pass reading were checked against the full document before being confirmed, and two were downgraded to REFUTED once their resolving text was located."
+}

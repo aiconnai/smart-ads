@@ -1,0 +1,38 @@
+{
+ "schema": "deterministic_gates/v1",
+ "generated_utc": "2026-09-01T18:57:03+00:00",
+ "target_head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+ "gates": {
+  "git_inventory_nul_safe": {
+   "pass": true,
+   "entries": 1,
+   "sha256": "e64b8372450d9c93bee99b3f6aa4622fbc4372b26f641d49d6f356714723fa24",
+   "artifact": "/tmp/smart-ads-v18-pr-final/gates/git-inventory-HEAD.nulsafe",
+   "note": "git ls-tree -r -z --full-tree no HEAD; separador NUL, imune a rename/newline em paths"
+  },
+  "diff_check": {
+   "pass": true,
+   "output": "limpo"
+  },
+  "json_dup_rejection": {
+   "pass": true,
+   "checked": 36,
+   "failures": []
+  },
+  "yaml": {
+   "pass": null,
+   "checked": 4,
+   "note": "pyyaml indisponivel — gate NAO executado (registrado como lacuna, nao como aprovacao)"
+  },
+  "fences_balanced": {
+   "pass": true,
+   "fence_lines": 120,
+   "blocks": 60
+  },
+  "mermaid": {
+   "pass": true,
+   "checked": 1,
+   "failures": []
+  }
+ }
+}

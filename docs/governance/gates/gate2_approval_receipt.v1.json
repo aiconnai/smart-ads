@@ -1,0 +1,48 @@
+{
+ "schema": "gate2_approval_receipt/v1",
+ "granted": true,
+ "emitted_utc": "2026-09-01T19:33:03+00:00",
+ "protected_sha": "4b54bd20699ac915e8b14e2d82088213ed9aff05",
+ "merge_of": {
+  "pr": 2,
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "base": "4015c15e25f4121d63ebc45456fe37f953962a8c",
+  "merge_method": "merge"
+ },
+ "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+ "review": {
+  "protocol": "pr-final-v18",
+  "verdict": "COMMENT",
+  "counts": {
+   "High": 0,
+   "Medium": 0,
+   "Low": 1
+  },
+  "residual_accepted": {
+   "id": "sdf-003",
+   "acceptance_sha256": "784aeb177db6de00feb5f1dc93079069b77dd2e23854cdf6f9f63c91dac19cf0"
+  },
+  "policy_corpus_commit": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+  "ledger_comment": "aiconnai/smart-ads#2 issuecomment-5499310101",
+  "manifest_sha256": "c9a0d3351dc154e8d04883ac095e1b6be4ad30a81d290081491d152ad8a45f8f"
+ },
+ "authorization": {
+  "granted_by": "human operator (in-session)",
+  "literal_grants": [
+   "1) aceito",
+   "autorizo todos"
+  ],
+  "scope": [
+   "residual sdf-003",
+   "ledger",
+   "PR update",
+   "merge PR #2",
+   "Gate 2 emission"
+  ]
+ },
+ "signature": {
+  "type": "none",
+  "note": "nenhuma chave de assinatura disponibilizada; concessao humana registrada em texto literal e ancorada por SHAs git + sha256 dos artefatos"
+ },
+ "supersedes": "draft anterior anulado (0 bytes) conforme corpo do PR #2"
+}

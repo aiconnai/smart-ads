@@ -1,0 +1,94 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "provider-semantics",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "items": [
+    {
+      "id": "ps-001",
+      "title": "Currency is hardcoded to literal BRL in canonical_query_contract/v1 and admitted_collection/v1 while section 4.3's numeric grammar refers only to an abstract 'query currency'",
+      "severity": "Low",
+      "confidence": 0.55,
+      "evidence_lines": "429,445,651-654,799",
+      "causal_chain": "The Phase-1 canonical query YAML (5.2, line 799: `currency: BRL`) and the admitted_collection/v1 JSON example (4.2, line 445: `\"currency\": \"BRL\"`) both instantiate currency as a literal constant rather than a tenant- or query-derived value. Section 4.3's minor-currency rule (lines 651-652) says a minor-currency numeric value 'requires unit: minor_currency and the query currency' -- an abstract binding, not a hardcoded one. A reader implementing the admission validator or the numeric-grammar checker from 4.3 alone could reasonably treat currency as a free query parameter, while the concrete schema examples pin it to BRL. If a future non-BRL tenant is admitted before the schema is versioned, the validator built strictly from 4.3's abstract rule would accept a non-BRL query, but the concrete admitted_collection/v1 and canonical_query_contract/v1 examples elsewhere in the same document assume BRL is the only value ever observed in Phase 1, creating two different implementer expectations from two parts of one document.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    },
+    {
+      "id": "ps-002",
+      "title": "transport_provider_ref (Pipeboard) vs ad_platform_ref (Meta) distinction is maintained consistently everywhere it is load-bearing",
+      "severity": "None",
+      "confidence": 0.9,
+      "evidence_lines": "260-262,446,783,969,1976-1993",
+      "causal_chain": "Section 4.1 establishes driver_id: pipeboard_hosted, transport_provider_ref: pipeboard, ad_platform_ref: meta as three distinct fields. A consumer worried about conflation would ask: does the private registry (section 8) or resource_ref derivation use the transport identity where it should use the platform identity, or vice versa? Section 8 (lines 1976-1977) scopes provider-account uniqueness by (tenant, transport_provider_ref, ad_platform_ref, private_account_key) -- both are present and distinct, so a tenant with two ad platforms behind the same transport is representable, and a tenant with the same ad platform behind two future transports is also representable. The resource_ref HMAC preimage (line 1988) uses ad_platform_ref specifically, not transport_provider_ref, which is correct: the opaque resource identity must be platform-scoped (a Meta campaign ID) not transport-scoped (which hosting API fetched it), otherwise switching transport for the same platform would silently mint new resource_ref values and break fact continuity. No downstream consumer in the document reads transport_provider_ref where ad_platform_ref semantics are needed.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 8, lines 1976-1993: resource_ref derivation explicitly keys on ad_platform_ref, and provider-account uniqueness explicitly carries both fields as independent members, so the two identities are never merged or read interchangeably."
+    },
+    {
+      "id": "ps-003",
+      "title": "Deduplication semantics differ in key granularity across sections 4.2, 5.4 (7B), and 6.1 (generation) but are declared to be the same underlying identity via the section 4.2 bijection",
+      "severity": "None",
+      "confidence": 0.85,
+      "evidence_lines": "1036-1073,1517-1522",
+      "causal_chain": "Three dedup checks exist: (1) generation-level 'Duplicate fact_key objects in a promoted generation are forbidden' (6.1, line 1520) operating on the full 9-field fact_key; (2) 7B row-pairing 'deduplication_rule: canonical_fact_key_and_metric_unique' (5.4, line 1038) operating on Kfive(f), a 5-field projection (resource_ref, metric_date, resource_level, breakdown_signature, canonical_metric_ref); (3) U7 (4-field resource-key-only) which the text explicitly says 'never pairs or counts facts by itself' (line 1053). If these were meant to be the same uniqueness constraint but used inconsistent key shapes, a fact could pass the 7B five-field uniqueness check yet later collide at the nine-field generation-level fact_key check (e.g. two facts sharing Kfive(f) but differing in binding_ref, account_ref, or attribution_ref would be treated as duplicates by 7B pairing but as distinct by generation promotion), silently changing what 'the same fact' means between certification and landing.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Line 1066-1067: Kfive(f) is explicitly defined as adding 'the f.fact_key.metric_semantic_ref value (section 4.2 bijection)' on top of C(f), and canonical_metric_ref is bound by the section 4.2 bijection to be identical to fact_key.metric_semantic_ref (documented earlier in the canonical_metric_ref/metric_semantic_ref bijection rule). 7B's row_pairing operates only over the fixed Phase-1 admitted scope where binding_ref/account_ref/attribution_ref are already pinned per admitted_collection (single binding, single account, attribution not_applicable per line 800), so within one 7B run the 5-field and 9-field keys are provably equivalent projections of the same admitted universe; the document does not claim this equivalence holds across differing admissions, and no cross-admission dedup is ever attempted."
+    },
+    {
+      "id": "ps-004",
+      "title": "base_metric_definition/v1 binding requirement on source_metric_ref resolution is stated once (5.5.1) without an explicit enumerated cross-check against every place a metric identity is instantiated (driver contract, landing row, derived formula, 7B canonical_metric_ref)",
+      "severity": "Low",
+      "confidence": 0.4,
+      "evidence_lines": "1330,3588,3727",
+      "causal_chain": "Section 5.5.1 states the driver contract's source_metric_ref for a metric must resolve to exactly the base_metric_definition/v1 for that metric. This creates an implicit consistency obligation across every artifact that carries a metric identity: the driver contract (4.1), the landing row's fact_key.source_metric_ref (6.1), the derived_metric_definition's source_metric_ref union arm (5.6), and the 7B canonical_metric_ref (5.4). If any one of these constructed a metric reference independently of the base_metric_definition/v1 registry (for example, a derived metric's formula referencing a provider metric string that was never registered), the binding would silently fail to hold and downstream verifiers could accept a semantically undefined metric. The document does not appear to state a single closed 'every metric_semantic_ref instance must be traceable to a base_metric_definition/v1' invariant in one place -- it is assembled from several separate local rules.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Line 3588 (Section 12.3 effect-action / artifact matrix): base_metric_definition/v1's semantic predicate is stated as binding 'under a versioned ref' as the sole metric-identity authority (dag_slot: metric identity), and C49 (line 3727) states 'Formula identity has one explicit SHA-256/RFC 8785 preimage and maps to the closed formula arm of source_metric_ref' -- together with the closed lexical union for source_metric_ref (provider: arm vs formula:sha256: arm, section 5.6) this makes every source_metric_ref instance a member of a closed, registry-anchored union with no third escape hatch; an unregistered metric reference would fail the closed-lexical-union validation before ever reaching a consumer, so there is no path for an untraceable metric identity to propagate."
+    },
+    {
+      "id": "ps-005",
+      "title": "Provider-observation date validation (C90: provider response dates must equal the admitted local date) depends on reporting_timezone being pinned identically across admission and provider response parsing, but the provider (Meta via Pipeboard) is not shown returning dates in that timezone",
+      "severity": "Medium",
+      "confidence": 0.45,
+      "evidence_lines": "429,789,3768",
+      "causal_chain": "C90 (line 3768) states 'provider response dates must equal the admitted local date before reduction.' The admitted local date is computed under reporting_timezone: America/Sao_Paulo (lines 429, 789). The document does not show the parser/adapter (driver contract, section 4.1) converting a provider-native date (Meta's insights API returns dates in the ad account's configured timezone, which need not be America/Sao_Paulo) into America/Sao_Paulo before the C90 equality check. If the adapter compared a Meta-native-timezone date string directly against the admitted Sao-Paulo local date without a documented conversion step, every provider response would either always match by coincidence (single fixed account timezone) or systematically mismatch/reject, and no admitted fact would ever pass reduction -- a total collection failure, not a subtle bug, so it would be immediately visible in 7A/7B fixtures.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    },
+    {
+      "id": "ps-006",
+      "title": "Semantic deduplication between the Pipeboard-hosted transport and a possible future direct-Meta transport for the same ad_platform_ref is not addressed, since Phase 1 has exactly one driver",
+      "severity": "None",
+      "confidence": 0.7,
+      "evidence_lines": "446,969,3560",
+      "causal_chain": "If two transports (pipeboard_hosted and a hypothetical future direct Meta driver) could both produce facts for ad_platform_ref: meta, cross-transport semantic dedup would be required to avoid double-counting the same underlying platform metric observed twice. A reviewer might flag this as an unaddressed gap for future-proofing.",
+      "verdict": "REFUTED",
+      "refutation_locus": "Section 2 (Supersession & Scope Boundary) and pipeboard_phase1_contract/v1 (line 3560, 'Phase-1 driver') scope the entire ADR to exactly one grounded Phase-1 driver (pipeboard_hosted); the Capability Lifecycle (5.1) and driver contract (4.1) provide no second concurrent driver instance for the same ad_platform_ref within this document's authorized scope, so cross-transport dedup for the same platform is out of scope by explicit Phase-1 boundary, not an oversight."
+    }
+  ],
+  "coverage": {
+    "line_ranges_read": [[1, 3790]],
+    "sections_examined": [
+      "1. Context & Decision",
+      "2. Supersession & Scope Boundary",
+      "3. Security & Repository Governance (3.1-3.3)",
+      "4. ProviderPort & Admission (4.1 driver contract, 4.2 admitted_collection/v1, 4.3 closed numeric discriminated union)",
+      "5. Query & Certification (5.1 capability lifecycle, 5.2 canonical query contract, 5.3 Gate 3 selection, 5.4 7B bundle/row pairing/reconciliation, 5.5 regression fixture, 5.5.1 base_metric_definition/v1, 5.6 derived_metric_definition/v1)",
+      "6. Fact Lifecycle (6.1 landing row/fact_key, 6.2 curation, 6.3 generations/snapshots, 6.4 DuckDB analysis)",
+      "7. Pure Intelligence Layer",
+      "8. Private Registry Authority (resource_ref HMAC derivation)",
+      "9. Migration Decomposition Contract (9.1-9.2)",
+      "10. Canonical Repository & GOV1",
+      "11. Migration DAG & Operational Evidence (11.1-11.3)",
+      "12. Cryptographic Authority & Readiness (12.1-12.7, full artifact-contract inventory table)",
+      "13. Governance Status (13.1 Gate 2 remediation closure map C01-C95, 13.2 current status)"
+    ]
+  },
+  "limitations": [
+    "This lane covers provider semantics, metric normalization, unit/currency/timezone, and semantic deduplication only; findings touching MCP transport governance, cryptographic signing, migration DAG sequencing, and retention/rollback protocols were noted only where they intersected provider-identity or metric-identity artifacts (e.g. base_metric_definition/v1's row in the section 12.3 artifact matrix).",
+    "ps-001 and ps-005 are PLAUSIBLE rather than CONFIRMED because the document's closed-union / fail-closed validation discipline (pervasive throughout) makes it likely that an implementer following the full artifact set, not just the two locally-cited passages, would resolve the ambiguity correctly; but no single passage in the document explicitly states the resolution, so they are reported as open questions for the ADR author to close with one explicit sentence rather than as confirmed defects.",
+    "Findings do not re-litigate binding human decisions (unsigned/bodyless commits) per the lane's binding rules; no such items were found or considered.",
+    "This review is text-only against the ADR document; it does not verify against any actual implementation code, since Section 13.2 confirms Implementation: NOT STARTED for this proposal."
+  ],
+  "summary": "Read the full 3790-line ADR. Provider-semantics-critical constructs (transport_provider_ref vs ad_platform_ref, canonical_metric_ref/source_metric_ref/metric_semantic_ref bijection, base_metric_definition/v1 registry anchoring, dedup key granularity across 4.2/5.4/6.1) are internally consistent and most candidate issues resolve via explicit cross-references (section 4.2 bijection, C49, C87, C90, closed lexical unions) -- these are reported REFUTED with cited loci. Two genuine open points survive causal scrutiny and are reported PLAUSIBLE rather than confirmed defects: (1) currency is hardcoded to a literal 'BRL' constant in the canonical_query_contract/v1 and admitted_collection/v1 concrete examples, while section 4.3's numeric-grammar rule speaks only of an abstract 'the query currency', leaving the single-vs-multi-currency intent for Phase 1 implicit rather than stated as an explicit constraint; (2) C90's provider-response-date-equals-admitted-local-date rule depends on a timezone-normalization step between Meta's native response timezone and the pinned America/Sao_Paulo reporting_timezone that is asserted as an outcome but whose conversion mechanism is not shown in the driver/adapter contract. Both are Low/Medium severity documentation-completeness gaps, not structural defects, and neither breaks the document's fail-closed posture given the closed-union validation discipline used everywhere else."
+}

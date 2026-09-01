@@ -1,0 +1,141 @@
+{
+ "schema": "coverage/v1",
+ "generated_utc": "2026-09-01T19:11:00+00:00",
+ "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+ "adr_lines": 3790,
+ "lanes": {
+  "trusted-policy": {
+   "adr_ranges": [
+    [
+     1,
+     2299
+    ],
+    [
+     1500,
+     1999
+    ],
+    [
+     2300,
+     3790
+    ]
+   ],
+   "policy_files_read_fully": 4,
+   "items": 8,
+   "not_applicable": 6
+  },
+  "shallow-diff": {
+   "adr_ranges": [
+    [
+     1,
+     13
+    ],
+    [
+     13,
+     34
+    ],
+    [
+     255,
+     385
+    ],
+    [
+     385,
+     632
+    ],
+    [
+     632,
+     704
+    ],
+    [
+     704,
+     811
+    ],
+    [
+     811,
+     952
+    ],
+    [
+     952,
+     1278
+    ],
+    [
+     1278,
+     1354
+    ],
+    [
+     1354,
+     1426
+    ],
+    [
+     1426,
+     1574
+    ],
+    [
+     1574,
+     1650
+    ],
+    [
+     1650,
+     1817
+    ],
+    [
+     1817,
+     1962
+    ],
+    [
+     2280,
+     2438
+    ],
+    [
+     2438,
+     2487
+    ],
+    [
+     2487,
+     2766
+    ],
+    [
+     2766,
+     2894
+    ],
+    [
+     2894,
+     2975
+    ],
+    [
+     2975,
+     3060
+    ],
+    [
+     3060,
+     3367
+    ],
+    [
+     3367,
+     3449
+    ],
+    [
+     3449,
+     3673
+    ],
+    [
+     3673,
+     3775
+    ],
+    [
+     3775,
+     3790
+    ]
+   ],
+   "hunks_examined": "33/33",
+   "items": 10
+  }
+ },
+ "validator": {
+  "candidate_coverage": "1/1",
+  "checklist_C01_C95": "lido integralmente (3679-3773)"
+ },
+ "gaps": [
+  "gate YAML nao executado (pyyaml ausente)",
+  "tabela 12.7 auditada em nivel de resumo pela lane trusted-policy (justificado no recibo)"
+ ]
+}

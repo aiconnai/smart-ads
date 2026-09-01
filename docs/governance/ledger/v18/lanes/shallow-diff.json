@@ -1,0 +1,168 @@
+{
+  "schema": "lane_receipt/v2",
+  "lane": "shallow-diff",
+  "intensity": "max",
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "diff_base": {
+    "sha": "4015c15e25f4121d63ebc45456fe37f953962a8c",
+    "adr_blob_at_base": "0bcefb4d20080381e8268b8f8cf7881c10847280",
+    "rationale": "base e merge-base canônicos do PR, fixados pelo auditor humano",
+    "numstat": {"files": 1, "insertions": 450, "deletions": 37}
+  },
+  "supplementary_deltas": [
+    {"range": "248826c..83a22d8", "role": "evidencia suplementar da remediacao v18 (nao substituto do diff do PR)"}
+  ],
+  "items": [
+    {
+      "id": "sdf-001",
+      "title": "Effect-action matrix row count \"eleven\" -> \"twelve\" is fully consistent with the new retention_root_admission row",
+      "severity": null,
+      "confidence": 0.95,
+      "evidence_lines": "Base 2601-2634 (diff hunk @@ -2601,18 +2920,29 @@ and @@ -2625,8 +2955,9 @@); HEAD 2940-2960",
+      "causal_chain": "Base line ~2625 read 'The closed effect-action matrix is authoritative; its action count is derived from these eleven rows rather than asserted elsewhere:' with 11 table rows (workload_identity_provision ... retention_release). HEAD adds a new subject discriminator 'retention_root_admission_target' (HEAD 2940-2942), a new table row 'retention_root_admission' (HEAD 2960), and updates the count sentence to 'twelve rows' (HEAD 2944-2945). The new row's predecessor/result/effect-proof-slot columns are fully populated and symmetric to the existing 'retention_release' row, and section 12.4 gains matching prose (HEAD 3021-3045) describing the new retention_root_admission effect, its CAS semantics, and the bidirectional transitive-pinning invariant.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 2940-2945, 2960, 3021-3045"
+    },
+    {
+      "id": "sdf-002",
+      "title": "C46 checklist wording changed from 'closed eleven-row matrix' to generic 'closed matrix' — potential staleness risk if count changes again",
+      "severity": "Low",
+      "confidence": 0.85,
+      "evidence_lines": "Base 3308 vs HEAD 3721 (patch hunk @@ -3308,7 +3721,7 @@)",
+      "causal_chain": "Base C46 read: 'A closed eleven-row role/action/side/subject/predecessor/result/slot matrix governs every human-authorization-controlled external effect and excludes non-effect evidence.' Since the same diff changes the row count from eleven to twelve (sdf-001), leaving 'eleven-row' in C46 would have created a direct table-vs-checklist contradiction. HEAD instead removes the literal count from C46 entirely: 'A closed role/action/side/subject/predecessor/result/slot matrix governs...' This sidesteps the immediate contradiction but trades an exact, falsifiable count claim for a vaguer one. This is a defensible normalization (the same technique used elsewhere in this ADR, e.g. base metric identity 'versioned ref' language) rather than a regression, since the authoritative count still lives solely in section 12.3 ('derived from these twelve rows rather than asserted elsewhere'), and C46 was never the count's source of truth even at base (the base matrix sentence itself carried that role). No other passage in the read document still asserts a stale 'eleven' anywhere in checklist or prose.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 2944-2945 (12.3, sole authoritative count statement, unchanged single-source-of-truth pattern) and HEAD 3724 (C46 generic wording, no longer independently asserting a count that could drift)"
+    },
+    {
+      "id": "sdf-003",
+      "title": "C63 checklist wording changed from 'the eleventh effect action' to 'an authorized effect action' — same staleness pattern as C46, now doubly stale under twelve rows",
+      "severity": "Low",
+      "confidence": 0.85,
+      "evidence_lines": "Base 3325 vs HEAD 3738 (patch hunk @@ -3325,7 +3738,7 @@)",
+      "causal_chain": "Base C63 read: 'R08: retention release is the eleventh effect action and requires a complete root-set epoch CAS/reachability proof.' Under the base's 11-row matrix, retention_release genuinely was row 11 (last row). Under HEAD's 12-row matrix, retention_release is now row 11 of 12 (still true ordinally) but retention_root_admission (row 12) is new and has no corresponding C-checklist entry of its own. Rather than either keeping the now-still-correct 'eleventh' or adding a new checklist item for the twelfth row, HEAD generalizes C63 to 'retention release is an authorized effect action.' This avoids a false claim but also means the new retention_root_admission action/row is not independently referenced by any checklist item (C01-C95 reviewed in full at HEAD 3679-3773; no new C-item was added for it). This is a minor completeness gap in the remediation-closure map, not a regression of any existing safeguard — the admission action itself is fully specified in section 12.3-12.4 prose and the schema-profile table (HEAD row 'retention_root_admission_result/v1' / 'retention_root_admission_proof/v1', ~HEAD 3612-3613), so the underlying control exists; only its explicit checklist cross-reference is absent.",
+      "verdict": "PLAUSIBLE",
+      "refutation_locus": null
+    },
+    {
+      "id": "sdf-004",
+      "title": "Capability-recovery state count 'three' -> 'four non-promoted states' correctly tracks addition of invalidated state",
+      "severity": null,
+      "confidence": 0.95,
+      "evidence_lines": "Base 690-708 vs HEAD 724-768 (patch hunk @@ -690,18 +724,44 @@)",
+      "causal_chain": "Base read: 'No registry state is changed in place. Recovery from unavailable or deferred requires a signed immutable capability_revalidation_transition/v1 ... All three recovery states deny credentials, transport, and provider I/O.' (the three being unavailable, deferred, revalidation_pending). HEAD adds a new invalidated state (new transitions fixture_certified -> invalidated, live_certified -> invalidated, invalidated -> revalidation_pending) and correctly updates the sentence to: 'Recovery from unavailable, deferred, or invalidated requires...' and 'All four non-promoted states — unavailable, deferred, invalidated, and revalidation_pending — deny credentials, transport, and provider I/O.' The count update (three -> four) exactly tracks the one new state added in the same hunk; no other passage was found asserting a stale 'three' count.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 724-727 (new state-transition list) and HEAD 745-747 (updated four-state sentence)"
+    },
+    {
+      "id": "sdf-005",
+      "title": "Gate-3 certification_fingerprint gains an eleventh member (official_source_locators_digest); '11 members' prose claim is arithmetically correct",
+      "severity": null,
+      "confidence": 0.9,
+      "evidence_lines": "Base 825-833 vs HEAD 886-914 (patch hunks @@ -777,6 +837,7 @@ and @@ -825,8 +886,29 @@ and @@ -962,8 +1083,29 @@)",
+      "causal_chain": "Base's certification_fingerprint object had 10 members (selected_meta_api_version, reference_client_identity_digest, candidate_driver_contract_digest, canonical_query_digest, parser_code_digest, adapter_code_digest, mapping_rules_digest, schema_bundle_digest, resource_mapping_contract_digest, authorized_certification_scope). HEAD inserts official_source_locators_digest as a new member (HEAD ~890) and, in the new 5.4 prose (HEAD 2983 area), explicitly enumerates 'all eleven of its members' listing exactly those 10 plus the new one. Manually counting the enumerated list in HEAD confirms exactly 11 distinct member names. The new gate3_certification_fingerprint sub-objects embedded in both candidate_execution and reference_execution (HEAD ~992-1005, ~1024-1037) each carry the identical 11-member shape, and prose requires byte-for-byte equality across both execution records and against the Gate-3 selection's own fingerprint. No inconsistency found between the table definition, the enumerated prose list, and the two embedded YAML fragments.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD ~886-914 (member addition + rationale), HEAD ~988-1005 and ~1020-1037 (embedded fingerprints in both execution records), HEAD ~1083-1103 (11-member enumeration and cross-equality requirement)"
+    },
+    {
+      "id": "sdf-006",
+      "title": "official_source_locators_digest's pinned upstream reference is byte-identical to the section 4.1 pinned reference — no drift",
+      "severity": null,
+      "confidence": 0.95,
+      "evidence_lines": "HEAD 300 (section 4.1, unchanged base text) vs HEAD 899 (new section 5.3 prose)",
+      "causal_chain": "Section 4.1 (unchanged by this diff) pins the upstream reference as pipeboard-co/meta-ads-mcp@2ef198e266ca6a37b6dc2c42335f0a0885002771, path meta_ads_mcp/core/insights.py, symbol get_insights. The new section 5.3 prose defining official_source_locators_digest (HEAD ~899) cites the identical commit SHA, path, and symbol when describing what L_off must include. A grep across the full HEAD document confirms only these two occurrences of the pinned SHA and both are byte-identical. No stale or divergent pin was introduced.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 300 and HEAD 899 (identical pinned commit SHA/path/symbol)"
+    },
+    {
+      "id": "sdf-007",
+      "title": "7B row-universe pairing/counting shift from U7 (resource-key only) to U7M (metric-scoped) changes candidate/reference row-count semantics without touching row_universe_digest formula — verify no silent weakening of the digest check",
+      "severity": null,
+      "confidence": 0.85,
+      "evidence_lines": "Base 943-951 vs HEAD 1049-1082 (patch hunks @@ -943,8 +1049,9 @@, @@ -953,8 +1060,22 @@, @@ -962,8 +1083,29 @@)",
+      "causal_chain": "Base defined U7 as the unique array of complete C(f) objects keyed by the 4-field K(f), and stated 'Candidate and reference row counts equal length(U7), and their recomputed universe digests must match, with no truncation.' This made row-count/digest checks metric-blind. HEAD adds a new metric-scoped Kfive(f)/U7M on top of (not instead of) U7: 'U7 is a resource-key universe only and carries no metric identity; it never pairs or counts facts by itself' (HEAD ~1057-1059), then requires 'U7M on each side must equal the required-metric cross-product U7 x required_metrics' and 'Candidate and reference row counts each equal length(U7M) ... Their recomputed U7 and U7M universes must both match across sides' (HEAD ~1074-1079). This is strictly additive: the original U7/row_universe_digest equality check is retained verbatim (still required to match, still uses the same RFC8785 formula, unchanged in this hunk), and a second, strictly finer-grained U7M equality check is layered on top. Nothing in the base's metric-blind guarantee is removed; the new per-metric requirement is strictly stronger (a missing/extra metric for any resource key becomes a detectable 'set defect' that U7-only comparison could not have caught). This closes a completeness gap rather than opening one.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 1057-1059 (U7 role clarified, not weakened) and HEAD 1074-1079 (U7M layered on top, both must match)"
+    },
+    {
+      "id": "sdf-008",
+      "title": "Gate 4 gains a bound TTL (gate4_freshness_profile, 300s, valid_until_utc) — verify this does not contradict 'Gate 4 remains the sole readiness-verification gate'",
+      "severity": null,
+      "confidence": 0.9,
+      "evidence_lines": "Base 3021-3043 vs HEAD 3399-3447 (patch hunks @@ -3021,10 +3399,18 @@ and @@ -3037,6 +3423,25 @@)",
+      "causal_chain": "Base's gate4_verification_record/v1 bound only 'verification time' with no TTL; the unchanged closing sentence (both base and HEAD, HEAD 3445) reads 'Gate 4 remains the sole readiness-verification gate. The later human receipt is the sole cutover-effect authority, not a second readiness gate.' HEAD adds verified_at_utc, valid_until_utc = min(verified_at_utc + 300s, certificate.valid_until_utc), and a new gate4_freshness_profile/v1 artifact (300s max age), plus an entire new paragraph (HEAD 3426-3443) requiring re-resolution of the live-certification head/certificate at both cutover reservation and immediate pre-I/O, failing closed on any staleness. This does not introduce a second gate: Gate 4 still performs exactly one verification act (producing the PASS record); the TTL only bounds how long that single PASS record remains usable as a cutover predecessor before the executor must treat it as stale. The explicit statement 'Gate 4 remains the sole readiness-verification gate' is retained unchanged immediately after the new TTL paragraph, and the new re-check logic is described as executor-side pre-cutover freshness verification, not a re-invocation of Gate 4 itself. No contradiction found; this is a hardening of the existing 'Gate 4 is non-effect evidence, cutover needs a fresh human receipt' invariant against a time-of-check/time-of-use gap.",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 3445-3447 (unchanged 'sole readiness-verification gate' sentence retained verbatim immediately after the new TTL/re-check paragraph)"
+    },
+    {
+      "id": "sdf-009",
+      "title": "New consumer_deployment_readback requirement — verify it does not silently replace or weaken the pre-existing Git-provenance-based consumer identity proof",
+      "severity": null,
+      "confidence": 0.9,
+      "evidence_lines": "Base 2902-2907 vs HEAD 3259-3281 (patch hunk @@ -2902,6 +3259,27 @@)",
+      "causal_chain": "Base's consumer-identity proof relied solely on resolved Git bytes (adapter/feature-flag artifacts, consumer_feature_flag_contract, ibvi_ads_delegation_contract) proving what was approved in source, ending at 'The adapter artifact and feature-flag artifact are distinct roles; no equality between their bytes, paths, blobs, or digests is asserted.' HEAD inserts an entirely new paragraph before that closing sentence: 'The consumer Git policy above proves what was approved in source; it is not sufficient on its own, because approved Git bytes do not prove what is running in the deployed Hermes runtime. Before shadow activation and again before cutover, the verifier resolves one consumer_deployment_readback/v1 ... and requires it to bind, and prove byte-for-byte equality with, the approved consumer identity...' This is purely additive: the existing Git-provenance proof (source_path/git_blob_oid/file_content_sha256 equality, HEAD 3247-3260, unchanged) is retained as a prerequisite ('The consumer Git policy above proves...'), and the new readback closes the previously-unaddressed gap between 'approved in source' and 'actually deployed.' No existing check is removed, downgraded, or made optional; the new check is described as mandatory ('the verifier resolves one ... and requires') at two specific gates (shadow activation, cutover).",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 3247-3260 (original Git-provenance proof retained verbatim) and HEAD 3262-3281 (new deployment-readback requirement layered on top, explicitly framed as closing a gap rather than replacing the Git proof)"
+    },
+    {
+      "id": "sdf-010",
+      "title": "Retirement gains pre-effect re-enumeration/drift check (legacy_deployment_readback equality to legacy_read_endpoint_inventory) — verify this does not loosen the existing disjointness requirement",
+      "severity": null,
+      "confidence": 0.85,
+      "evidence_lines": "Base 2405-2411 vs HEAD 2709-2730 (patch hunk @@ -2405,6 +2709,21 @@); also base 2601-2609 vs HEAD 2920-2938 (retirement_target subject, same hunk group as sdf-001)",
+      "causal_chain": "Base's retirement_target subject discriminator required only 'stabilization_period_completion_record_locator, exact legacy_read_endpoint_inventory/v1 locator and digest, decommission configuration digest, tenant, binding, and target resource.' HEAD inserts an additional required member: 'the fresh pre-effect re-enumeration legacy_deployment_readback/v1 locator/digest whose effective-operation, static-source, and disjointness digests equal that inventory' (HEAD 2931-2934). This raises the bar for retirement authorization rather than lowering it — retirement can no longer proceed on a stale inventory snapshot alone; a fresh re-enumeration must be captured immediately before the effect and proven byte-identical to the original inventory's digests, or (per the surrounding new prose, section 11.3, previously read) retirement is blocked / quarantined as in_doubt on drift. This closes a time-of-check/time-of-use gap (inventory computed once, long before the actual retirement effect) rather than weakening the original Read/Write-disjointness guarantee, which is retained unchanged ('Read/Write overlap rejects before retirement authorization', HEAD context surrounding line 2709, unchanged from base).",
+      "verdict": "REFUTED",
+      "refutation_locus": "HEAD 2709-2730 (new pre-effect re-enumeration/drift-detection paragraph, section 11.3) and HEAD 2931-2934 (retirement_target subject gains the fresh-readback-equality member)"
+    }
+  ],
+  "hunks_examined": {
+    "count": 33,
+    "all_hunks": true
+  },
+  "coverage": {
+    "line_ranges_read": [
+      [1, 13], [13, 34], [255, 385], [385, 632], [632, 704], [704, 811],
+      [811, 952], [952, 1278], [1278, 1354], [1354, 1426],
+      [1426, 1574], [1574, 1650], [1650, 1817], [1817, 1962],
+      [2280, 2438], [2438, 2487], [2487, 2766],
+      [2766, 2894], [2894, 2975], [2975, 3060], [3060, 3367],
+      [3367, 3449], [3449, 3673], [3673, 3775], [3775, 3790]
+    ],
+    "sections_examined": [
+      "1. Context & Decision",
+      "2. Supersession & Scope Boundary",
+      "4.1 Grounded Phase 1 Driver",
+      "4.2 External Intent and Trusted Admission",
+      "4.3 Closed Numeric Discriminated Union",
+      "5.1 Capability Lifecycle",
+      "5.3 Gate 3 Selection",
+      "5.4 Recomputable 7B Bundle",
+      "5.5 Synthetic 65x23 Regression Law",
+      "5.5.1 Base Metric Identity Contract",
+      "5.6 Derived Metric Definitions",
+      "6.1 Lifecycle and Long Fact Grain",
+      "6.2 Deterministic Curation",
+      "6.3 Atomic Generations and Snapshots",
+      "6.4 Rebuildable DuckDB Analysis",
+      "10. Canonical Repository & GOV1",
+      "11.1 Independent Operational Acceptance Series",
+      "11.2 Non-Vacuous Rollback Protocol",
+      "11.3 Stabilization, Retirement, and Completion",
+      "12.1 External Trust Anchor and Key Registry",
+      "12.2 Typed Artifact Locators and Gate 2 Genesis",
+      "12.3 Discriminated Authorization Subjects",
+      "12.4 One-Way Anti-Replay",
+      "12.5 Tripartite Readiness Graph",
+      "12.6 Readiness Attestation and Gate 4",
+      "12.7 Schema-Specific Verification Profiles",
+      "13.1 Gate 2 Remediation Closure Map",
+      "13.2 Current Status"
+    ]
+  },
+  "limitations": [
+    "Initial hunk count of 29 (task-assignment message and my own preliminary grep) was inaccurate; the canonical patch file actually contains 33 hunks (verified via grep -c '^@@ -' on the pre-extracted patch, single file, single diff --git header). All 33 hunks were examined with full base/HEAD prose context before drafting findings; the discrepancy is noted here for transparency rather than silently reconciled.",
+      "line_ranges_read reflects ranges read via the Read tool on the HEAD snapshot plus targeted sed/grep extractions of the patch file for exact base-side wording; a small number of untouched mid-document ranges (e.g. exact boundaries between some adjoining Read calls) may have 1-2 lines of overlap or gap versus the literal offset/limit arguments used, but every one of the 33 hunks' base and HEAD context was directly read, not inferred.",
+      "sdf-003 (C63 checklist gap for the new retention_root_admission action) is marked PLAUSIBLE rather than CONFIRMED because it is a completeness/cross-reference gap in the checklist, not a regression of any existing safeguard — the underlying control (retention_root_admission_result/v1, retention_root_admission_proof/v1, full CAS/reachability prose) is fully specified elsewhere in the same diff; only an explicit C-item cross-reference is missing."
+  ],
+  "summary": "Examined all 33 hunks of the canonical PR diff 4015c15..83a22d8 (single file, docs/adr/ADR-0001-smart-ads-read-gateway.md, +450/-37) with full base-side and HEAD-side prose context for every touched region. No CONFIRMED regressions, silent safeguard removals, or unjustified numeric/TTL/hash changes were found. Every touched invariant that changes a number or count (effect-action matrix 11->12 rows, capability non-promoted states 3->4, certification_fingerprint 10->11 members) is accompanied by a fully consistent, symmetric addition in the same diff (a new row/state/member) and no stale count was left behind anywhere else in the document. Two Low-severity checklist-wording findings (sdf-002, sdf-003) note that C46 and C63 were genericized (count/ordinal language removed) rather than updated to new exact figures — a defensible choice given the row-count change, but sdf-003 flags that the newly added retention_root_admission action has no dedicated C-checklist cross-reference, which is a completeness gap rather than a regression. All larger additions examined (capability_invalidation_transition state, official_source_locators_digest fingerprint member, U7M metric-scoped pairing layered on U7, Gate-4 freshness/TTL re-check, consumer_deployment_readback, retirement pre-effect re-enumeration) strictly add or tighten existing safeguards without removing or weakening any base-recorded guarantee."
+}

@@ -1,0 +1,21 @@
+{
+ "schema": "human_acceptance/v1",
+ "generated_utc": "2026-09-01T19:28:53+00:00",
+ "decision": "ACCEPT_RESIDUAL",
+ "residual_id": "sdf-003",
+ "severity": "Low",
+ "verdict_at_acceptance": "CONFIRMED",
+ "accepted_by": "human operator (mensagem literal: '1) aceito')",
+ "scope": "aceita sdf-003 como residual documentado, sem micro-fix; blob do ADR permanece 94b119693147d9d90a12c56ee5f28a990a2c1974",
+ "target": {
+  "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+  "pr_base": "4015c15e25f4121d63ebc45456fe37f953962a8c"
+ },
+ "terminal_receipt_sha256": "5c4fcf26d9b7a4d02cfb3e0bfca800897cf8fb4e223a3f1768e21d23e4b2bd07",
+ "remaining_human_gates": [
+  "ledger",
+  "PR",
+  "merge",
+  "Gate 2"
+ ]
+}

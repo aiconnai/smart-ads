@@ -1,0 +1,37 @@
+{
+ "schema": "checks/v1",
+ "generated_utc": "2026-09-01T19:11:00+00:00",
+ "head": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+ "items": [
+  {
+   "check": "pin_verification",
+   "pass": true,
+   "detail": "HEAD 83a22d8 + ADR blob 94b1196 verificados por ambas as lanes e pelo validador"
+  },
+  {
+   "check": "deterministic_gates",
+   "pass": true,
+   "detail": "inventario NUL-safe, diff --check, JSON dup-rejection, fences, mermaid PASS; YAML nao executado (pyyaml ausente) — lacuna, nao aprovacao"
+  },
+  {
+   "check": "lane_trusted_policy",
+   "pass": true,
+   "detail": "recibo lane_receipt/v2 aceito; corpus d26c73d (4 docs, digests conferidos); 8 REFUTED, 0 candidatos, 6 not_applicable"
+  },
+  {
+   "check": "lane_shallow_diff",
+   "pass": true,
+   "detail": "recibo lane_receipt/v2 aceito; base canonica 4015c15, numstat 1/+450/-37, 33/33 hunks; 9 REFUTED, 1 PLAUSIBLE"
+  },
+  {
+   "check": "independent_validation",
+   "pass": true,
+   "detail": "sdf-003 reproduzido do zero: CONFIRMED Low, nao bloqueante; sem promessa 1:1 matriz<->checklist no documento"
+  },
+  {
+   "check": "write_containment",
+   "pass": true,
+   "detail": "todas as escritas confinadas a /tmp/smart-ads-v18-pr-final/; zero mutacao em git/ledger/PR/remoto"
+  }
+ ]
+}
