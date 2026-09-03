@@ -4,6 +4,7 @@
   "adr_path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
   "new_blob": "d44d7546d5318f245708b9041be1ecf99df5e8ee",
   "new_sha256": "3c6d4b344f1fa607587ad57854a428d9a3e713a5722d5b3d93ada74ae5215e5a",
+  "evidence_scope": "Todos os counts e numeros de linha em 'evidence' referem-se exclusivamente ao blob new_blob d44d7546 (commit adff0952bb51856ff6ee1a7155c8c632e5e83bb1). Nao descrevem commits posteriores; re-derivar contra esse blob com `git show adff095:docs/adr/ADR-0001-smart-ads-read-gateway.md`.",
   "checks": {
     "matrix_13_rows": true,
     "incident_rollback_present": true,

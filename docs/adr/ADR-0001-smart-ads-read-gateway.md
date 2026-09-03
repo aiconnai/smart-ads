@@ -2569,9 +2569,11 @@ authoritative reads to the direct legacy path without retiring or mutating any
 Write Plane or `/ibvi-ads` surface.
 `incident_rollback_effect_proof` binds the four generic authorization,
 reservation, execution, and consumption records plus the finalized
-`incident_rollback_result/v1` and the signed `incident_rollback_receipt/v1`
-locator under the same run. It is a post-cutover effect proof and is not a
-member of the 19-slot pre-cutover `migration_manifest/v1` envelope.
+`incident_rollback_result/v1` under the same run, and nothing else. It is a
+post-cutover effect proof and is not a member of the 19-slot pre-cutover
+`migration_manifest/v1` envelope. The signed `incident_rollback_receipt/v1`
+remains distinct from that effect proof, exactly as `rollback_test_receipt/v1`
+is distinct from the generic rollback effect proof.
 An incident rollback does not by itself
 resume the migration; re-cutover requires a fresh cutover authorization and a
 new stabilization period. Stabilization completion is valid only when no
