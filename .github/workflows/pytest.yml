@@ -1,0 +1,24 @@
+name: pytest
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: pyproject.toml
+      - name: Install pytest
+        run: python3 -m pip install --upgrade pip pytest
+      - name: Run tests
+        run: python3 -m pytest -q -p no:cacheprovider
