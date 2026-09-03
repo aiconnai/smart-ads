@@ -1,0 +1,12 @@
+[project]
+name = "smart-ads-governance"
+version = "0.1.0"
+description = "Dependency-free governance toolkit for Smart Ads Gate 2 artifacts (RFC 8785 JCS, P1 Ed25519 envelopes, content-addressed locators)."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
