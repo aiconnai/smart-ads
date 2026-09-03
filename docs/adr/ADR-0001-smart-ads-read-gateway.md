@@ -2566,7 +2566,13 @@ toggle boundary, and the final legacy-path readback. Its transition bound is the
 same at-most-500-ms toggle/ACK/drain interval as section 11.2, and it is testable
 by the identical event-derived ID-set equality method; success returns
 authoritative reads to the direct legacy path without retiring or mutating any
-Write Plane or `/ibvi-ads` surface. An incident rollback does not by itself
+Write Plane or `/ibvi-ads` surface.
+`incident_rollback_effect_proof` binds the four generic authorization,
+reservation, execution, and consumption records plus the finalized
+`incident_rollback_result/v1` and the signed `incident_rollback_receipt/v1`
+locator under the same run. It is a post-cutover effect proof and is not a
+member of the 19-slot pre-cutover `migration_manifest/v1` envelope.
+An incident rollback does not by itself
 resume the migration; re-cutover requires a fresh cutover authorization and a
 new stabilization period. Stabilization completion is valid only when no
 incident rollback occurred within its 336-hour window.

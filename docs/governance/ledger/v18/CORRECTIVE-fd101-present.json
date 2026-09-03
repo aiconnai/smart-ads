@@ -15,7 +15,7 @@
       "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
       "adr_blob_short": "94b11969",
       "adr_head_snapshot_sha256": "78aa33a52315a12358fac4938eb2e7bcca600c7b9298a5dae3ee44e2353e2b8a",
-      "adr_head_snapshot_path": "docs/governance/ledger/v18/snapshots/adr-head-83a22d8.md",
+      "adr_head_snapshot_derivation": "git show 83a22d883a118d7e3350f2a87edadd9e91395fe0:docs/adr/ADR-0001-smart-ads-read-gateway.md | shasum -a 256",
       "terminal_receipt_sha256_at_corrective_time": "5c4fcf26d9b7a4d02cfb3e0bfca800897cf8fb4e223a3f1768e21d23e4b2bd07",
       "refs": {
         "protected_short": "4b54bd2",
@@ -28,5 +28,6 @@
     }
   },
   "scope_limit": "Este registro nao reabre Gate2, nao autoriza merge e nao altera o veredito original. Apenas registra a presenca de fd-101 para remediacao v19.",
-  "no_overclaim": true
+  "no_overclaim": true,
+  "corrective_note_v19": "v19-002: chave adr_head_snapshot_path removida em commit aditivo — o caminho citado nunca existiu em nenhum commit; sha256 e blob permanecem inalterados e verificados."
 }

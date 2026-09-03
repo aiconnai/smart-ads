@@ -14,7 +14,8 @@
   },
   "evidence": {
     "matrix_row_exact": "| `incident_rollback` | `incident_rollback_target` | signed same-run cutover identity, disqualifying stabilization/incident evidence, signed gateway-true prestate, fresh human incident-rollback authorization | `incident_rollback_result/v1` | `incident_rollback_effect_proof` |",
-    "grep_incident_rollback_count": 6,
+    "grep_incident_rollback_matching_lines": 6,
+    "grep_incident_rollback_token_occurrences": 9,
     "rollback_target_bare_occurrences": "def L2913 + matrix row L2956 only (incident_rollback_target excluded)",
     "inventory_result_row": "| `incident_rollback_result/v1` | P1 | rollback executor | E / effect completion | `SMART-ADS:INCIDENT-ROLLBACK-RESULT:V1\\n` | exact reverted cutover identity and effective legacy-path transition time | incident rollback result |",
     "inventory_receipt_row_after": "L3635 incident_rollback_receipt/v1 retained, result row inserted before it"
