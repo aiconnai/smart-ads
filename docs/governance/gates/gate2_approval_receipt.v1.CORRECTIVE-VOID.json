@@ -1,0 +1,30 @@
+{
+  "schema": "gate2_corrective_void/v1",
+  "status": "INVALID_VOID",
+  "voids": "docs/governance/gates/gate2_approval_receipt.v1.json",
+  "mode": "additive_corrective_record",
+  "note": "Registro corretivo ADITIVO. Nao edita, nao apaga e nao substitui o arquivo original, que permanece intacto para auditoria. Este arquivo apenas marca o recibo original como INVALID/VOID.",
+  "emitted_utc": "2026-09-03T00:00:00+00:00",
+  "agent": "governanca v19 (passos 1, 2, 4 do HANDOFF-v19.md secao 6; passos 6-7 proibidos)",
+  "reasons_handoff_s3_1": [
+    "signature:none — campo signature.type e 'none', sem assinatura criptografica verificavel",
+    "sem integrity/key_id/signature_base64 — recibo original nao contem integrity, key_id nem signature_base64",
+    "sem key_registry_snapshot_locator — nenhuma referencia a snapshot de registro de chaves",
+    "sem protected_merge_evidence_locator — nenhuma evidencia protegida de merge anexada ao recibo",
+    "sem gate2_authority_policy_locator — nenhuma referencia a politica de autoridade Gate2",
+    "sem prova de principal — 'human operator (in-session)' registrado apenas em texto literal, sem identidade verificavel de principal"
+  ],
+  "refs": {
+    "protected_sha": "4b54bd20699ac915e8b14e2d82088213ed9aff05",
+    "protected_short": "4b54bd2",
+    "head_sha": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+    "head_short": "83a22d8",
+    "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+    "adr_blob_short": "94b11969",
+    "tip_sha": "43c760b21b948053503a9aafcc8ec0da8d588520",
+    "tip_short": "43c760b",
+    "voided_file_sha256_at_void_time": "0ff45ec4086a29de193b07e1dc7e76e02da8404da8ca706e0e37d140090da7a6"
+  },
+  "scope_limit": "Este registro nao aprova, nao reemite e nao assina Gate2. Nao autoriza merge, PR ou mutacao de conta. Passos 6-7 (PR/merge/Gate2) permanecem proibidos neste ciclo.",
+  "no_overclaim": true
+}

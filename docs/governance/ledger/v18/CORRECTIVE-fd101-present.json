@@ -1,0 +1,33 @@
+{
+  "schema": "ledger_corrective/v1",
+  "status": "CORRECTIVE_ADDITIVE",
+  "corrects": "docs/governance/ledger/v18/terminal-receipt.json",
+  "mode": "additive_corrective_record",
+  "note": "Registro corretivo ADITIVO. Nao reescreve historico e nao edita o ledger original, que permanece intacto para auditoria.",
+  "emitted_utc": "2026-09-03T00:00:00+00:00",
+  "agent": "governanca v19 (passo 4 do HANDOFF-v19.md secao 6)",
+  "finding": {
+    "id": "fd-101",
+    "rule": "SUSTAINED_HIGH_REQUIRES_FRESH_RECEIPT",
+    "present": true,
+    "claim_corrected": "contagem '0 High' declarada em terminal-receipt.json e falsa na presenca de fd-101",
+    "evidence": {
+      "adr_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+      "adr_blob_short": "94b11969",
+      "adr_head_snapshot_sha256": "78aa33a52315a12358fac4938eb2e7bcca600c7b9298a5dae3ee44e2353e2b8a",
+      "adr_head_snapshot_derivation": "git show 83a22d883a118d7e3350f2a87edadd9e91395fe0:docs/adr/ADR-0001-smart-ads-read-gateway.md | shasum -a 256",
+      "terminal_receipt_sha256_at_corrective_time": "5c4fcf26d9b7a4d02cfb3e0bfca800897cf8fb4e223a3f1768e21d23e4b2bd07",
+      "refs": {
+        "protected_short": "4b54bd2",
+        "protected_sha": "4b54bd20699ac915e8b14e2d82088213ed9aff05",
+        "head_short": "83a22d8",
+        "head_sha": "83a22d883a118d7e3350f2a87edadd9e91395fe0",
+        "tip_short": "43c760b",
+        "tip_sha": "43c760b21b948053503a9aafcc8ec0da8d588520"
+      }
+    }
+  },
+  "scope_limit": "Este registro nao reabre Gate2, nao autoriza merge e nao altera o veredito original. Apenas registra a presenca de fd-101 para remediacao v19.",
+  "no_overclaim": true,
+  "corrective_note_v19": "v19-002: chave adr_head_snapshot_path removida em commit aditivo — o caminho citado nunca existiu em nenhum commit; sha256 e blob permanecem inalterados e verificados."
+}

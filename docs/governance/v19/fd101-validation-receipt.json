@@ -1,0 +1,27 @@
+{
+  "schema": "validation-receipt/v1",
+  "candidate_id": "fd-101",
+  "adr_path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+  "new_blob": "d44d7546d5318f245708b9041be1ecf99df5e8ee",
+  "new_sha256": "3c6d4b344f1fa607587ad57854a428d9a3e713a5722d5b3d93ada74ae5215e5a",
+  "evidence_scope": "Todos os counts e numeros de linha em 'evidence' referem-se exclusivamente ao blob new_blob d44d7546 (commit adff0952bb51856ff6ee1a7155c8c632e5e83bb1). Nao descrevem commits posteriores; re-derivar contra esse blob com `git show adff095:docs/adr/ADR-0001-smart-ads-read-gateway.md`.",
+  "checks": {
+    "matrix_13_rows": true,
+    "incident_rollback_present": true,
+    "rollback_target_only_in_rollback_toggle": true,
+    "incident_rollback_target_defined": true,
+    "inventory_has_incident_rollback_result_v1": true,
+    "dag_19_slot_unchanged": true
+  },
+  "evidence": {
+    "matrix_row_exact": "| `incident_rollback` | `incident_rollback_target` | signed same-run cutover identity, disqualifying stabilization/incident evidence, signed gateway-true prestate, fresh human incident-rollback authorization | `incident_rollback_result/v1` | `incident_rollback_effect_proof` |",
+    "grep_incident_rollback_matching_lines": 6,
+    "grep_incident_rollback_token_occurrences": 9,
+    "rollback_target_bare_occurrences": "def L2913 + matrix row L2956 only (incident_rollback_target excluded)",
+    "inventory_result_row": "| `incident_rollback_result/v1` | P1 | rollback executor | E / effect completion | `SMART-ADS:INCIDENT-ROLLBACK-RESULT:V1\\n` | exact reverted cutover identity and effective legacy-path transition time | incident rollback result |",
+    "inventory_receipt_row_after": "L3635 incident_rollback_receipt/v1 retained, result row inserted before it"
+  },
+  "non_empty": true,
+  "emitted_utc": "2026-09-03T00:00:00+00:00",
+  "agent": "aplicador passo 3 v19"
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "candidate/v1",
+  "candidate_id": "fd-101",
+  "branch": "docs/adr-0001-gate2-v19-remediation",
+  "base_blob": "94b119693147d9d90a12c56ee5f28a990a2c1974",
+  "base_blob_short": "94b11969",
+  "base_sha256": "78aa33a52315a12358fac4938eb2e7bcca600c7b9298a5dae3ee44e2353e2b8a",
+  "new_blob": "d44d7546d5318f245708b9041be1ecf99df5e8ee",
+  "new_blob_short": "d44d7546",
+  "new_sha256": "3c6d4b344f1fa607587ad57854a428d9a3e713a5722d5b3d93ada74ae5215e5a",
+  "adr_path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+  "matrix_rows": 13,
+  "matrix_row_exact": "| `incident_rollback` | `incident_rollback_target` | signed same-run cutover identity, disqualifying stabilization/incident evidence, signed gateway-true prestate, fresh human incident-rollback authorization | `incident_rollback_result/v1` | `incident_rollback_effect_proof` |",
+  "matrix_row_verified_by": "grep -F exact match in working tree",
+  "dag_note": "Decisao DAG 19-slot NAO muda; registrado aqui no ledger, sem alteracao adicional no ADR alem do necessario.",
+  "emitted_utc": "2026-09-03T00:00:00+00:00",
+  "agent": "aplicador passo 3 v19"
+}

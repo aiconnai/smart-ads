@@ -2555,7 +2555,7 @@ is available and testable. Unlike the readiness `rollback_test_protocol/v1` of
 section 11.2 — which is a pre-cutover exercise proving the toggle mechanism —
 the incident rollback is a real reversion of an already-cut-over gateway to the
 direct legacy read path. It is a distinct human-authorized effect on the closed
-matrix using the `rollback_target` subject and the same feature-flag/delegation
+matrix using the dedicated `incident_rollback_target` subject and the same feature-flag/delegation
 locators as the cutover, and it produces a signed
 `incident_rollback_receipt/v1` binding the migration run, the exact cutover
 identity being reverted, the disqualifying stabilization bucket(s) or incident
@@ -2566,7 +2566,15 @@ toggle boundary, and the final legacy-path readback. Its transition bound is the
 same at-most-500-ms toggle/ACK/drain interval as section 11.2, and it is testable
 by the identical event-derived ID-set equality method; success returns
 authoritative reads to the direct legacy path without retiring or mutating any
-Write Plane or `/ibvi-ads` surface. An incident rollback does not by itself
+Write Plane or `/ibvi-ads` surface.
+`incident_rollback_effect_proof` binds the four generic authorization,
+reservation, execution, and consumption records plus the finalized
+`incident_rollback_result/v1` under the same run, and nothing else. It is a
+post-cutover effect proof and is not a member of the 19-slot pre-cutover
+`migration_manifest/v1` envelope. The signed `incident_rollback_receipt/v1`
+remains distinct from that effect proof, exactly as `rollback_test_receipt/v1`
+is distinct from the generic rollback effect proof.
+An incident rollback does not by itself
 resume the migration; re-cutover requires a fresh cutover authorization and a
 new stabilization period. Stabilization completion is valid only when no
 incident rollback occurred within its 336-hour window.
@@ -2913,6 +2921,7 @@ and their mandatory fields are:
 - `rollback_target`: run-context, rollback protocol and prestate locators,
   consumer Git identity, the same feature-flag contract locator, and exact
   routing target;
+- `incident_rollback_target`: run-context, signed same-run cutover identity, disqualifying stabilization/incident evidence and signed gateway-true prestate locators, consumer Git identity, the same feature-flag contract locator, and exact routing target;
 - `readiness_attestation_target`: run-context, attestation-payload,
   readiness-manifest and validation-record locators plus their exact digests,
   resolved graph digest, tripartite equality digest, and effect-proof-set digest;
@@ -2942,7 +2951,7 @@ and their mandatory fields are:
   before/after reachability-graph digests, and proposed root-set digest.
 
 The closed effect-action matrix is authoritative; its action count is derived
-from these twelve rows rather than asserted elsewhere:
+from these thirteen rows rather than asserted elsewhere:
 
 | Action | Subject discriminator | Mandatory predecessor evidence | Finalized action-result artifact type | Effect-proof/DAG slot |
 |---|---|---|---|---|
@@ -2953,6 +2962,7 @@ from these twelve rows rather than asserted elsewhere:
 | `provider_operational_read` | `provider_call_target` with `call_side: operational` | exact current operational renewal, protected live-certification head, live-read activation, `/ibvi-ads` delegation, and provider-read authorization | `collection_result/v1` with `call_side: operational` | `operational_provider_read_effect_proof` |
 | `shadow_mode_enable` | `shadow_target` | successful 7B, protected live-certification head, seam release/parity, consumer Git identity and `/ibvi-ads` delegation | `shadow_mode_activation_result/v1` | `shadow_mode_effect_proof` |
 | `rollback_toggle` | `rollback_target` | shadow acceptance, signed protocol/prestate, rollback authorization | `rollback_toggle_result/v1` | `rollback_test_effect_proof` |
+| `incident_rollback` | `incident_rollback_target` | signed same-run cutover identity, disqualifying stabilization/incident evidence, signed gateway-true prestate, fresh human incident-rollback authorization | `incident_rollback_result/v1` | `incident_rollback_effect_proof` |
 | `readiness_attestation_sign` | `readiness_attestation_target` | finalized pre-authorized payload and recursive manifest-validation PASS | `readiness_attestation/v1` | `readiness_attestation_effect_proof` |
 | `cutover_execution` | `cutover_target` | signed same-run Gate-4 verification PASS plus a fresh human authorization over the byte-identical target | `cutover_execution_result/v1` | `cutover_effect_proof` |
 | `legacy_read_retirement` | `retirement_target` | completed 336-hour stabilization, exact disjoint legacy inventory, current pre-effect re-enumeration equal to that inventory, and retirement gate | `retirement_execution_result/v1` | `retirement_effect_proof` |
@@ -3629,6 +3639,7 @@ or downstream semantic validation is permitted before step 5 succeeds.
 | `rollback_drain_record/v1` | P1 | routing runtime | E / event time | `SMART-ADS:ROLLBACK-DRAIN:V1\n` | drained set complete | rollback drain |
 | `rollback_query_log/v1` | P1 | rollback verifier | E / protocol interval | `SMART-ADS:ROLLBACK-QUERY-LOG:V1\n` | event-derived IDs, routes, exactly-once completion | rollback evidence |
 | `rollback_test_receipt/v1` | P1 | rollback verifier | E / completion | `SMART-ADS:ROLLBACK-RECEIPT:V1\n` | 200/400, 60s dispatch, <=500ms, zero loss | rollback execution |
+| `incident_rollback_result/v1` | P1 | rollback executor | E / effect completion | `SMART-ADS:INCIDENT-ROLLBACK-RESULT:V1\n` | exact reverted cutover identity and effective legacy-path transition time | incident rollback result |
 | `incident_rollback_receipt/v1` | P1 | rollback verifier | E / completion | `SMART-ADS:INCIDENT-ROLLBACK-RECEIPT:V1\n` | exact reverted cutover identity, disqualifying evidence, toggle/ACK/drain/readback, zero-loss and <=500ms transition to legacy path | post-cutover incident rollback |
 | `migration_manifest/v1` | P1 | readiness builder | E / generation | `SMART-ADS:MIGRATION-MANIFEST:V1\n` | exact 19-slot typed DAG, live-certification head, live activation, operational union, rollback receipt and tripartite equality | readiness manifest |
 | `manifest_validation_record/v1` | P1 | readiness validator | E / validation time | `SMART-ADS:MANIFEST-VALIDATION:V1\n` | recursive complete PASS for exact build | manifest validation |
