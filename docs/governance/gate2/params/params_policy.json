@@ -1,0 +1,18 @@
+{
+  "repository": "aiconnai/smart-ads",
+  "protected_ref": "refs/heads/main",
+  "adr_path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+  "ci_review_policy_digest": "sha256:23d7258b5df43109fa74f3c8a5ccb10ead9c141365aa6ac607fbae050cb485fc",
+  "designated_principals": [
+    "principal:ronaldo"
+  ],
+  "registry_locator": {
+    "$schema": "smart_ads/artifact_locator/v1",
+    "artifact_type": "smart_ads/key_authorization_registry/v1",
+    "content_digest": "sha256:4b0da88a266109ef5afc32d1b66c97b4f5b0494144026cba84c6eeb73a379162",
+    "object_ref": "cell-object:sha256:4b0da88a266109ef5afc32d1b66c97b4f5b0494144026cba84c6eeb73a379162",
+    "serialization": "rfc8785-json",
+    "store_kind": "cell_immutable_object"
+  },
+  "signer_key_id": "key:ed25519:2d20788f9a2b6ede1b1ba78dc81ebabfb21e52a2b5d3ba16df1466827757d60e"
+}
