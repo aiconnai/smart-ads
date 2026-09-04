@@ -27,6 +27,7 @@ DOMAIN_PREFIXES: dict[str, str] = {
     "protected_merge_evidence/v1": "SMART-ADS:PROTECTED-MERGE:V1\n",
     "gate2_approval_receipt/v1": "SMART-ADS:GATE2-RECEIPT:V1\n",
     "migration_run_context/v1": "SMART-ADS:RUN-CONTEXT:V1\n",
+    "delivery_mode_decision_receipt/v1": "SMART-ADS:DELIVERY-MODE:V1\n",
 }
 
 _DER_ED25519_SPKI_HEADER = bytes.fromhex("302a300506032b6570032100")

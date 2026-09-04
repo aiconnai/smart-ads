@@ -479,3 +479,168 @@ def test_build_gate2_receipt_inputs_not_mutated() -> None:
     identity_copy = copy.deepcopy(kwargs["approved_adr_git_identity"])
     artifacts.build_gate2_receipt(**kwargs)
     assert kwargs["approved_adr_git_identity"] == identity_copy
+
+
+# ---------------------------------------------------------------------------
+# build_migration_run_context — ADR-0001 L2891-2893, domain SMART-ADS:RUN-CONTEXT:V1
+# ---------------------------------------------------------------------------
+
+GATE2_RECEIPT_LOCATOR = make_locator(
+    "smart_ads/gate2_approval_receipt/v1", b"receipt-bytes"
+)
+
+
+def _run_context_kwargs(**overrides):
+    base = dict(
+        gate2_receipt_locator=GATE2_RECEIPT_LOCATOR,
+        approved_adr_git_identity=VALID_ADR_IDENTITY,
+        legacy_source_identity=LEGACY_SOURCE_IDENTITY,
+        tenant_ref="tenant:aiconnai",
+        cell_ref="cell:smart-ads-migration",
+        run_id="run:" + "0" * 32,
+        created_at_utc="2026-09-04T14:00:00Z",
+        key_registry_snapshot_locator=REGISTRY_LOCATOR,
+        signer_key_id=ANCHOR_KEY_ID,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_build_migration_run_context_happy_path() -> None:
+    ctx = artifacts.build_migration_run_context(**_run_context_kwargs())
+    assert ctx["$schema"] == "smart_ads/migration_run_context/v1"
+    assert ctx["gate2_receipt_locator"] == GATE2_RECEIPT_LOCATOR
+    assert ctx["approved_adr_git_identity"] == VALID_ADR_IDENTITY
+    assert ctx["legacy_source_identity"] == LEGACY_SOURCE_IDENTITY
+    # ADR-0001 L2891-2893: binds receipt locator, exact ADR identity, separate
+    # legacy source identity, tenant, cell, key-registry snapshot, creation time.
+    assert set(ctx.keys()) == {
+        "$schema",
+        "gate2_receipt_locator",
+        "approved_adr_git_identity",
+        "legacy_source_identity",
+        "tenant_ref",
+        "cell_ref",
+        "run_id",
+        "created_at_utc",
+        "integrity",
+    }
+    assert set(ctx["integrity"].keys()) == {"key_id", "key_registry_snapshot_locator"}
+
+
+def test_build_migration_run_context_rejects_wrong_legacy_source_identity() -> None:
+    with pytest.raises(ValueError):
+        artifacts.build_migration_run_context(
+            **_run_context_kwargs(
+                legacy_source_identity={"repository": "x/y", "commit_sha": "d" * 40}
+            )
+        )
+
+
+def test_build_migration_run_context_rejects_bad_adr_identity() -> None:
+    with pytest.raises(ValueError):
+        artifacts.build_migration_run_context(
+            **_run_context_kwargs(
+                approved_adr_git_identity=dict(VALID_ADR_IDENTITY, commit_sha="short")
+            )
+        )
+
+
+def test_build_migration_run_context_rejects_empty_tenant_or_cell() -> None:
+    for field in ("tenant_ref", "cell_ref", "run_id"):
+        with pytest.raises(ValueError):
+            artifacts.build_migration_run_context(**_run_context_kwargs(**{field: ""}))
+
+
+def test_build_migration_run_context_does_not_mutate_inputs() -> None:
+    identity = copy.deepcopy(VALID_ADR_IDENTITY)
+    locator = copy.deepcopy(GATE2_RECEIPT_LOCATOR)
+    ctx = artifacts.build_migration_run_context(
+        **_run_context_kwargs(
+            approved_adr_git_identity=identity, gate2_receipt_locator=locator
+        )
+    )
+    ctx["approved_adr_git_identity"]["commit_sha"] = "f" * 40
+    ctx["gate2_receipt_locator"]["content_digest"] = "sha256:" + "0" * 64
+    assert identity == VALID_ADR_IDENTITY
+    assert locator == GATE2_RECEIPT_LOCATOR
+
+
+# ---------------------------------------------------------------------------
+# build_delivery_mode_decision — ADR-0001 L2895-2900, domain SMART-ADS:DELIVERY-MODE:V1
+# ---------------------------------------------------------------------------
+
+RUN_CONTEXT_LOCATOR = make_locator(
+    "smart_ads/migration_run_context/v1", b"run-context-bytes"
+)
+
+
+def _delivery_kwargs(**overrides):
+    base = dict(
+        gate2_receipt_locator=GATE2_RECEIPT_LOCATOR,
+        approved_adr_git_identity=VALID_ADR_IDENTITY,
+        run_context_locator=RUN_CONTEXT_LOCATOR,
+        decided_by_principal_ref="principal:ronaldo",
+        decided_at_utc="2026-09-04T14:05:00Z",
+        key_registry_snapshot_locator=REGISTRY_LOCATOR,
+        signer_key_id=ANCHOR_KEY_ID,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_build_delivery_mode_decision_happy_path() -> None:
+    rec = artifacts.build_delivery_mode_decision(**_delivery_kwargs())
+    assert rec["$schema"] == "smart_ads/delivery_mode_decision_receipt/v1"
+    # ADR-0001 L2895-2900: delivery_mode is manual, and only manual.
+    assert rec["delivery_mode"] == "manual"
+    assert rec["gate2_receipt_locator"] == GATE2_RECEIPT_LOCATOR
+    assert rec["approved_adr_git_identity"] == VALID_ADR_IDENTITY
+    assert rec["run_context_locator"] == RUN_CONTEXT_LOCATOR
+    assert set(rec.keys()) == {
+        "$schema",
+        "gate2_receipt_locator",
+        "approved_adr_git_identity",
+        "run_context_locator",
+        "delivery_mode",
+        "decided_by_principal_ref",
+        "decided_at_utc",
+        "integrity",
+    }
+    # ADR-0001 L2899: "The v1 schema has no autonomous evidence field."
+    assert "autonomous_evidence" not in rec
+    assert not any("autonomous" in k for k in rec)
+
+
+def test_build_delivery_mode_decision_rejects_non_manual_mode() -> None:
+    """delivery_mode is not a caller-supplied value; manual is the only legal mode."""
+    with pytest.raises(TypeError):
+        artifacts.build_delivery_mode_decision(
+            **_delivery_kwargs(), delivery_mode="autonomous"
+        )
+
+
+def test_build_delivery_mode_decision_rejects_bad_adr_identity() -> None:
+    with pytest.raises(ValueError):
+        artifacts.build_delivery_mode_decision(
+            **_delivery_kwargs(
+                approved_adr_git_identity=dict(VALID_ADR_IDENTITY, git_blob_oid="nope")
+            )
+        )
+
+
+def test_build_delivery_mode_decision_rejects_wrong_locator_type() -> None:
+    """run_context_locator must resolve a migration_run_context/v1, not anything else."""
+    with pytest.raises(ValueError):
+        artifacts.build_delivery_mode_decision(
+            **_delivery_kwargs(run_context_locator=POLICY_LOCATOR)
+        )
+
+
+def test_build_delivery_mode_decision_does_not_mutate_inputs() -> None:
+    identity = copy.deepcopy(VALID_ADR_IDENTITY)
+    rec = artifacts.build_delivery_mode_decision(
+        **_delivery_kwargs(approved_adr_git_identity=identity)
+    )
+    rec["approved_adr_git_identity"]["path"] = "tampered"
+    assert identity == VALID_ADR_IDENTITY

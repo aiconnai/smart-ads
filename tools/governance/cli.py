@@ -261,6 +261,40 @@ def cmd_build_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_run_context(args: argparse.Namespace) -> int:
+    params = _read_json_file(args.params)
+    ctx = artifacts.build_migration_run_context(
+        gate2_receipt_locator=params["gate2_receipt_locator"],
+        approved_adr_git_identity=params["approved_adr_git_identity"],
+        legacy_source_identity=params["legacy_source_identity"],
+        tenant_ref=params["tenant_ref"],
+        cell_ref=params["cell_ref"],
+        run_id=params["run_id"],
+        created_at_utc=params["created_at_utc"],
+        key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
+        signer_key_id=params["signer_key_id"],
+    )
+    info = _write_json_file(args.out, ctx)
+    _print_json(info)
+    return 0
+
+
+def cmd_build_delivery_mode(args: argparse.Namespace) -> int:
+    params = _read_json_file(args.params)
+    rec = artifacts.build_delivery_mode_decision(
+        gate2_receipt_locator=params["gate2_receipt_locator"],
+        approved_adr_git_identity=params["approved_adr_git_identity"],
+        run_context_locator=params["run_context_locator"],
+        decided_by_principal_ref=params["decided_by_principal_ref"],
+        decided_at_utc=params["decided_at_utc"],
+        key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
+        signer_key_id=params["signer_key_id"],
+    )
+    info = _write_json_file(args.out, rec)
+    _print_json(info)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m tools.governance.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -347,6 +381,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_receipt.add_argument("--params", required=True)
     p_receipt.add_argument("--out", required=True)
     p_receipt.set_defaults(func=cmd_build_receipt)
+
+    p_runctx = sub.add_parser("build-run-context")
+    p_runctx.add_argument("--params", required=True)
+    p_runctx.add_argument("--out", required=True)
+    p_runctx.set_defaults(func=cmd_build_run_context)
+
+    p_delivery = sub.add_parser("build-delivery-mode")
+    p_delivery.add_argument("--params", required=True)
+    p_delivery.add_argument("--out", required=True)
+    p_delivery.set_defaults(func=cmd_build_delivery_mode)
 
     return parser
 
