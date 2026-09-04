@@ -117,17 +117,50 @@ def test_verify_wrong_domain_prefix_fails(keypair: tuple[Path, bytes]) -> None:
 
 
 def test_verify_base64url_signature_rejected(keypair: tuple[Path, bytes]) -> None:
+    """A base64url-encoded signature must be rejected by the strict decoder.
+
+    Standard base64 and base64url differ only in the alphabet used for values 62
+    and 63 ('+/' vs '-_'). For roughly 6.7% of random 64-byte Ed25519 signatures
+    neither value occurs, so re-encoding produces a byte-identical string and the
+    envelope stays valid. Re-signing until the encodings actually differ makes the
+    assertion deterministic instead of failing on ~1 run in 15.
+    """
     priv, raw32 = keypair
     key_id = p1.key_id_for(raw32)
-    env = _envelope(key_id)
     prefix = p1.DOMAIN_PREFIXES["gate2_authority_policy/v1"]
-    signed = p1.sign_envelope(env, prefix, priv)
-    sig_raw = base64.b64decode(signed["integrity"]["signature_base64"], validate=True)
-    urlsafe = base64.urlsafe_b64encode(sig_raw).decode("ascii")
+
+    for nonce in range(64):
+        env = _envelope(key_id)
+        env["_flake_nonce"] = nonce
+        signed = p1.sign_envelope(env, prefix, priv)
+        standard = signed["integrity"]["signature_base64"]
+        sig_raw = base64.b64decode(standard, validate=True)
+        urlsafe = base64.urlsafe_b64encode(sig_raw).decode("ascii")
+        if urlsafe != standard:
+            break
+    else:  # pragma: no cover - probability below 2**-250
+        pytest.fail("could not produce a signature whose base64url encoding differs")
+
     tampered = copy.deepcopy(signed)
     tampered["integrity"]["signature_base64"] = urlsafe
     with pytest.raises(ValueError):
         p1.verify_envelope(tampered, prefix, raw32)
+
+
+@pytest.mark.parametrize("bad_char", ["-", "_"])
+def test_strict_base64_decode_names_base64url_alphabet(bad_char: str) -> None:
+    """base64url input is refused with a diagnostic naming the alphabet.
+
+    `base64.b64decode(validate=True)` already refuses '-'/'_' on its own, so the
+    explicit guard in `_strict_base64_decode` is not what makes this input unsafe
+    to accept; it is what makes the refusal legible ("base64url characters ...")
+    instead of the opaque stdlib "Only base64 data is allowed". Asserting on the
+    message is therefore the only claim this test can honestly make -- a test that
+    merely asserted `raises(ValueError)` would pass with the guard deleted.
+    """
+    value = "A" * 42 + bad_char + "A" * 43 + "=="
+    with pytest.raises(ValueError, match="base64url"):
+        p1._strict_base64_decode(value)
 
 
 def test_verify_unpadded_signature_rejected(keypair: tuple[Path, bytes]) -> None:
