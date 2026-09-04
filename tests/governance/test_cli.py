@@ -346,3 +346,175 @@ def _merge_params() -> dict:
         "signer_key_id": "key:ed25519:" + ("2" * 64),
         "registry_locator": registry_locator,
     }
+
+
+# ---------------------------------------------------------------------------
+# build-run-context / build-delivery-mode end-to-end
+# ---------------------------------------------------------------------------
+
+
+def _locator_for(artifact_type: str, payload: bytes) -> dict:
+    from tools.governance.locator import make_locator
+
+    return make_locator(artifact_type, payload)
+
+
+def test_build_run_context_and_delivery_mode_sign_and_verify(
+    tmp_path: Path, anchor_key: Path, operator_key: Path
+) -> None:
+    """Full chain: build both envelopes, sign, verify, and reject a domain swap.
+
+    The realistic failure mode for these two artifacts is a domain-prefix mix-up,
+    since they are adjacent in the flow and share most of their fields. The test
+    asserts that a signature made under RUN-CONTEXT does not verify under
+    DELIVERY-MODE.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    anchor_b64 = _raw32_b64(anchor_key)
+    anchor_kid = _key_id(anchor_b64)
+
+    adr_identity = {
+        "repository": "aiconnai/smart-ads",
+        "commit_sha": "a" * 40,
+        "path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+        "git_blob_oid": "b" * 40,
+        "file_content_sha256": "sha256:" + "c" * 64,
+    }
+    registry_loc = _locator_for("smart_ads/key_authorization_registry/v1", b"reg")
+    receipt_loc = _locator_for("smart_ads/gate2_approval_receipt/v1", b"rec")
+
+    run_params = tmp_path / "run_params.json"
+    run_params.write_text(
+        json.dumps(
+            {
+                "gate2_receipt_locator": receipt_loc,
+                "approved_adr_git_identity": adr_identity,
+                "legacy_source_identity": {
+                    "repository": "mbras-tech/mbras-campaigns",
+                    "commit_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+                },
+                "tenant_ref": "tenant:aiconnai",
+                "cell_ref": "cell:smart-ads-migration",
+                "run_id": "run:" + "0" * 32,
+                "created_at_utc": "2026-09-04T14:00:00Z",
+                "key_registry_snapshot_locator": registry_loc,
+                "signer_key_id": anchor_kid,
+            }
+        )
+    )
+    run_out = tmp_path / "run_context.json"
+    r = run_cli(
+        "build-run-context", "--params", str(run_params), "--out", str(run_out),
+        cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    run_signed = tmp_path / "run_context_signed.json"
+    r = run_cli(
+        "sign", "--schema", "migration_run_context/v1", "--key", str(anchor_key),
+        "--in", str(run_out), "--out", str(run_signed), cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    r = run_cli(
+        "verify", "--schema", "migration_run_context/v1",
+        "--pubkey-raw-base64", anchor_b64, "--in", str(run_signed), cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    # Domain separation: the same signature must NOT verify under the
+    # delivery-mode domain prefix.
+    r = run_cli(
+        "verify", "--schema", "delivery_mode_decision_receipt/v1",
+        "--pubkey-raw-base64", anchor_b64, "--in", str(run_signed), cwd=repo_root,
+    )
+    assert r.returncode != 0
+
+    # The run context locator must address the signed run-context bytes.
+    run_ctx_bytes = run_signed.read_bytes()
+    run_ctx_loc = _locator_for("smart_ads/migration_run_context/v1", run_ctx_bytes)
+
+    del_params = tmp_path / "del_params.json"
+    del_params.write_text(
+        json.dumps(
+            {
+                "gate2_receipt_locator": receipt_loc,
+                "approved_adr_git_identity": adr_identity,
+                "run_context_locator": run_ctx_loc,
+                "decided_by_principal_ref": "principal:ronaldo",
+                "decided_at_utc": "2026-09-04T14:05:00Z",
+                "key_registry_snapshot_locator": registry_loc,
+                "signer_key_id": _key_id(_raw32_b64(operator_key)),
+            }
+        )
+    )
+    del_out = tmp_path / "delivery.json"
+    r = run_cli(
+        "build-delivery-mode", "--params", str(del_params), "--out", str(del_out),
+        cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(del_out.read_text())["delivery_mode"] == "manual"
+
+    del_signed = tmp_path / "delivery_signed.json"
+    r = run_cli(
+        "sign", "--schema", "delivery_mode_decision_receipt/v1",
+        "--key", str(operator_key), "--in", str(del_out),
+        "--out", str(del_signed), cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    r = run_cli(
+        "verify", "--schema", "delivery_mode_decision_receipt/v1",
+        "--pubkey-raw-base64", _raw32_b64(operator_key),
+        "--in", str(del_signed), cwd=repo_root,
+    )
+    assert r.returncode == 0, r.stderr
+
+    # Negative: the delivery-mode receipt must not verify under the anchor key.
+    r = run_cli(
+        "verify", "--schema", "delivery_mode_decision_receipt/v1",
+        "--pubkey-raw-base64", anchor_b64, "--in", str(del_signed), cwd=repo_root,
+    )
+    assert r.returncode != 0
+
+
+def test_build_delivery_mode_rejects_wrong_run_context_locator_type(
+    tmp_path: Path, anchor_key: Path
+) -> None:
+    """A locator resolving the wrong artifact type must be refused."""
+    repo_root = Path(__file__).resolve().parents[2]
+    anchor_kid = _key_id(_raw32_b64(anchor_key))
+    params = tmp_path / "bad.json"
+    params.write_text(
+        json.dumps(
+            {
+                "gate2_receipt_locator": _locator_for(
+                    "smart_ads/gate2_approval_receipt/v1", b"rec"
+                ),
+                "approved_adr_git_identity": {
+                    "repository": "aiconnai/smart-ads",
+                    "commit_sha": "a" * 40,
+                    "path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+                    "git_blob_oid": "b" * 40,
+                    "file_content_sha256": "sha256:" + "c" * 64,
+                },
+                # wrong type: a policy locator where a run context is required
+                "run_context_locator": _locator_for(
+                    "smart_ads/gate2_authority_policy/v1", b"pol"
+                ),
+                "decided_by_principal_ref": "principal:ronaldo",
+                "decided_at_utc": "2026-09-04T14:05:00Z",
+                "key_registry_snapshot_locator": _locator_for(
+                    "smart_ads/key_authorization_registry/v1", b"reg"
+                ),
+                "signer_key_id": anchor_kid,
+            }
+        )
+    )
+    r = run_cli(
+        "build-delivery-mode", "--params", str(params),
+        "--out", str(tmp_path / "out.json"), cwd=repo_root,
+    )
+    assert r.returncode != 0
+    assert "artifact_type" in r.stderr

@@ -354,3 +354,155 @@ def build_gate2_receipt(
             "key_id": signer_key_id,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# migration_run_context/v1 — P1 domain SMART-ADS:RUN-CONTEXT:V1
+# ---------------------------------------------------------------------------
+
+
+def _require_locator_type(
+    locator: dict[str, Any], expected_artifact_type: str, where: str
+) -> None:
+    """Validate `locator` shape and pin its artifact_type.
+
+    `validate_locator` checks structural well-formedness but accepts any
+    non-empty artifact_type, so a locator resolving the wrong object kind would
+    pass. Slots in these envelopes are typed, so the type is pinned here.
+    """
+    validate_locator(locator)
+    if locator["artifact_type"] != expected_artifact_type:
+        raise ValueError(
+            f"{where}: locator artifact_type must be {expected_artifact_type!r}, "
+            f"got {locator['artifact_type']!r}"
+        )
+
+
+def build_migration_run_context(
+    *,
+    gate2_receipt_locator: dict[str, Any],
+    approved_adr_git_identity: dict[str, Any],
+    legacy_source_identity: dict[str, Any],
+    tenant_ref: str,
+    cell_ref: str,
+    run_id: str,
+    created_at_utc: str,
+    key_registry_snapshot_locator: dict[str, Any],
+    signer_key_id: str,
+) -> dict[str, Any]:
+    """Build an unsigned `migration_run_context/v1` envelope.
+
+    ADR-0001 L2891-2893: the run context is initialized from the Gate-2 receipt
+    and binds its locator, the exact ADR identity, the separate legacy source
+    identity, tenant, cell, the immutable key-registry snapshot, and creation
+    time. A run not derived from a Gate-2 receipt cannot be initialized.
+    """
+    _validate_adr_git_identity(approved_adr_git_identity)
+    if legacy_source_identity != _LEGACY_SOURCE_IDENTITY:
+        raise ValueError(
+            f"build_migration_run_context: legacy_source_identity must equal exactly "
+            f"{_LEGACY_SOURCE_IDENTITY!r}, got {legacy_source_identity!r}"
+        )
+    _require_locator_type(
+        gate2_receipt_locator,
+        "smart_ads/gate2_approval_receipt/v1",
+        "build_migration_run_context",
+    )
+    _require_locator_type(
+        key_registry_snapshot_locator,
+        "smart_ads/key_authorization_registry/v1",
+        "build_migration_run_context",
+    )
+    for name, value in (
+        ("tenant_ref", tenant_ref),
+        ("cell_ref", cell_ref),
+        ("run_id", run_id),
+        ("created_at_utc", created_at_utc),
+        ("signer_key_id", signer_key_id),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"build_migration_run_context: {name} must be a non-empty string"
+            )
+
+    return {
+        "$schema": "smart_ads/migration_run_context/v1",
+        "gate2_receipt_locator": copy.deepcopy(gate2_receipt_locator),
+        "approved_adr_git_identity": copy.deepcopy(approved_adr_git_identity),
+        "legacy_source_identity": copy.deepcopy(legacy_source_identity),
+        "tenant_ref": tenant_ref,
+        "cell_ref": cell_ref,
+        "run_id": run_id,
+        "created_at_utc": created_at_utc,
+        "integrity": {
+            "key_registry_snapshot_locator": copy.deepcopy(key_registry_snapshot_locator),
+            "key_id": signer_key_id,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# delivery_mode_decision_receipt/v1 — P1 domain SMART-ADS:DELIVERY-MODE:V1
+# ---------------------------------------------------------------------------
+
+
+def build_delivery_mode_decision(
+    *,
+    gate2_receipt_locator: dict[str, Any],
+    approved_adr_git_identity: dict[str, Any],
+    run_context_locator: dict[str, Any],
+    decided_by_principal_ref: str,
+    decided_at_utc: str,
+    key_registry_snapshot_locator: dict[str, Any],
+    signer_key_id: str,
+) -> dict[str, Any]:
+    """Build an unsigned `delivery_mode_decision_receipt/v1` envelope.
+
+    ADR-0001 L2895-2900: contains the exact Gate-2 receipt locator, the
+    byte-identical approved ADR Git identity, the run-context locator, and
+    `delivery_mode: manual`.
+
+    `delivery_mode` is deliberately NOT a parameter. The v1 schema admits manual
+    and only manual, and has no autonomous evidence field, so accepting a caller
+    value would let a non-conforming mode be requested at all. Passing one is a
+    TypeError, not a rejected value.
+    """
+    _validate_adr_git_identity(approved_adr_git_identity)
+    _require_locator_type(
+        gate2_receipt_locator,
+        "smart_ads/gate2_approval_receipt/v1",
+        "build_delivery_mode_decision",
+    )
+    _require_locator_type(
+        run_context_locator,
+        "smart_ads/migration_run_context/v1",
+        "build_delivery_mode_decision",
+    )
+    _require_locator_type(
+        key_registry_snapshot_locator,
+        "smart_ads/key_authorization_registry/v1",
+        "build_delivery_mode_decision",
+    )
+    for name, value in (
+        ("decided_by_principal_ref", decided_by_principal_ref),
+        ("decided_at_utc", decided_at_utc),
+        ("signer_key_id", signer_key_id),
+    ):
+        if not isinstance(value, str) or not value:
+            raise ValueError(
+                f"build_delivery_mode_decision: {name} must be a non-empty string"
+            )
+
+    return {
+        "$schema": "smart_ads/delivery_mode_decision_receipt/v1",
+        "gate2_receipt_locator": copy.deepcopy(gate2_receipt_locator),
+        "approved_adr_git_identity": copy.deepcopy(approved_adr_git_identity),
+        "run_context_locator": copy.deepcopy(run_context_locator),
+        "delivery_mode": "manual",
+        "decided_by_principal_ref": decided_by_principal_ref,
+        "decided_at_utc": decided_at_utc,
+        "integrity": {
+            "key_registry_snapshot_locator": copy.deepcopy(key_registry_snapshot_locator),
+            "key_id": signer_key_id,
+        },
+    }
