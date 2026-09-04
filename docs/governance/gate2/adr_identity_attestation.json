@@ -1,0 +1,29 @@
+{
+  "$schema": "smart_ads/adr_identity_attestation/v1-draft",
+  "adr_git_identity": {
+    "file_content_sha256": "sha256:239b53e0af44c176b78c363dc271c9fd882910bd4ab2ffb6844cb8fb2458640e",
+    "first_merged_in": "46e468d983989e85103b1ba967ce6c3bb943626d",
+    "git_blob_oid": "a4a8c06b44e929b3562336dff86b61a55e10f79f",
+    "note": "commit_sha of the protected merge is assigned by the merge of this PR and recorded in protected_merge_evidence/v1",
+    "path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+    "repository": "aiconnai/smart-ads"
+  },
+  "attested_at_utc": "2026-09-04T00:00:00Z",
+  "attested_by": "principal:ronaldo",
+  "gate2_root_of_trust": {
+    "gate2_authority_policy_locator": "cell-object:sha256:35badfc3b0a9df669cffe22e3be013403cca154162072ca198b8db5be25640a2",
+    "key_registry_locator": "cell-object:sha256:4b0da88a266109ef5afc32d1b66c97b4f5b0494144026cba84c6eeb73a379162",
+    "trust_anchor_config_path": "docs/governance/trust-anchor/cell_trust_anchor_config.json",
+    "trust_anchor_pin": "sha256:bda7f38dfe36fc083f11bfa8502bc0d0e458319026c87c893fa86210b901a8ad"
+  },
+  "legacy_source_identity": {
+    "commit_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+    "repository": "mbras-tech/mbras-campaigns"
+  },
+  "prior_review_corroboration": {
+    "authority": "corroboration only; not the Gate 2 authority",
+    "reviewed_head_sha": "78425bd0a78e7e37be20d700dc90fe911b956b09",
+    "verdict": "APPROVE 0 HIGH / 1 MEDIUM / 4 LOW (v19r2 MAX, terminal-receipt sha256 85858900015f78aa2bdd2a458218f7bd94b7c65a82e1835460f0ecee5da19055)"
+  },
+  "purpose": "Reaffirm the approved ADR-0001 identity under protected main (PR required, pytest required, enforce_admins) so that protected_merge_evidence/v1 can bind a protected merge SHA, required CI results and exact-head review evidence to this exact ADR blob. The ADR file itself is not modified by this change."
+}
