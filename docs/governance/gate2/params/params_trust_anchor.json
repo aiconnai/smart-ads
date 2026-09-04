@@ -1,0 +1,9 @@
+{
+  "anchor_id": "smart-ads-trust-anchor-2026-09-03",
+  "anchor_public_key_base64": "/BR0HdhylfJYte950hx1m/QNGCpfX/368Eyy5PiYbEI=",
+  "valid_from_utc": "2026-09-03T00:00:00Z",
+  "valid_until_utc": "2027-09-03T00:00:00Z",
+  "allowed_registry_artifact_types": [
+    "smart_ads/key_authorization_registry/v1"
+  ]
+}
