@@ -1,0 +1,8 @@
+{
+  "$schema": "smart_ads/artifact_locator/v1",
+  "artifact_type": "smart_ads/migration_run_context/v1",
+  "content_digest": "sha256:e00667aeac303c63695180ebfba8539b99f80734ae001b0313d45129ca5f3a38",
+  "object_ref": "cell-object:sha256:e00667aeac303c63695180ebfba8539b99f80734ae001b0313d45129ca5f3a38",
+  "serialization": "rfc8785-json",
+  "store_kind": "cell_immutable_object"
+}
