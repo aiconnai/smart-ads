@@ -1,0 +1,8 @@
+{
+  "$schema": "smart_ads/artifact_locator/v1",
+  "artifact_type": "smart_ads/delivery_mode_decision_receipt/v1",
+  "content_digest": "sha256:986200b4663893111c46522563650c7772cd2a09e394436d0ff8e271b41cd102",
+  "object_ref": "cell-object:sha256:986200b4663893111c46522563650c7772cd2a09e394436d0ff8e271b41cd102",
+  "serialization": "rfc8785-json",
+  "store_kind": "cell_immutable_object"
+}
