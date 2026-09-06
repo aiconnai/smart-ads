@@ -342,9 +342,12 @@ python3 -m tools.governance.cli store-put \
 `approved_adr_git_identity`, `run_context_locator`, `decided_by_principal_ref`,
 `decided_at_utc`, `key_registry_snapshot_locator`, `signer_key_id`.
 
+Estado: **executado em 2026-09-06T15:25:28Z**; delivery mode =
+`cell-object:sha256:986200b4663893111c46522563650c7772cd2a09e394436d0ff8e271b41cd102`.
+
 Publicação: um único PR com os três cell-objects novos (registry época 2, run
 context, delivery mode) e os JSON de params (sem chaves privadas), seguindo a
-seção 7. Merge exige autorização humana literal. Após o merge, o próximo passo
+seção 7 — aberto como PR #11 (`governance/run-context-delivery-mode-artifacts`). Merge exige autorização humana literal. Após o merge, o próximo passo
 é a etapa 3 do `PATH-TO-GATE3.md` (`legacy_step2_implementation_evidence/v1`),
 fora do escopo deste runbook.
 
