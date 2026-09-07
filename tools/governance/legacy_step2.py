@@ -290,10 +290,10 @@ _FORBIDDEN_KEY_NAMES = {"run", "run_context", "run_id"}
 
 def _reject_run_or_gate2_keys(value: Any, path: str = "$") -> None:
     """RUNBOOK §11: the envelope never references a run context or a Gate-2
-    receipt. Walk every mapping and list; refuse any key containing 'gate2' or
-    named/prefixed 'run'/'run_' — except the declarative `same_run` flag of the
-    authority block, which is the ADR-required statement that no same-run
-    authority exists."""
+    receipt. Walk every mapping and list/tuple/set; refuse any key containing
+    'gate2' or named/prefixed 'run'/'run_' — except the declarative `same_run`
+    flag of the authority block, which is the ADR-required statement that no
+    same-run authority exists."""
     if isinstance(value, dict):
         for key, child in value.items():
             lowered = str(key).lower()
@@ -302,7 +302,7 @@ def _reject_run_or_gate2_keys(value: Any, path: str = "$") -> None:
                     f"build_legacy_step2_evidence: forbidden run/gate2 key {key!r} at {path}"
                 )
             _reject_run_or_gate2_keys(child, f"{path}.{key}")
-    elif isinstance(value, list):
+    elif isinstance(value, (list, tuple, set, frozenset)):
         for index, child in enumerate(value):
             _reject_run_or_gate2_keys(child, f"{path}[{index}]")
 
@@ -319,13 +319,13 @@ def _validate_resolved_baseline(facts: dict[str, Any]) -> None:
         raise ValueError(
             "build_legacy_step2_evidence: facts.resolved_baseline must be an object "
             "{'commit_sha': <40 hex>} written by resolve_legacy_step2_facts; refusing to "
-            "pin an identity the facts do not carry"
+            f"pin an identity the facts do not carry; expected the pinned legacy baseline {pinned!r}"
         )
     commit_sha = resolved.get("commit_sha")
     if not isinstance(commit_sha, str) or not _HEX40.fullmatch(commit_sha):
         raise ValueError(
             "build_legacy_step2_evidence: facts.resolved_baseline.commit_sha must be 40 "
-            f"lowercase hex, got {commit_sha!r}"
+            f"lowercase hex, got {commit_sha!r}; expected the pinned legacy baseline {pinned!r}"
         )
     if commit_sha != pinned:
         raise ValueError(

@@ -491,6 +491,7 @@ def test_build_legacy_step2_evidence_rejects_unbound_or_divergent_baseline(mutat
     with pytest.raises(ValueError) as ei:
         legacy_step2.build_legacy_step2_evidence(**{**_build_kwargs(), "facts": facts})
     assert "resolved_baseline" in str(ei.value)
+    assert _PINNED in str(ei.value)
 
 
 _NESTED_RUN_OBJECT = {"run_context_locator": {"gate2_receipt_locator": "unexpected"}}
@@ -522,10 +523,13 @@ _NESTED_RUN_OBJECT = {"run_context_locator": {"gate2_receipt_locator": "unexpect
          "blob-newline", "commit-list", "w1gate-newline", "wave1-newline"],
 )
 def test_build_legacy_step2_evidence_rejects_inexact_field_types(mutator) -> None:
-    """H2 (review, Medium): exact types only. RED on 01d8056: pr-object, pr-list,
-    pr-string, pr-bool, pr-zero, pr-negative, presence-string, presence-int,
-    presence-object, blob-newline, w1gate-newline and wave1-newline all build
-    (presence-null/presence-zero/commit-list already fail there — PASS-on-base, declared)."""
+    """H2 (review, Medium): exact types only. RED on 01d8056 (build succeeds
+    there): pr-object, pr-list, pr-string, pr-bool, pr-zero, pr-negative,
+    presence-string, presence-int, presence-object, presence-null,
+    presence-zero, blob-newline. PASS-on-base (already refused there, for a
+    different reason — string inequality with the pinned constant, or a
+    non-str value failing the old regex): commit-list, w1gate-newline,
+    wave1-newline."""
     facts = _valid_facts()
     mutator(facts)
     with pytest.raises(ValueError):
@@ -549,6 +553,7 @@ def test_nested_run_or_gate2_object_never_reaches_the_envelope() -> None:
         ({"integrity": {"run_id": "x"}}, "run_id"),
         ({"authority": {"gate2_receipt_locator": {}}}, "gate2_receipt_locator"),
         ({"items": [{"ok": 1}, {"Gate2Ref": 1}]}, "Gate2Ref"),
+        ({"items": ({"run_id": 1},)}, "run_id"),
     ],
 )
 def test_reject_run_or_gate2_keys_walks_the_whole_value(envelope, forbidden) -> None:
