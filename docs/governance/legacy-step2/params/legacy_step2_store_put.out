@@ -1,0 +1,8 @@
+{
+  "$schema": "smart_ads/artifact_locator/v1",
+  "artifact_type": "smart_ads/legacy_step2_implementation_evidence/v1",
+  "content_digest": "sha256:6d55f97025e983753f6365acd1d1de8c2fe063e205e49e8c9ec8522335fbcb6d",
+  "object_ref": "cell-object:sha256:6d55f97025e983753f6365acd1d1de8c2fe063e205e49e8c9ec8522335fbcb6d",
+  "serialization": "rfc8785-json",
+  "store_kind": "cell_immutable_object"
+}
