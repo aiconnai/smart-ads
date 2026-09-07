@@ -1,0 +1,8 @@
+{
+  "$schema": "smart_ads/artifact_locator/v1",
+  "artifact_type": "smart_ads/key_authorization_registry/v1",
+  "content_digest": "sha256:977df65902295709c1137fded674a5ba2766bb94ee61833d3018c47dda4d1936",
+  "object_ref": "cell-object:sha256:977df65902295709c1137fded674a5ba2766bb94ee61833d3018c47dda4d1936",
+  "serialization": "rfc8785-json",
+  "store_kind": "cell_immutable_object"
+}
