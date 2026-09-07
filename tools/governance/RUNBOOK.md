@@ -364,7 +364,12 @@ identidades Git exatas e a proveniência de merge protegido de
 `25cc756c5f46db9ee67f17844196c4301c977ad6`. Não carrega run context, receipt
 do Gate 2, expiração, nonce, reserva, credencial, chamada a provedor,
 deployment nem execução; não pode ocupar slot de autorização ou de effect
-proof. O builder rejeita qualquer chave com `run` ou `gate2`.
+proof. O builder exige tipos exatos em todos os campos dos facts (hex de 40 com
+`fullmatch`, `introducing_pull_request` inteiro positivo ou `null`,
+`present_in_w1_gate_tree` booleano) — objetos, listas ou strings nessas
+posições são recusados antes de existir envelope — e, como defesa adicional,
+percorre o envelope pronto e recusa qualquer chave `run`, `run_*` ou
+`*gate2*` (exceto o campo declarativo `authority.same_run`).
 
 ### 11.1 O que a resolução Git prova (fatos verificados em 2026-09-07)
 

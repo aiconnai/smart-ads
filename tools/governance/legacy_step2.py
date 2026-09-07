@@ -232,28 +232,42 @@ def resolve_legacy_step2_facts(
 # ---------------------------------------------------------------------------
 
 
+def _require_hex40(value: Any, where: str, key: str) -> None:
+    """Exact type + fullmatch: `str` only, 40 lowercase hex, no trailing newline
+    (`re.match` with `$` would accept one)."""
+    if not isinstance(value, str) or not _HEX40.fullmatch(value):
+        raise ValueError(f"{where}: {key} must be a string of 40 lowercase hex, got {value!r}")
+
+
 def _validate_path_evidence(evidence: dict[str, Any], expected_path: str, where: str) -> None:
     if evidence.get("path") != expected_path:
         raise ValueError(f"{where}: path must be exactly {expected_path!r}")
-    if not _HEX40.match(str(evidence.get("git_blob_oid"))):
-        raise ValueError(f"{where}: git_blob_oid must be 40 lowercase hex")
-    if not _SHA256_PREFIXED.match(str(evidence.get("file_content_sha256"))):
+    _require_hex40(evidence.get("git_blob_oid"), where, "git_blob_oid")
+    digest = evidence.get("file_content_sha256")
+    if not isinstance(digest, str) or not _SHA256_PREFIXED.fullmatch(digest):
         raise ValueError(f"{where}: file_content_sha256 must be 'sha256:<64 hex>'")
     byte_length = evidence.get("byte_length")
     if not isinstance(byte_length, int) or isinstance(byte_length, bool) or byte_length <= 0:
         raise ValueError(f"{where}: byte_length must be an int > 0")
     for key in ("introduced_by_commit", "last_modified_by_commit"):
-        if not _HEX40.match(str(evidence.get(key))):
-            raise ValueError(f"{where}: {key} must be 40 lowercase hex")
-    if evidence.get("present_in_w1_gate_tree"):
-        if not _HEX40.match(str(evidence.get("w1_gate_tree_blob_oid"))):
-            raise ValueError(
-                f"{where}: w1_gate_tree_blob_oid must be 40 lowercase hex when "
-                "present_in_w1_gate_tree is True"
-            )
+        _require_hex40(evidence.get(key), where, key)
+    pull_request = evidence.get("introducing_pull_request")
+    if pull_request is not None and (
+        isinstance(pull_request, bool) or not isinstance(pull_request, int) or pull_request <= 0
+    ):
+        raise ValueError(
+            f"{where}: introducing_pull_request must be a positive int or null, got {pull_request!r}"
+        )
+    present = evidence.get("present_in_w1_gate_tree")
+    if present is not True and present is not False:
+        raise ValueError(
+            f"{where}: present_in_w1_gate_tree must be exactly true or false, got {present!r}"
+        )
+    if present is True:
+        _require_hex40(evidence.get("w1_gate_tree_blob_oid"), where, "w1_gate_tree_blob_oid")
     elif evidence.get("w1_gate_tree_blob_oid") is not None:
         raise ValueError(
-            f"{where}: w1_gate_tree_blob_oid must be null when present_in_w1_gate_tree is False"
+            f"{where}: w1_gate_tree_blob_oid must be null when present_in_w1_gate_tree is false"
         )
 
 
@@ -269,6 +283,28 @@ _AUTHORITY_BLOCK: dict[str, Any] = {
     "execution": None,
     "slot_eligibility": "legacy_provenance_only",
 }
+
+
+_FORBIDDEN_KEY_NAMES = {"run", "run_context", "run_id"}
+
+
+def _reject_run_or_gate2_keys(value: Any, path: str = "$") -> None:
+    """RUNBOOK §11: the envelope never references a run context or a Gate-2
+    receipt. Walk every mapping and list; refuse any key containing 'gate2' or
+    named/prefixed 'run'/'run_' — except the declarative `same_run` flag of the
+    authority block, which is the ADR-required statement that no same-run
+    authority exists."""
+    if isinstance(value, dict):
+        for key, child in value.items():
+            lowered = str(key).lower()
+            if "gate2" in lowered or lowered in _FORBIDDEN_KEY_NAMES or lowered.startswith("run_"):
+                raise ValueError(
+                    f"build_legacy_step2_evidence: forbidden run/gate2 key {key!r} at {path}"
+                )
+            _reject_run_or_gate2_keys(child, f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_run_or_gate2_keys(child, f"{path}[{index}]")
 
 
 def _validate_resolved_baseline(facts: dict[str, Any]) -> None:
@@ -341,6 +377,7 @@ def _validate_readiness_and_authorization(readiness: dict, authorization: dict) 
 
 
 def _validate_w1_gate_and_wave1(w1_gate: dict, wave1: dict) -> None:
+    _require_hex40(w1_gate.get("sha"), "build_legacy_step2_evidence", "w1_gate.sha")
     if w1_gate.get("sha") != W1_GATE_MERGE_SHA:
         raise ValueError(
             f"build_legacy_step2_evidence: w1_gate.sha must equal {W1_GATE_MERGE_SHA!r}, "
@@ -356,11 +393,15 @@ def _validate_w1_gate_and_wave1(w1_gate: dict, wave1: dict) -> None:
 
     for label in ("W1A", "W1B-G", "W1B-P"):
         merge = wave1[label]
-        if not isinstance(merge, dict) or not _HEX40.match(str(merge.get("sha"))):
+        if not isinstance(merge, dict):
             raise ValueError(
-                f"build_legacy_step2_evidence: wave1_protected_merges[{label!r}].sha "
-                "must be 40 lowercase hex"
+                f"build_legacy_step2_evidence: wave1_protected_merges[{label!r}] must be an object"
             )
+        _require_hex40(
+            merge.get("sha"),
+            "build_legacy_step2_evidence",
+            f"wave1_protected_merges[{label!r}].sha",
+        )
         expected_sha = _DEFAULT_WAVE1_MERGES[label]
         if merge["sha"] != expected_sha:
             raise ValueError(
@@ -440,7 +481,7 @@ def build_legacy_step2_evidence(
     _validate_w1_gate_and_wave1(w1_gate, wave1)
     _validate_evidence_scalars(key_registry_snapshot_locator, signer_key_id, resolved_at_utc)
 
-    return {
+    envelope = {
         "$schema": "smart_ads/legacy_step2_implementation_evidence/v1",
         "legacy_source_identity": copy.deepcopy(_LEGACY_SOURCE_IDENTITY),
         "required_state": LEGACY_STATE,
@@ -457,3 +498,5 @@ def build_legacy_step2_evidence(
             "key_id": signer_key_id,
         },
     }
+    _reject_run_or_gate2_keys(envelope)
+    return envelope

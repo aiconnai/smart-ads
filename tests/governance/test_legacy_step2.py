@@ -493,6 +493,75 @@ def test_build_legacy_step2_evidence_rejects_unbound_or_divergent_baseline(mutat
     assert "resolved_baseline" in str(ei.value)
 
 
+_NESTED_RUN_OBJECT = {"run_context_locator": {"gate2_receipt_locator": "unexpected"}}
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda f: f["readiness_evidence"].update(introducing_pull_request=_NESTED_RUN_OBJECT),
+        lambda f: f["readiness_evidence"].update(introducing_pull_request=[18]),
+        lambda f: f["readiness_evidence"].update(introducing_pull_request="18"),
+        lambda f: f["readiness_evidence"].update(introducing_pull_request=True),
+        lambda f: f["readiness_evidence"].update(introducing_pull_request=0),
+        lambda f: f["authorization_record"].update(introducing_pull_request=-19),
+        lambda f: f["readiness_evidence"].update(present_in_w1_gate_tree="false"),
+        lambda f: f["readiness_evidence"].update(present_in_w1_gate_tree=1),
+        lambda f: f["readiness_evidence"].update(present_in_w1_gate_tree=_NESTED_RUN_OBJECT),
+        lambda f: f["authorization_record"].update(present_in_w1_gate_tree=None),
+        lambda f: f["authorization_record"].update(present_in_w1_gate_tree=0),
+        lambda f: f["readiness_evidence"].update(
+            git_blob_oid=f["readiness_evidence"]["git_blob_oid"] + "\n"),
+        lambda f: f["readiness_evidence"].update(introduced_by_commit=["c" * 40]),
+        lambda f: f["w1_gate"].update(sha=legacy_step2.W1_GATE_MERGE_SHA + "\n"),
+        lambda f: f["wave1_protected_merges"]["W1A"].update(
+            sha=legacy_step2._DEFAULT_WAVE1_MERGES["W1A"] + "\n"),
+    ],
+    ids=["pr-object", "pr-list", "pr-string", "pr-bool", "pr-zero", "pr-negative",
+         "presence-string", "presence-int", "presence-object", "presence-null", "presence-zero",
+         "blob-newline", "commit-list", "w1gate-newline", "wave1-newline"],
+)
+def test_build_legacy_step2_evidence_rejects_inexact_field_types(mutator) -> None:
+    """H2 (review, Medium): exact types only. RED on 01d8056: pr-object, pr-list,
+    pr-string, pr-bool, pr-zero, pr-negative, presence-string, presence-int,
+    presence-object, blob-newline, w1gate-newline and wave1-newline all build
+    (presence-null/presence-zero/commit-list already fail there — PASS-on-base, declared)."""
+    facts = _valid_facts()
+    mutator(facts)
+    with pytest.raises(ValueError):
+        legacy_step2.build_legacy_step2_evidence(**{**_build_kwargs(), "facts": facts})
+
+
+def test_nested_run_or_gate2_object_never_reaches_the_envelope() -> None:
+    """H2: an object carrying run/Gate-2 keys in a scalar position must be refused
+    BEFORE any envelope exists (RED on 01d8056: it was copied into the envelope)."""
+    facts = _valid_facts()
+    facts["authorization_record"]["introducing_pull_request"] = _NESTED_RUN_OBJECT
+    with pytest.raises(ValueError) as ei:
+        legacy_step2.build_legacy_step2_evidence(**{**_build_kwargs(), "facts": facts})
+    assert "introducing_pull_request" in str(ei.value)
+
+
+@pytest.mark.parametrize(
+    "envelope,forbidden",
+    [
+        ({"run_context": {}}, "run_context"),
+        ({"integrity": {"run_id": "x"}}, "run_id"),
+        ({"authority": {"gate2_receipt_locator": {}}}, "gate2_receipt_locator"),
+        ({"items": [{"ok": 1}, {"Gate2Ref": 1}]}, "Gate2Ref"),
+    ],
+)
+def test_reject_run_or_gate2_keys_walks_the_whole_value(envelope, forbidden) -> None:
+    with pytest.raises(ValueError) as ei:
+        legacy_step2._reject_run_or_gate2_keys(envelope)
+    assert forbidden in str(ei.value)
+
+
+def test_reject_run_or_gate2_keys_allows_the_declarative_same_run() -> None:
+    legacy_step2._reject_run_or_gate2_keys({"authority": dict(legacy_step2._AUTHORITY_BLOCK)})
+    legacy_step2._reject_run_or_gate2_keys(legacy_step2.build_legacy_step2_evidence(**_build_kwargs()))
+
+
 @pytest.mark.parametrize("label", ["W1A", "W1B-G", "W1B-P"])
 def test_build_legacy_step2_evidence_rejects_wrong_wave1_sha(label: str) -> None:
     """Each wave1_protected_merges[label].sha must equal the ADR/legacy-pinned
