@@ -349,7 +349,86 @@ Publicação: um único PR com os três cell-objects novos (registry época 2, r
 context, delivery mode) e os JSON de params (sem chaves privadas), seguindo a
 seção 7 — aberto como PR #11 (`governance/run-context-delivery-mode-artifacts`). Merge exige autorização humana literal. Após o merge, o próximo passo
 é a etapa 3 do `PATH-TO-GATE3.md` (`legacy_step2_implementation_evidence/v1`),
-fora do escopo deste runbook.
+coberta na seção 11.
+
+## 11. `legacy_step2_implementation_evidence/v1` — etapa 3 do `PATH-TO-GATE3.md`
+
+Contrato (ADR L2412-2426, L3159-3161, perfil P1 L3549, domínio
+`SMART-ADS:LEGACY-STEP2-EVIDENCE:V1\n`, signer "legacy-evidence verifier",
+`H / Git resolution`): evidência histórica **não autorizante**. Resolve as
+identidades Git exatas e a proveniência de merge protegido de
+`DOCUMENTATION/IBVI_ADS_STEP2_READINESS_EVIDENCE.md` e
+`DOCUMENTATION/IBVI_ADS_STEP2_AUTHORIZATION.md` em
+`mbras-tech/mbras-campaigns@d26c73d8…`, exige o estado
+`STEP2_IMPLEMENTATION_AUTHORIZED_RUNTIME_BLOCKED` e vincula o merge W1-GATE
+`25cc756c5f46db9ee67f17844196c4301c977ad6`. Não carrega run context, receipt
+do Gate 2, expiração, nonce, reserva, credencial, chamada a provedor,
+deployment nem execução; não pode ocupar slot de autorização ou de effect
+proof. O builder rejeita qualquer chave com `run` ou `gate2`.
+
+### 11.1 O que a resolução Git prova (fatos verificados em 2026-09-07)
+
+| Documento | Blob em `d26c73d` | sha256 | Introduzido por | Último toque | Presente na árvore do W1-GATE? |
+|---|---|---|---|---|---|
+| `IBVI_ADS_STEP2_READINESS_EVIDENCE.md` | `fdf11262…` | `07ec7acb…` | `25cc756c` (squash do PR #18, `operator/w1-gate-step2-readiness-v1` → `main`) | `8ad119fc` | sim, com blob **diferente** (`08049728…`) |
+| `IBVI_ADS_STEP2_AUTHORIZATION.md` | `ea1cce5d…` | `f4cb8999…` | `8ad119fc` (squash do PR #19, `governance/step2-activation-v1` → `main`) | `8ad119fc` | **não** |
+
+O estado exigido aparece no readiness; o registro de autorização traz
+`**Decision:** Authorized`. O artefato registra os dois fatos como estão: o
+merge W1-GATE é vinculado por ser o que o ADR pina, **e** a proveniência do
+registro de autorização é o merge `8ad119fc`, posterior. Isso fecha o achado
+v16-history-001 (a frase do ADR "proveniência de ambos" era imprecisa) sem
+reescrever o ADR: a evidência diz a verdade e o verificador a lê.
+
+Todos os SHAs pinados (`d26c73d`, `25cc756c`, W1A `b4d4537f`, W1B-G `020d3e0c`,
+W1B-P `a26f055d`, os dois caminhos e o estado) são **constantes do builder**,
+não parâmetros: facts divergentes falham.
+
+### 11.2 Registry época 3 — habilitar `legacy_step2_evidence_resolve`
+
+Mesmo padrão da seção 8: nova registry aditiva, mesmas chaves, `epoch: 3`,
+acrescentando ao trust anchor a ação `legacy_step2_evidence_resolve` para
+`smart_ads/legacy_step2_implementation_evidence/v1`. Assinada pelo anchor,
+verificada, `store-put`; o locator impresso é o `key_registry_snapshot_locator`
+da seção 11.4. A época 2 permanece como snapshot histórico do run context e da
+decisão de entrega.
+
+### 11.3 Resolver os fatos (offline, só `git`)
+
+```bash
+python3 -m tools.governance.cli resolve-legacy-step2 \
+  --legacy-repo <clone local de mbras-tech/mbras-campaigns> \
+  --baseline d26c73d8508c7c3d43161fe36a80c44a46bf0f2d \
+  --out facts.json
+```
+
+Compare os valores com a tabela 11.1 antes de prosseguir. O comando não usa
+rede; exige que o clone contenha o commit `d26c73d`.
+
+### 11.4 Build + assinar (anchor) + verificar + store-put
+
+```bash
+python3 -m tools.governance.cli build-legacy-step2-evidence \
+  --params params_legacy_step2.json --out legacy_step2_unsigned.json
+python3 -m tools.governance.cli sign \
+  --schema legacy_step2_implementation_evidence/v1 \
+  --key trust-anchor.pem \
+  --in legacy_step2_unsigned.json --out legacy_step2_signed.json
+python3 -m tools.governance.cli verify \
+  --schema legacy_step2_implementation_evidence/v1 \
+  --pubkey-raw-base64 <trust-anchor raw pubkey base64> \
+  --in legacy_step2_signed.json
+python3 -m tools.governance.cli store-put \
+  --root docs/governance/cell-objects --in legacy_step2_signed.json
+```
+
+`params_legacy_step2.json` contém exatamente: `facts_path` (ou `facts`
+inline), `resolved_at_utc` (instante da construção efetiva),
+`key_registry_snapshot_locator` (época 3), `signer_key_id` (anchor).
+
+Publicação: um PR com a registry época 3, a evidência e os params (sem chaves
+privadas), seção 7. Merge com autorização humana literal. Próximo passo após
+o merge: etapa 4 (`decomposition_manifest/v1`), fora deste runbook.
 
 ## Premissas (assunções explícitas)
 
@@ -387,6 +466,14 @@ fora do escopo deste runbook.
   assumido como a chave do trust anchor, habilitada por `run_context_initialize`
   na registry época 2. Se um dia existir uma chave dedicada de inicialização,
   basta uma nova época de registry.
+- **Signer do `legacy_step2_implementation_evidence/v1` = chave do trust
+  anchor** (papel "legacy-evidence verifier"), habilitada por
+  `legacy_step2_evidence_resolve` na registry época 3 — mesma lógica do run
+  initializer. **Forma do envelope**: a ADR descreve o conteúdo em prosa
+  (L2418-2426) sem JSON de exemplo; os nomes de membro (`readiness_evidence`,
+  `authorization_record`, `w1_gate_protected_merge_sha`,
+  `wave1_protected_merges`, `authority`) são deste toolkit. Os merges Wave-1
+  vêm do próprio readiness legado, não da ADR, e ficam pinados no builder.
 - **Bump de época da registry é aditivo**: a época 1 continua resolvível e
   válida como snapshot histórico dos artefatos que a referenciam (receipt do
   Gate 2, policy, evidência de merge). Verificação `E` no momento de um efeito

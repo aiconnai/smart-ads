@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from tools.governance import artifacts, p1
+from tools.governance import artifacts, legacy_step2, p1
 from tools.governance.jcs import canonicalize, loads_strict
 from tools.governance.locator import Store, validate_locator
 
@@ -295,6 +295,41 @@ def cmd_build_delivery_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_resolve_legacy_step2(args: argparse.Namespace) -> int:
+    kwargs: dict[str, Any] = {}
+    if args.w1_gate_sha is not None:
+        kwargs["w1_gate_sha"] = args.w1_gate_sha
+    if args.wave1_merges is not None:
+        kwargs["wave1_merges"] = _read_json_file(args.wave1_merges)
+    facts = legacy_step2.resolve_legacy_step2_facts(
+        Path(args.legacy_repo), args.baseline, **kwargs
+    )
+    info = _write_json_file(args.out, facts)
+    _print_json(info)
+    return 0
+
+
+def cmd_build_legacy_step2_evidence(args: argparse.Namespace) -> int:
+    params = _read_json_file(args.params)
+    if "facts" in params:
+        facts = params["facts"]
+    elif "facts_path" in params:
+        facts = _read_json_file(params["facts_path"])
+    else:
+        raise ValueError(
+            "build-legacy-step2-evidence: params must contain either 'facts' or 'facts_path'"
+        )
+    evidence = legacy_step2.build_legacy_step2_evidence(
+        facts=facts,
+        resolved_at_utc=params["resolved_at_utc"],
+        key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
+        signer_key_id=params["signer_key_id"],
+    )
+    info = _write_json_file(args.out, evidence)
+    _print_json(info)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m tools.governance.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -391,6 +426,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_delivery.add_argument("--params", required=True)
     p_delivery.add_argument("--out", required=True)
     p_delivery.set_defaults(func=cmd_build_delivery_mode)
+
+    p_resolve_legacy = sub.add_parser("resolve-legacy-step2")
+    p_resolve_legacy.add_argument("--legacy-repo", required=True)
+    p_resolve_legacy.add_argument("--baseline", required=True)
+    p_resolve_legacy.add_argument(
+        "--w1-gate-sha",
+        default=None,
+        help=(
+            "Override the W1-GATE protected-merge SHA used to resolve ancestry and "
+            "tree presence. Defaults to the real ADR-pinned constant; only meant to "
+            "be overridden by tests against a fixture repo."
+        ),
+    )
+    p_resolve_legacy.add_argument(
+        "--wave1-merges",
+        default=None,
+        help=(
+            "Path to a JSON object {'W1A':sha,'W1B-G':sha,'W1B-P':sha} overriding the "
+            "wave-1 protected-merge SHAs. Defaults to the real ADR-pinned constants; "
+            "only meant to be overridden by tests against a fixture repo."
+        ),
+    )
+    p_resolve_legacy.add_argument("--out", required=True)
+    p_resolve_legacy.set_defaults(func=cmd_resolve_legacy_step2)
+
+    p_build_legacy = sub.add_parser("build-legacy-step2-evidence")
+    p_build_legacy.add_argument("--params", required=True)
+    p_build_legacy.add_argument("--out", required=True)
+    p_build_legacy.set_defaults(func=cmd_build_legacy_step2_evidence)
 
     return parser
 
