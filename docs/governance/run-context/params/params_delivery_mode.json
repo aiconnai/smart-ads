@@ -1,0 +1,36 @@
+{
+  "gate2_receipt_locator": {
+    "$schema": "smart_ads/artifact_locator/v1",
+    "artifact_type": "smart_ads/gate2_approval_receipt/v1",
+    "content_digest": "sha256:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0",
+    "serialization": "rfc8785-json",
+    "store_kind": "cell_immutable_object",
+    "object_ref": "cell-object:sha256:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0"
+  },
+  "approved_adr_git_identity": {
+    "commit_sha": "a3f19ef668748c64c5c679710c231426c5e05f6a",
+    "file_content_sha256": "sha256:239b53e0af44c176b78c363dc271c9fd882910bd4ab2ffb6844cb8fb2458640e",
+    "git_blob_oid": "a4a8c06b44e929b3562336dff86b61a55e10f79f",
+    "path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+    "repository": "aiconnai/smart-ads"
+  },
+  "run_context_locator": {
+    "$schema": "smart_ads/artifact_locator/v1",
+    "artifact_type": "smart_ads/migration_run_context/v1",
+    "content_digest": "sha256:e00667aeac303c63695180ebfba8539b99f80734ae001b0313d45129ca5f3a38",
+    "object_ref": "cell-object:sha256:e00667aeac303c63695180ebfba8539b99f80734ae001b0313d45129ca5f3a38",
+    "serialization": "rfc8785-json",
+    "store_kind": "cell_immutable_object"
+  },
+  "decided_by_principal_ref": "principal:ronaldo",
+  "decided_at_utc": "2026-09-06T15:25:28Z",
+  "key_registry_snapshot_locator": {
+    "$schema": "smart_ads/artifact_locator/v1",
+    "artifact_type": "smart_ads/key_authorization_registry/v1",
+    "content_digest": "sha256:0a65b123f05234f563f4fa65f5fdb2354e58286fd98dabda727dccb754a87fdf",
+    "object_ref": "cell-object:sha256:0a65b123f05234f563f4fa65f5fdb2354e58286fd98dabda727dccb754a87fdf",
+    "serialization": "rfc8785-json",
+    "store_kind": "cell_immutable_object"
+  },
+  "signer_key_id": "key:ed25519:55e6ef88b81ba5292af43a567a83b2cdae090e1e8f00caf9e6832733d01dd92a"
+}

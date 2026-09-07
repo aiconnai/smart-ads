@@ -1,0 +1,16 @@
+{
+  "gate2_receipt_locator": {
+    "$schema": "smart_ads/artifact_locator/v1",
+    "artifact_type": "smart_ads/gate2_approval_receipt/v1",
+    "content_digest": "sha256:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0",
+    "serialization": "rfc8785-json",
+    "store_kind": "cell_immutable_object",
+    "object_ref": "cell-object:sha256:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0"
+  },
+  "run_id": "run:gate2:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0:1",
+  "tenant_ref": "tenant:mbras",
+  "cell_ref": "cell:smart-ads-migration",
+  "run_initializer_key_id": "key:ed25519:2d20788f9a2b6ede1b1ba78dc81ebabfb21e52a2b5d3ba16df1466827757d60e",
+  "delivery_decision_principal": "principal:ronaldo",
+  "delivery_signer_key_id": "key:ed25519:55e6ef88b81ba5292af43a567a83b2cdae090e1e8f00caf9e6832733d01dd92a"
+}
