@@ -12,6 +12,14 @@ sob comando explícito do humano). Todas as operações Ed25519 usam o
 
 ## 0. Pré-requisitos e o que ainda bloqueia
 
+> **Estado em 2026-09-06.** Os itens abaixo descrevem o bloqueio que existia
+> em 2026-09-03 e são mantidos como registro. Desde 2026-09-04: `main` está
+> protegida (PR obrigatório, check `pytest` obrigatório, `enforce_admins`),
+> o repositório é público, e o Gate 2 foi concedido — `gate2_approval_receipt/v1`
+> em `cell-object:sha256:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0`,
+> vinculado ao merge protegido `a3f19ef668748c64c5c679710c231426c5e05f6a`.
+> As seções 1–7 estão concluídas; o caminho continua nas seções 8–10.
+
 - `main` do repositório **não está protegida** (plano GitHub Free no momento
   desta implementação). A decisão de proteger `main` foi **adiada** por
   decisão humana — não é uma tarefa deste toolkit.
@@ -203,6 +211,146 @@ python3 -m tools.governance.cli store-put \
 3. Merge e ativação do Gate 2 exigem autorização humana literal — nenhum
    comando deste toolkit avança o run automaticamente após `store-put`.
 
+---
+
+# Pós-Gate 2 — etapas 1 e 2 do `docs/governance/PATH-TO-GATE3.md`
+
+As seções 8–10 cobrem `migration_run_context/v1` (ADR L2891-2893, perfil P1
+`SMART-ADS:RUN-CONTEXT:V1\n`, signer "run initializer") e
+`delivery_mode_decision_receipt/v1` (ADR L2895-2900, perfil P1
+`SMART-ADS:DELIVERY-MODE:V1\n`, signer "delivery decision owner"). Ambos são
+`H` na tabela de perfis: validade histórica de emissão, revalidada com `E`
+antes de qualquer efeito. Nenhum deles chama rede. **Não** avançam para Gate 3,
+chamadas ao vivo nem implementação do gateway.
+
+## 8. Registry época 2 — habilitar as ações do run
+
+A registry época 1 (`cell-object:sha256:4b0da88a…`) autoriza apenas
+`registry_issue`, `policy_issue`, `merge_evidence_issue` (trust anchor) e
+`gate2_approve` (operador). Os dois artefatos novos exigem ações próprias, e a
+ADR (L2768-2778) manda que cada artefato assinado referencie exatamente uma
+snapshot imutável cuja entrada permita o par `(schema, action)`. Logo a
+primeira etapa é uma **nova** registry, aditiva, com `epoch: 2`:
+
+| Entrada | Ação nova | Schema |
+|---|---|---|
+| `principal:smart-ads-trust-anchor` (chave do trust anchor) | `run_context_initialize` | `smart_ads/migration_run_context/v1` |
+| `principal:ronaldo` (chave do operador) | `delivery_mode_decide` | `smart_ads/delivery_mode_decision_receipt/v1` |
+
+Regras: mesmas chaves e mesmos `key_id` da época 1 (não gerar chave nova);
+`epoch` estritamente maior; a época 1 permanece no store como proveniência
+histórica dos artefatos do Gate 2 e **não** é apagada nem reescrita.
+
+```bash
+python3 -m tools.governance.cli build-registry \
+  --params params_registry_epoch2.json --out registry_epoch2_unsigned.json
+python3 -m tools.governance.cli sign \
+  --schema key_authorization_registry/v1 \
+  --key trust-anchor.pem \
+  --in registry_epoch2_unsigned.json --out registry_epoch2_signed.json
+python3 -m tools.governance.cli verify \
+  --schema key_authorization_registry/v1 \
+  --pubkey-raw-base64 <trust-anchor raw pubkey base64> \
+  --in registry_epoch2_signed.json
+python3 -m tools.governance.cli store-put \
+  --root docs/governance/cell-objects --in registry_epoch2_signed.json
+```
+
+Guarde o locator impresso: ele é o `key_registry_snapshot_locator` das seções
+9 e 10.
+
+Estado: **executado em 2026-09-06**; snapshot época 2 =
+`cell-object:sha256:0a65b123f05234f563f4fa65f5fdb2354e58286fd98dabda727dccb754a87fdf`.
+
+## 9. `migration_run_context/v1` — build + assinar (run initializer) + verificar + store-put
+
+### 9.1 Identidade do run (convenção vigente — não criar uma segunda)
+
+| Campo | Valor | Derivação |
+|---|---|---|
+| `tenant_ref` | `tenant:mbras` | prefixo `tenant:` + o campo `tenant` das entradas da registry (`"mbras"`), mesmo padrão de `principal:<slug>` |
+| `cell_ref` | `cell:smart-ads-migration` | prefixo `cell:` + nome da célula de migração deste ADR; único cell definido |
+| `run_id` | `run:gate2:<content_digest hex do gate2_approval_receipt/v1>:<seq>` | "unique run derived from Gate 2" (tabela de perfis L3547): o run é nomeado pelo digest do receipt que o originou, mais um sequencial começando em `1` |
+| `created_at_utc` | instante da construção efetiva, UTC, `YYYY-MM-DDTHH:MM:SSZ` | nunca pré-datado nem copiado de outro artefato |
+
+Valores em vigor (run 1):
+
+- `run_id` = `run:gate2:025558333632e8b7233151d7505ebff188e04cc2d46eced03b922bdc4e1514e0:1`
+- `gate2_receipt_locator` = locator do receipt em `cell-object:sha256:025558333632…`
+- `approved_adr_git_identity` = **byte-idêntica** à do receipt (commit `a3f19ef6…`, blob `a4a8c06b…`, sha256 `239b53e0…`); o builder valida a forma, mas a igualdade com o receipt é responsabilidade de quem monta os params
+- `legacy_source_identity` = fixa (`mbras-tech/mbras-campaigns@d26c73d8…`), validada pelo builder
+- `signer_key_id` = `key_id` do trust anchor (`key:ed25519:2d20788f…`), papel "run initializer", com `run_context_initialize` na registry época 2
+- `key_registry_snapshot_locator` = snapshot época 2 (seção 8)
+
+Um segundo run sob o **mesmo** receipt (p.ex. após um rollback que exija
+novo run context) usa `:2`, nunca reutiliza `:1`. Um novo Gate 2 gera um novo
+digest e reinicia a sequência em `:1`.
+
+### 9.2 Comandos
+
+```bash
+python3 -m tools.governance.cli build-run-context \
+  --params params_run_context.json --out run_context_unsigned.json
+python3 -m tools.governance.cli sign \
+  --schema migration_run_context/v1 \
+  --key trust-anchor.pem \
+  --in run_context_unsigned.json --out run_context_signed.json
+python3 -m tools.governance.cli verify \
+  --schema migration_run_context/v1 \
+  --pubkey-raw-base64 <trust-anchor raw pubkey base64> \
+  --in run_context_signed.json
+python3 -m tools.governance.cli store-put \
+  --root docs/governance/cell-objects --in run_context_signed.json
+```
+
+`params_run_context.json` contém exatamente: `gate2_receipt_locator`,
+`approved_adr_git_identity`, `legacy_source_identity`, `tenant_ref`,
+`cell_ref`, `run_id`, `created_at_utc`, `key_registry_snapshot_locator`,
+`signer_key_id`. Chaves privadas nunca entram em params nem no repositório.
+
+Estado: **executado em 2026-09-06T15:23:44Z**; run context =
+`cell-object:sha256:e00667aeac303c63695180ebfba8539b99f80734ae001b0313d45129ca5f3a38`.
+
+## 10. `delivery_mode_decision_receipt/v1` — build + assinar (operador) + verificar + store-put
+
+Contém o locator exato do receipt do Gate 2, a identidade do ADR byte-idêntica,
+o locator do run context da seção 9 e `delivery_mode: manual`. O builder **não
+aceita** `delivery_mode` como parâmetro: o schema v1 admite apenas `manual` e
+não possui campo de evidência autônoma (ADR L2898-2899). Autoriza a identidade
+do ADR mergeada sob proteção, não a baseline legada.
+
+Signer: o humano designado (`principal:ronaldo`, chave do operador,
+`key:ed25519:55e6ef88…`) com `delivery_mode_decide` na registry época 2.
+`decided_at_utc` é o instante da construção efetiva.
+
+```bash
+python3 -m tools.governance.cli build-delivery-mode \
+  --params params_delivery_mode.json --out delivery_mode_unsigned.json
+python3 -m tools.governance.cli sign \
+  --schema delivery_mode_decision_receipt/v1 \
+  --key operator-ronaldo.pem \
+  --in delivery_mode_unsigned.json --out delivery_mode_signed.json
+python3 -m tools.governance.cli verify \
+  --schema delivery_mode_decision_receipt/v1 \
+  --pubkey-raw-base64 <operator raw pubkey base64> \
+  --in delivery_mode_signed.json
+python3 -m tools.governance.cli store-put \
+  --root docs/governance/cell-objects --in delivery_mode_signed.json
+```
+
+`params_delivery_mode.json` contém exatamente: `gate2_receipt_locator`,
+`approved_adr_git_identity`, `run_context_locator`, `decided_by_principal_ref`,
+`decided_at_utc`, `key_registry_snapshot_locator`, `signer_key_id`.
+
+Estado: **executado em 2026-09-06T15:25:28Z**; delivery mode =
+`cell-object:sha256:986200b4663893111c46522563650c7772cd2a09e394436d0ff8e271b41cd102`.
+
+Publicação: um único PR com os três cell-objects novos (registry época 2, run
+context, delivery mode) e os JSON de params (sem chaves privadas), seguindo a
+seção 7 — aberto como PR #11 (`governance/run-context-delivery-mode-artifacts`). Merge exige autorização humana literal. Após o merge, o próximo passo
+é a etapa 3 do `PATH-TO-GATE3.md` (`legacy_step2_implementation_evidence/v1`),
+fora do escopo deste runbook.
+
 ## Premissas (assunções explícitas)
 
 - **Formato de `principal_ref`**: assumido como `"principal:<slug>"`
@@ -228,3 +376,18 @@ python3 -m tools.governance.cli store-put \
 - **Identidade candidata do passo 6 é válida apenas para o SHA de merge
   específico ali listado.** Qualquer re-merge sob proteção real invalida os
   valores fixados e exige regeneração de `gate2_approval_receipt/v1`.
+- **Formato de `tenant_ref` / `cell_ref` / `run_id`** (seção 9.1): a ADR só
+  exige que o run context "binds tenant, cell" e seja "unique run derived from
+  Gate 2"; os prefixos `tenant:` / `cell:` / `run:gate2:<digest>:<seq>` são
+  convenção de trabalho deste toolkit, escolhida para espelhar
+  `principal:<slug>` e para que o `run_id` seja derivável do receipt sem
+  estado externo. Não normativos.
+- **Signer do `migration_run_context/v1` = chave do trust anchor**: a tabela
+  de perfis nomeia o papel "run initializer" sem definir uma chave própria;
+  assumido como a chave do trust anchor, habilitada por `run_context_initialize`
+  na registry época 2. Se um dia existir uma chave dedicada de inicialização,
+  basta uma nova época de registry.
+- **Bump de época da registry é aditivo**: a época 1 continua resolvível e
+  válida como snapshot histórico dos artefatos que a referenciam (receipt do
+  Gate 2, policy, evidência de merge). Verificação `E` no momento de um efeito
+  deve usar a época corrente mais alta, conforme ADR L2781-2790.
