@@ -369,7 +369,9 @@ proof. O builder exige tipos exatos em todos os campos dos facts (hex de 40 com
 `present_in_w1_gate_tree` booleano) — objetos, listas ou strings nessas
 posições são recusados antes de existir envelope — e, como defesa adicional,
 percorre o envelope pronto e recusa qualquer chave `run`, `run_*` ou
-`*gate2*` (exceto o campo declarativo `authority.same_run`).
+`*gate2*` (comparação sem distinção de caixa e com `-` normalizado para `_`;
+sufixos como `my_run_id` e palavras como `runtime` não são alvo) (exceto o
+campo declarativo `authority.same_run`).
 
 ### 11.1 O que a resolução Git prova (fatos verificados em 2026-09-07)
 

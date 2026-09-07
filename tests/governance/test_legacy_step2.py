@@ -554,6 +554,8 @@ def test_nested_run_or_gate2_object_never_reaches_the_envelope() -> None:
         ({"authority": {"gate2_receipt_locator": {}}}, "gate2_receipt_locator"),
         ({"items": [{"ok": 1}, {"Gate2Ref": 1}]}, "Gate2Ref"),
         ({"items": ({"run_id": 1},)}, "run_id"),
+        ({"run-id": 1}, "run-id"),
+        ({"Run-Context": {}}, "Run-Context"),
     ],
 )
 def test_reject_run_or_gate2_keys_walks_the_whole_value(envelope, forbidden) -> None:
@@ -565,6 +567,24 @@ def test_reject_run_or_gate2_keys_walks_the_whole_value(envelope, forbidden) -> 
 def test_reject_run_or_gate2_keys_allows_the_declarative_same_run() -> None:
     legacy_step2._reject_run_or_gate2_keys({"authority": dict(legacy_step2._AUTHORITY_BLOCK)})
     legacy_step2._reject_run_or_gate2_keys(legacy_step2.build_legacy_step2_evidence(**_build_kwargs()))
+
+
+def test_reject_run_or_gate2_keys_allows_same_run_only_as_an_exact_key() -> None:
+    """M2: `same_run` is an explicit allowlist entry (`_ALLOWED_KEY_NAMES`), not
+    an accident of the predicate. `{"same_run": False}` is allowed (it is the
+    exact allowlisted key). NOTE: the coordinator's spec also asked to assert
+    `{"same_run_id": 1}` is refused, "only if your predicate refuses it" — it
+    does not: `same_run_id` matches none of `_FORBIDDEN_KEY_NAMES`, the
+    `gate2` substring check, or the `run_` prefix check (it starts with
+    `same_`, not `run_`), and it is not in `_ALLOWED_KEY_NAMES` either, so it
+    silently passes through both before and after this fix, unchanged. Per
+    the coordinator's stated fallback, that half is replaced with
+    `{"same-run": False}` passing after hyphen normalization — the allowlist
+    check normalizes `-` to `_` before comparing, exactly like the forbidden
+    check does, so the hyphenated spelling of the exact allowlisted key is
+    also allowed."""
+    legacy_step2._reject_run_or_gate2_keys({"same_run": False})
+    legacy_step2._reject_run_or_gate2_keys({"same-run": False})
 
 
 @pytest.mark.parametrize("label", ["W1A", "W1B-G", "W1B-P"])

@@ -286,17 +286,24 @@ _AUTHORITY_BLOCK: dict[str, Any] = {
 
 
 _FORBIDDEN_KEY_NAMES = {"run", "run_context", "run_id"}
+_ALLOWED_KEY_NAMES = frozenset({"same_run"})
 
 
 def _reject_run_or_gate2_keys(value: Any, path: str = "$") -> None:
     """RUNBOOK §11: the envelope never references a run context or a Gate-2
     receipt. Walk every mapping and list/tuple/set; refuse any key containing
-    'gate2' or named/prefixed 'run'/'run_' — except the declarative `same_run`
-    flag of the authority block, which is the ADR-required statement that no
-    same-run authority exists."""
+    'gate2' or named/prefixed 'run'/'run_' — hyphens are normalized to
+    underscores before the check (so `run-id`/`Run-Context` are refused too)
+    — except the keys in `_ALLOWED_KEY_NAMES`, an explicit allowlist for the
+    declarative `same_run` flag of the authority block, which is the
+    ADR-required statement that no same-run authority exists. A suffix like
+    `my_run_id` or a word like `runtime`/`rerun` is not a match, by design."""
     if isinstance(value, dict):
         for key, child in value.items():
-            lowered = str(key).lower()
+            lowered = str(key).lower().replace("-", "_")
+            if lowered in _ALLOWED_KEY_NAMES:
+                _reject_run_or_gate2_keys(child, f"{path}.{key}")
+                continue
             if "gate2" in lowered or lowered in _FORBIDDEN_KEY_NAMES or lowered.startswith("run_"):
                 raise ValueError(
                     f"build_legacy_step2_evidence: forbidden run/gate2 key {key!r} at {path}"
