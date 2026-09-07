@@ -220,6 +220,19 @@ def test_resolve_legacy_step2_facts_happy_path(legacy_repo: dict) -> None:
     assert wave1["W1B-P"] == {"sha": legacy_repo["w1bp_sha"], "is_ancestor": True}
 
 
+def test_resolve_legacy_step2_facts_records_the_canonical_baseline(legacy_repo: dict) -> None:
+    """H1: the facts must carry the commit the resolver actually read, as the
+    canonical 40-hex id, even when the caller passed an abbreviated ref."""
+    facts = legacy_step2.resolve_legacy_step2_facts(
+        legacy_repo["root"], legacy_repo["baseline_sha"][:7],
+        w1_gate_sha=legacy_repo["w1_gate_sha"],
+        wave1_merges={"W1A": legacy_repo["w1a_sha"], "W1B-G": legacy_repo["w1bg_sha"],
+                      "W1B-P": legacy_repo["w1bp_sha"]},
+    )
+    assert "resolved_baseline" in facts, sorted(facts)
+    assert facts["resolved_baseline"] == {"commit_sha": legacy_repo["baseline_sha"]}
+
+
 def test_resolve_legacy_step2_facts_state_absent_when_not_present(
     legacy_repo: dict,
 ) -> None:
@@ -302,6 +315,7 @@ def test_default_wave1_merges_match_module_constants() -> None:
 
 def _valid_facts() -> dict:
     return {
+        "resolved_baseline": {"commit_sha": artifacts._LEGACY_SOURCE_IDENTITY["commit_sha"]},
         "readiness_evidence": {
             "path": legacy_step2.READINESS_PATH,
             "git_blob_oid": "a" * 40,
@@ -449,6 +463,36 @@ def test_build_legacy_step2_evidence_rejects_invalid_facts(mutator) -> None:
         legacy_step2.build_legacy_step2_evidence(**{**_build_kwargs(), "facts": facts})
 
 
+_PINNED = artifacts._LEGACY_SOURCE_IDENTITY["commit_sha"]
+
+
+@pytest.mark.parametrize(
+    "mutator",
+    [
+        lambda f: f.pop("resolved_baseline"),
+        lambda f: f.update(resolved_baseline=None),
+        lambda f: f.update(resolved_baseline=_PINNED),
+        lambda f: f.update(resolved_baseline={}),
+        lambda f: f.update(resolved_baseline={"commit_sha": "0" * 40}),
+        lambda f: f.update(resolved_baseline={"commit_sha": _PINNED + "\n"}),
+        lambda f: f.update(resolved_baseline={"commit_sha": _PINNED.upper()}),
+        lambda f: f.update(resolved_baseline={"commit_sha": _PINNED[:7]}),
+        lambda f: f.update(resolved_baseline={"commit_sha": True}),
+        lambda f: f.update(resolved_baseline={"commit_sha": {"run_id": _PINNED}}),
+    ],
+    ids=["missing", "null", "string-not-object", "empty", "other-commit", "trailing-newline",
+         "uppercase", "abbreviated", "bool", "object"],
+)
+def test_build_legacy_step2_evidence_rejects_unbound_or_divergent_baseline(mutator) -> None:
+    """H1: the builder declares the pinned identity, so the facts must prove they
+    were resolved at exactly that commit. RED on 01d8056: every case builds."""
+    facts = _valid_facts()
+    mutator(facts)
+    with pytest.raises(ValueError) as ei:
+        legacy_step2.build_legacy_step2_evidence(**{**_build_kwargs(), "facts": facts})
+    assert "resolved_baseline" in str(ei.value)
+
+
 @pytest.mark.parametrize("label", ["W1A", "W1B-G", "W1B-P"])
 def test_build_legacy_step2_evidence_rejects_wrong_wave1_sha(label: str) -> None:
     """Each wave1_protected_merges[label].sha must equal the ADR/legacy-pinned
@@ -590,6 +634,12 @@ def test_cli_resolve_build_sign_verify_store_roundtrip(
     facts = json.loads(facts_out.read_text())
     assert facts["readiness_evidence"]["state_present"] is True
 
+    # H1: the resolver reports the fixture baseline it actually read; the
+    # builder pins the real legacy commit, so — exactly like the W1-GATE/wave-1
+    # swap below — the fixture identity is replaced by the pinned constant.
+    assert facts["resolved_baseline"] == {"commit_sha": legacy_repo["baseline_sha"]}
+    facts["resolved_baseline"]["commit_sha"] = artifacts._LEGACY_SOURCE_IDENTITY["commit_sha"]
+
     # The fixture repo cannot reproduce the real ADR-pinned W1-GATE/wave-1
     # SHAs by construction (Git SHAs are content-derived), so the resolver
     # was exercised end-to-end above against fixture SHAs to prove the CLI
@@ -660,6 +710,59 @@ def test_cli_resolve_build_sign_verify_store_roundtrip(
     assert r.returncode == 0, r.stderr
     fetched = json.loads(r.stdout)
     assert fetched["$schema"] == "smart_ads/legacy_step2_implementation_evidence/v1"
+
+
+def test_cli_refuses_facts_resolved_at_a_descendant_of_the_baseline(
+    tmp_path: Path, legacy_repo: dict
+) -> None:
+    """H1 (review, High): a commit AFTER the baseline that edits the readiness
+    file — keeping the required state and every W1 ancestor — resolves fine,
+    but the builder must refuse to emit those facts under the pinned identity.
+    RED on 01d8056: build exits 0 and the envelope carries the descendant's blob."""
+    repo = legacy_repo["root"]
+    readiness = repo / legacy_step2.READINESS_PATH
+    readiness.write_text(
+        readiness.read_text(encoding="utf-8") + "\nReview-only change after the baseline.\n",
+        encoding="utf-8",
+    )
+    _git(repo, "add", legacy_step2.READINESS_PATH)
+    _git(repo, "commit", "-q", "-m", "docs: post-baseline edit that must not be pinned")
+    descendant = _git(repo, "rev-parse", "HEAD")
+    assert descendant != legacy_repo["baseline_sha"]
+
+    wave1_merges_path = tmp_path / "wave1_merges.json"
+    wave1_merges_path.write_text(json.dumps({
+        "W1A": legacy_repo["w1a_sha"], "W1B-G": legacy_repo["w1bg_sha"], "W1B-P": legacy_repo["w1bp_sha"],
+    }))
+    facts_out = tmp_path / "facts.json"
+    r = _run_cli(
+        "resolve-legacy-step2",
+        "--legacy-repo", str(repo), "--baseline", descendant,
+        "--w1-gate-sha", legacy_repo["w1_gate_sha"], "--wave1-merges", str(wave1_merges_path),
+        "--out", str(facts_out), cwd=REPO_ROOT,
+    )
+    assert r.returncode == 0, r.stderr
+    facts = json.loads(facts_out.read_text())
+    assert facts["readiness_evidence"]["last_modified_by_commit"] == descendant
+    assert facts["readiness_evidence"]["state_present"] is True
+    # Same W1-GATE/wave-1 identity swap as the roundtrip test; the resolved
+    # baseline is deliberately left as the resolver reported it.
+    facts["w1_gate"]["sha"] = legacy_step2.W1_GATE_MERGE_SHA
+    for label, sha in legacy_step2._DEFAULT_WAVE1_MERGES.items():
+        facts["wave1_protected_merges"][label]["sha"] = sha
+    facts_out.write_text(json.dumps(facts))
+
+    build_params = tmp_path / "build_params.json"
+    build_params.write_text(json.dumps({
+        "facts_path": str(facts_out), "resolved_at_utc": "2026-09-07T12:00:00Z",
+        "key_registry_snapshot_locator": REGISTRY_LOCATOR, "signer_key_id": "key:ed25519:" + "0" * 64,
+    }))
+    evidence_out = tmp_path / "evidence.json"
+    r = _run_cli("build-legacy-step2-evidence", "--params", str(build_params), "--out", str(evidence_out), cwd=REPO_ROOT)
+    assert r.returncode != 0, "builder emitted evidence for facts resolved at a descendant of the pinned baseline"
+    assert "resolved_baseline" in r.stderr and descendant in r.stderr, r.stderr
+    assert not evidence_out.exists()
+    assert facts["resolved_baseline"] == {"commit_sha": descendant}
 
 
 def test_cli_build_legacy_step2_evidence_requires_facts_or_facts_path(

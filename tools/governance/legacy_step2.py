@@ -184,12 +184,25 @@ def resolve_legacy_step2_facts(
     resolved against a fixture repo (via the overrides above) must have its
     `sha` values substituted back to the real constants before build — the
     CLI end-to-end test already does this.
+
+    The returned facts carry `resolved_baseline.commit_sha`, the canonical id
+    actually read; `build_legacy_step2_evidence` refuses facts whose resolved
+    baseline is not the pinned legacy commit.
     """
     merges = dict(_DEFAULT_WAVE1_MERGES if wave1_merges is None else wave1_merges)
 
-    # Validate the baseline resolves at all (fails fast with a clear message
-    # rather than surfacing a confusing downstream git error).
-    _run_git(legacy_repo, ["rev-parse", "--verify", f"{baseline_sha}^{{commit}}"])
+    # H1: keep the canonical 40-hex id the verification actually resolved (the
+    # caller may have passed an abbreviated ref) and use it for every read, so
+    # the facts can carry the identity the builder must compare to the pin.
+    canonical_baseline = _run_git(
+        legacy_repo, ["rev-parse", "--verify", f"{baseline_sha}^{{commit}}"]
+    ).strip()
+    if not _HEX40.fullmatch(canonical_baseline):
+        raise ValueError(
+            f"legacy_step2.resolve_legacy_step2_facts: rev-parse returned {canonical_baseline!r}, "
+            "not a 40-hex commit id"
+        )
+    baseline_sha = canonical_baseline
 
     readiness = _resolve_path_evidence(
         legacy_repo, baseline_sha, READINESS_PATH, presence_key="state_present"
@@ -206,6 +219,7 @@ def resolve_legacy_step2_facts(
     wave1_facts = _resolve_wave1_facts(legacy_repo, baseline_sha, merges)
 
     return {
+        "resolved_baseline": {"commit_sha": canonical_baseline},
         "readiness_evidence": readiness,
         "authorization_record": authorization,
         "w1_gate": {"sha": w1_gate_sha, "is_ancestor": w1_gate_is_ancestor, "type": w1_gate_type},
@@ -255,6 +269,34 @@ _AUTHORITY_BLOCK: dict[str, Any] = {
     "execution": None,
     "slot_eligibility": "legacy_provenance_only",
 }
+
+
+def _validate_resolved_baseline(facts: dict[str, Any]) -> None:
+    """H1 (review of 01d8056): the envelope declares the pinned legacy identity,
+    so the facts must prove they were resolved at exactly that commit. Facts
+    resolved anywhere else — e.g. a descendant of the baseline that edits the
+    readiness file — would otherwise be emitted under an identity they do not
+    have. Missing, malformed or divergent identities are refused."""
+    pinned = _LEGACY_SOURCE_IDENTITY["commit_sha"]
+    resolved = facts.get("resolved_baseline")
+    if not isinstance(resolved, dict):
+        raise ValueError(
+            "build_legacy_step2_evidence: facts.resolved_baseline must be an object "
+            "{'commit_sha': <40 hex>} written by resolve_legacy_step2_facts; refusing to "
+            "pin an identity the facts do not carry"
+        )
+    commit_sha = resolved.get("commit_sha")
+    if not isinstance(commit_sha, str) or not _HEX40.fullmatch(commit_sha):
+        raise ValueError(
+            "build_legacy_step2_evidence: facts.resolved_baseline.commit_sha must be 40 "
+            f"lowercase hex, got {commit_sha!r}"
+        )
+    if commit_sha != pinned:
+        raise ValueError(
+            f"build_legacy_step2_evidence: facts.resolved_baseline.commit_sha {commit_sha!r} is "
+            f"not the pinned legacy baseline {pinned!r}; refusing to emit evidence under the "
+            "pinned identity"
+        )
 
 
 def _validate_facts_top_level(facts: dict[str, Any]) -> tuple[dict, dict, dict, dict]:
@@ -389,8 +431,10 @@ def build_legacy_step2_evidence(
     Git identities of the two legacy documentation files and the W1-GATE
     protected merge. `legacy_source_identity` and `required_state` are fixed
     by construction (not caller-supplied) since the artifact pins a single
-    historical fact, not a parameterized claim.
+    historical fact, not a parameterized claim. The facts must carry
+    `resolved_baseline.commit_sha` equal to the pinned commit (H1).
     """
+    _validate_resolved_baseline(facts)
     readiness, authorization, w1_gate, wave1 = _validate_facts_top_level(facts)
     _validate_readiness_and_authorization(readiness, authorization)
     _validate_w1_gate_and_wave1(w1_gate, wave1)

@@ -382,7 +382,12 @@ reescrever o ADR: a evidência diz a verdade e o verificador a lê.
 
 Todos os SHAs pinados (`d26c73d`, `25cc756c`, W1A `b4d4537f`, W1B-G `020d3e0c`,
 W1B-P `a26f055d`, os dois caminhos e o estado) são **constantes do builder**,
-não parâmetros: facts divergentes falham.
+não parâmetros: facts divergentes falham. Isso inclui o commit resolvido: o
+resolvedor grava em `facts.resolved_baseline.commit_sha` o id canônico que
+efetivamente leu, e o builder recusa qualquer valor diferente de
+`d26c73d8508c7c3d43161fe36a80c44a46bf0f2d` — um `resolve` feito em outro
+commit (por exemplo, um descendente de `d26c73d` que edite o readiness) não
+pode ser emitido sob a identidade pinada.
 
 ### 11.2 Registry época 3 — habilitar `legacy_step2_evidence_resolve`
 
@@ -403,7 +408,9 @@ python3 -m tools.governance.cli resolve-legacy-step2 \
 ```
 
 Compare os valores com a tabela 11.1 antes de prosseguir. O comando não usa
-rede; exige que o clone contenha o commit `d26c73d`.
+rede; exige que o clone contenha o commit `d26c73d`. O `facts.json` traz
+`resolved_baseline.commit_sha`; confira que é
+`d26c73d8508c7c3d43161fe36a80c44a46bf0f2d` — o builder recusa qualquer outro.
 
 ### 11.4 Build + assinar (anchor) + verificar + store-put
 
