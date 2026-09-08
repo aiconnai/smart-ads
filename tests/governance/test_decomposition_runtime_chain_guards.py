@@ -3,27 +3,26 @@
 Registry epoch rollback and same-epoch registry fork are reachable and are covered
 here: each test fails when its own guard is deleted.
 
-Three further guards — `head cycle`, `inventory cycle` and the completeness check
-`checkpoint not on complete head chain` — are unreachable in the current design,
-so no honest test can kill them.
+`head cycle` and `inventory cycle` are additional defences. They did not fire in
+any scenario examined here, but that is not universal unreachability: it rests on
+the store validating locators and on the collision resistance of the hash. Closing
+a loop would require an object whose predecessor locator carries that object's own
+digest — computationally infeasible under those assumptions, not logically
+impossible. Enumerating graphs that are already acyclic cannot establish the
+property either. These tests therefore make no claim about the cycle guards
+themselves; they pin the guard that fires first in the scenarios below, epoch
+contiguity, and nothing here justifies removing the cycle guards.
 
-The cycle guards are unreachable because the store is content-addressed: a
-predecessor locator carries the digest of the object it names, so an object would
-have to contain its own digest to close a loop. The predecessor graph is therefore
-acyclic and the walk never revisits a node. Epoch contiguity alone does NOT prevent
-a cycle — `L0(epoch 3) -> L1(epoch 2) -> L1` satisfies `2 + 1 == 3` and would reach
-the cycle guard on the next step — so contiguity is the wrong invariant to lean on
-here, and the tests below say so explicitly.
+Note that epoch contiguity alone would NOT prevent a cycle: `L0(epoch 3) ->
+L1(epoch 2) -> L1` satisfies `2 + 1 == 3` and would reach the cycle guard on the
+next step. It is the wrong invariant to lean on.
 
-Completeness is unreachable because the signed checkpoint is constrained to
+The completeness check `checkpoint not on complete head chain` is different: it is
+unreachable structurally. The signed checkpoint is constrained to
 `0 < epoch <= floor <= tip` while the walked chain covers every epoch from the tip
 down to 1, so the checkpoint epoch is always met and a divergence is rejected by
-the specific fork check. That argument also relies on the `head rollback` guard
+the specific fork check. That argument relies on `head rollback`
 (`tip.epoch >= floor.epoch`), pinned below.
-
-The tests pin the invariants this reasoning actually depends on. They do not pin
-content-addressing, which lives in the store and not here: if that property is ever
-weakened, the cycle guards stop being redundant and nothing in this file will warn.
 """
 from __future__ import annotations
 
@@ -116,11 +115,12 @@ def test_same_epoch_registry_fork_between_head_links_rejects(world):
 def test_self_referencing_head_is_refused_before_the_cycle_guard(world):
     """A head naming itself is stopped by epoch contiguity, before the cycle guard.
 
-    Contiguity is not what makes `head cycle` unreachable — `L0(3) -> L1(2) -> L1`
-    would satisfy it and still reach the guard. Content-addressing is: an object
-    cannot carry its own digest. This pins the guard that fires in practice, and
-    the self-reference below is only expressible because the store is asked to
-    address an object built after the fact.
+    This pins the guard that fires here, and claims nothing about `head cycle`,
+    which remains an additional defence. Contiguity would not prevent a cycle on
+    its own: `L0(3) -> L1(2) -> L1` satisfies it and would reach the guard. The
+    self-reference below is only expressible because the locator is computed after
+    the fact; a real object carrying its own digest is infeasible under the store's
+    hash assumptions, which is not the same as impossible.
     """
     state = copy.deepcopy(world.objects['state'])
     state.update(epoch=2, predecessor_state_locator=world.objects['head']['current_state_locator'])
