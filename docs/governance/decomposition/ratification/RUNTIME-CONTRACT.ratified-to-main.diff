@@ -1,0 +1,16 @@
+--- docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified.md
++++ docs/governance/decomposition/RUNTIME-CONTRACT.proposed.md
+@@ -86,6 +86,13 @@
+ does not block. This is an explicit conservative proposed rule, not an inference
+ that a historical signature grants current authority.
+ 
++For that rule to hold, the verifier consumes only `historical_prerequisites`,
++which checks signatures and links over fixed step-2/Gate-2 locators. It never
++consumes `inspect_governance`, whose registry-chain observation scans the local
++working tree and, lacking any current key state, must treat every withdrawal as
++indistinguishable from a rollback. That offline observation is local reporting:
++a file present in a tree is not publication, not admission, and not authority.
++
+ ## Protected state and ordering
+ 
+ `authenticated_clock()` supplies typed closed bounds, not a request timestamp.
