@@ -1,0 +1,67 @@
+--- a/docs/adr/ADR-0001-smart-ads-read-gateway.md
++++ b/docs/adr/ADR-0001-smart-ads-read-gateway.md
+@@ -2209,9 +2209,15 @@
+ same typed release locator and content digest.
+ 
+ `inventory_digest` hashes RFC 8785 bytes of `source_inventory` excluding only
+-`inventory_digest`. `manifest_digest` hashes RFC 8785 bytes of the full
+-decomposition manifest excluding only `manifest_digest`. Declared paths and
+-inventory items are unique and sorted by raw UTF-8 identity before hashing.
++`inventory_digest`. The semantic decomposition payload is the manifest without
++its entire top-level `integrity` object. `manifest_digest` hashes RFC 8785 bytes
++of that semantic payload excluding only `manifest_digest`. After this digest
++is fixed, the signer identity and historical registry locator are added under
++`integrity`, and P1 is applied without changing its generic preimage rule.
++The semantic manifest digest, P1 content digest and signed-object locator digest
++are separate identities. A signature result cannot change `manifest_digest`.
++Declared paths and inventory items are unique and sorted by raw UTF-8 identity
++before hashing.
+ `declared_paths` is the complete canonical array of normalized repository-
+ relative paths, sorted by raw UTF-8 bytes. `declared_paths_digest` is exactly
+ `SHA-256(RFC8785(declared_paths))`; no wrapper object, glob, implicit directory,
+@@ -2250,6 +2256,45 @@
+ full byte range, raw/source digests, and file mode; `text_region` binds the
+ half-open range, raw/source digests, and selector ABI. Missing, extra, or
+ inconsistent selector fields reject.
++
++The closed selector forms are:
++- `ast_symbol`: exactly `selector_kind`, `symbol_name`, `parser_abi`,
++  `byte_range`, `raw_span_digest`, and `ast_digest`;
++- `whole_file`: exactly `selector_kind`, `byte_range`, `raw_span_digest`, and
++  `file_mode`; its range is `[0, blob_byte_length]`, its source digest is the
++  raw-span digest, and its file mode is the literal regular-file Git mode;
++- `text_region`: exactly `selector_kind`, `selector_abi`, `byte_range`, and
++  `raw_span_digest`; ABI `raw_bytes:half_open_v1`, with source digest equal to
++  the raw-span digest.
++
++An `ast_symbol` name is lexically qualified with dots. Its range disambiguates
++repeated qualified names. `python:3.12_ast_v1` requires actual CPython 3.12;
++parser-version emulation by a different minor runtime is not accepted. Parser
++build/version evidence accompanies reproduction. Decorators and source bytes
++outside selected definitions must remain covered by explicit residual regions
++when a file is partitioned. Python source bytes use UTF-8, with LF, CRLF or CR
++line boundaries converted to raw byte offsets before computing the spans.
++
++`inventory_id` is `"source-unit:" || lowercase_hex(SHA-256(RFC8785({repository,
++commit_sha, source_path, source_selector_digest})))`; the four object members
++are the exact resolved source identity and selector digest. `coverage_role` is
++one of `production_source`, `test`, `fixture`, `contract`, or `documentation`.
++The deterministic role policy chooses fixtures before tests, then Markdown
++documents, then config/YAML/JSON/SHA256 contracts, and production source last.
++
++Scope expansion uses the exact rule array `["all_exact_file_roots",
++"all_recursive_directory_blobs"]`: file roots resolve their exact blob and
++directory roots expand recursively from the fixed Git tree. These rules do not
++permit a new root, glob, local overlay or exclusion. All selected bytes of a
++partitioned file must be covered; overlap remains subject to the split-group
++and target-invariant rule above.
++
++For deferred decisions, `deferral_authority_ref` has exactly `repository`,
++`commit_sha`, `path`, `file_content_sha256`, and `section`. It cites the protected
++ADR approved for this run, with section `9.2`, and the verifier compares that
++identity to the resolved run's approved ADR identity. A producer assertion or
++unversioned paragraph is insufficient. Existing protected ADR citations remain
++historical identities; this amendment is not retroactive Gate-2 evidence.
+ 
+ Every disposition also has a normalized repository-relative `target_path` and
+ optional closed `target_selector`. Paths use `/`, contain no empty, `.`, `..`,

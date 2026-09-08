@@ -40,7 +40,7 @@ Legenda de bloqueio:
 | 1 | Run context | `migration_run_context/v1` | L + H (assinatura) |
 | 2 | Decisão de entrega | `delivery_mode_decision_receipt/v1` | L + H |
 | 3 | Evidência legada Step 2 | `legacy_step2_implementation_evidence/v1` | L (repo em `d26c73d` acessível) |
-| 4 | Manifesto de decomposição | `decomposition_manifest/v1` | L (inventário de 376 paths) |
+| 4 | Manifesto de decomposição | `decomposition_manifest/v1` | L + H (44 paths; decisões/perfil e assinatura P1) |
 | 5 | Cabeça de decomposição | `decomposition_manifest_head/v1` | L |
 | 6 | **PR 1** — packaging, schemas, registry, ProviderPort | código | L |
 | 7 | **GOV 1** — sandbox selado, MCP, governança de wheel | `sealed_sandbox_profile/v1`, `wheel_build_provenance/v1`, `wheel_boundary_report/v1`, `mcp_rejection_matrix_report/v1` | L |
@@ -62,18 +62,22 @@ Gate 4 (readiness).
 
 ## O gargalo real
 
-As etapas 1-15 são **inteiramente executáveis** com o que já existe: o toolkit de
-governança, o repositório legado em `d26c73d` (acessível, 376 paths) e o repo atual.
-Nada nelas depende da Meta.
+As etapas 1–15 não dependem da Meta. O toolkit de governança, o repositório
+legado em `d26c73d` (376 paths no total; 44 no escopo de decomposição do ADR §9.2)
+e o repo atual permitem iniciar a preparação offline. Ainda são necessários
+os builders faltantes, o fechamento de contratos e as decisões/assinaturas
+humanas de cada artefato; executável localmente não significa já implementado.
 
-O primeiro bloqueio externo verdadeiro é a etapa 16/17. Ou seja: o caminho até o Gate 3
-é trabalho de implementação, não de espera.
+O primeiro bloqueio que exige a API da Meta fica na etapa 16/17. O caminho até
+lá combina implementação local com os pontos de decisão humana já previstos.
 
 ## Observações sobre o esforço
 
-- **Etapa 4** é a mais subestimada. O `source_inventory/v1` exige, por item, um
-  `source_selector` com `parser_abi`, `byte_range`, `raw_span_digest` e `ast_digest` —
-  digest de AST por símbolo, não por arquivo. Com `coverage_assertion` exigindo
+- **Etapa 4** é a mais subestimada. O `source_inventory/v1` exige seletores
+  discriminados: `ast_symbol` vincula parser ABI, intervalo e digests de AST e
+  bytes; `whole_file` e `text_region` vinculam bytes conforme o ADR §9.2.
+  Um catálogo de símbolos pai/filho ainda não é uma seleção sem sobreposição.
+  Com `coverage_assertion` exigindo
   `unassigned_item_count: 0` e `duplicate_assignment_count: 0`, a cobertura precisa ser
   total e sem ambiguidade.
 - **Etapas 6-12** são o corpo do produto (o read gateway em si) e dominam o cronograma.
@@ -81,7 +85,8 @@ O primeiro bloqueio externo verdadeiro é a etapa 16/17. Ou seja: o caminho até
 
 ## Próximo passo concreto
 
-Emitir e assinar o `migration_run_context/v1` (etapa 1) e o
-`delivery_mode_decision_receipt/v1` (etapa 2). Os builders estão no PR #10; o
-procedimento de assinatura é o mesmo do Gate 2 — a chave privada nunca sai da máquina do
-operador.
+Atualização local de 2026-09-07: as etapas 1–3 estão materializadas no store de
+`d18ac69` (merge do PR #14). A preparação offline da etapa 4 está descrita em
+[decomposition/STEP4-PLAN.md](decomposition/STEP4-PLAN.md). O toolkit tem agora
+um builder local de candidatos, sem admissão P1. O plano registra os contratos a fechar antes de
+gerar um manifesto assinável; não publica o head da etapa 5 nem autoriza assinatura.

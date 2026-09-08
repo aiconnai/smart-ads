@@ -330,6 +330,14 @@ def cmd_build_legacy_step2_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_decomposition(args: argparse.Namespace) -> int:
+    from tools.governance.decomposition_cli import run
+
+    result, code = run(args)
+    _print_json(result)
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m tools.governance.cli")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -456,6 +464,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_legacy.add_argument("--out", required=True)
     p_build_legacy.set_defaults(func=cmd_build_legacy_step2_evidence)
 
+    from tools.governance.decomposition_cli import register
+
+    register(sub, cmd_decomposition)
     return parser
 
 
