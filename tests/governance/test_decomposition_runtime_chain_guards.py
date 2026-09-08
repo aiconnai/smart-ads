@@ -17,12 +17,14 @@ Note that epoch contiguity alone would NOT prevent a cycle: `L0(epoch 3) ->
 L1(epoch 2) -> L1` satisfies `2 + 1 == 3` and would reach the cycle guard on the
 next step. It is the wrong invariant to lean on.
 
-The completeness check `checkpoint not on complete head chain` is different: it is
-unreachable structurally. The signed checkpoint is constrained to
-`0 < epoch <= floor <= tip` while the walked chain covers every epoch from the tip
-down to 1, so the checkpoint epoch is always met and a divergence is rejected by
-the specific fork check. That argument relies on `head rollback`
-(`tip.epoch >= floor.epoch`), pinned below.
+The completeness check `checkpoint not on complete head chain` is a different case:
+the argument is structural, over epoch ordering, with no cryptographic assumption.
+It is also conditional. Completeness is only evaluated once the walk reaches epoch
+1, which requires epoch contiguity to hold at every step; given that, plus
+`head rollback` (`tip.epoch >= floor.epoch`), the chain covers every epoch from the
+tip down to 1 while the signed checkpoint sits within `0 < epoch <= floor <= tip`,
+so its epoch is always met and a divergence is rejected by the specific fork check.
+Both premises are pinned below; the claim holds while they do.
 """
 from __future__ import annotations
 
@@ -153,11 +155,13 @@ def test_self_referencing_inventory_is_refused_before_the_cycle_guard(world):
 
 
 def test_signed_checkpoint_epoch_is_always_met_by_the_walked_chain(world):
-    """The checkpoint sits within `0 < epoch <= floor <= tip`, so completeness cannot fail.
+    """A divergent checkpoint is caught by the specific fork check, not by completeness.
 
-    A divergent checkpoint is caught by the specific fork check while walking the
-    chain, never by the completeness check at genesis. That ordering is what makes
-    `checkpoint not on complete head chain` unreachable.
+    Given that epoch contiguity and `head rollback` hold, the walked chain covers
+    every epoch from the tip down to 1 and the checkpoint sits within
+    `0 < epoch <= floor <= tip`, so its epoch is always met on the way. The claim is
+    conditional on those guards, both pinned here, and does not rest on any
+    cryptographic assumption.
     """
     genesis_loc = world.store.put(world.objects['head'])
     _two_links(world, tip_registry=_registry_at(world, 4), genesis_registry=_registry_at(world, 4))
