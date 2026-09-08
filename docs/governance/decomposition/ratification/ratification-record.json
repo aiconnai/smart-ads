@@ -1,0 +1,131 @@
+{
+  "$schema": "smart_ads/decomposition_ratification_record/v1-draft-not-a-signed-envelope",
+  "purpose": "Materialize in the repository the human ratification of the proposed step-4 contracts and of all 122 per-unit dispositions, bound to the exact bytes ratified. This is a governance record, not a signed envelope, not an admission, and not an installation.",
+  "authority": "none",
+  "signable": false,
+  "ratified_at_utc": "2026-09-08T02:50:28Z",
+  "ratified_by": "principal:ronaldo",
+  "channel": "AskUserQuestion in agent session (three explicit answers)",
+  "decisions": {
+    "contract": "Ratificar como proposto (D1–D4 + suplemento v2, com as condições listadas)",
+    "dispositions": "Aceitar as 122 como recomendadas (96 approved, 26 deferred)",
+    "system_owner": "principal:ronaldo para as 122"
+  },
+  "disposition_counts": {
+    "approved": 96,
+    "deferred": 26
+  },
+  "required_owner_identity": "principal:ronaldo",
+  "bound_inputs_in_repository": {
+    "CONTRACT-PROPOSALS.md": {
+      "path": "docs/governance/decomposition/CONTRACT-PROPOSALS.md",
+      "file_content_sha256": "sha256:5f36d66c0f0c740275c2641cfef2a2088b4dc61c417f146934d162da996f9949",
+      "git_blob_oid": "bbb2c4ede931022e126168aaef1976122ecb289a",
+      "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9",
+      "ratified_sha256_matches_main": true
+    },
+    "ADR-AMENDMENT.proposed.patch": {
+      "path": "docs/governance/decomposition/ADR-AMENDMENT.proposed.patch",
+      "file_content_sha256": "sha256:31aae74cec3a5cc4f276fbec053557b426c9e53cccd0efc5d0357e80264e3053",
+      "git_blob_oid": "e2d184975bef0ca662bc15db5b543e6943549259",
+      "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9",
+      "ratified_sha256_matches_main": true
+    },
+    "ADMISSION-CONTRACT.proposed.md": {
+      "path": "docs/governance/decomposition/ADMISSION-CONTRACT.proposed.md",
+      "file_content_sha256": "sha256:ad6b8ca0342db1db2164c621223f35a641a06cc01e7ad995e29cd73da915d108",
+      "git_blob_oid": "01494142350193cb628158dc1cfc00135c557a43",
+      "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9",
+      "ratified_sha256_matches_main": true
+    },
+    "admission-contract.proposed.json": {
+      "path": "docs/governance/decomposition/admission-contract.proposed.json",
+      "file_content_sha256": "sha256:9e7d9910e61592e086abb5b6e67220a822ab9d424b56c8b139b95ebf73e55698",
+      "git_blob_oid": "b81fed2ffeb2f9161375533c6a829bef5cbdf869",
+      "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9",
+      "ratified_sha256_matches_main": true
+    },
+    "unit-review.proposed.json": {
+      "path": "docs/governance/decomposition/unit-review.proposed.json",
+      "file_content_sha256": "sha256:d04c51bd7532c7eb67fa37eac00d58145926c58306565d71015de227fb7d90ec",
+      "git_blob_oid": "c46004ba3d2b7680d2858cd2972ca8cc0a41d5af",
+      "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9",
+      "ratified_sha256_matches_main": true
+    },
+    "RUNTIME-CONTRACT.proposed.md": {
+      "ratified_bytes": {
+        "path": "docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified.md",
+        "file_content_sha256": "sha256:d260537bcccb37ef4eb61db09aab2258229fc580e1292e0dd98b9b1406c5da25",
+        "note": "exact bytes ratified at 2026-09-08T02:50:28Z, versioned so they are recoverable by path and hash"
+      },
+      "text_in_main": {
+        "path": "docs/governance/decomposition/RUNTIME-CONTRACT.proposed.md",
+        "file_content_sha256": "sha256:26061f317548841b0d3dfaec3ee1199f05d9724073162b51337d0c8a4f8193af",
+        "git_blob_oid": "08a332fc20afc256d4eabd7e23dc2f878aff9960",
+        "first_merged_in": "c99717f34e0a60ba09797b63dbdad57a3b26e7b9"
+      },
+      "ratified_sha256_matches_main": false,
+      "delta_not_ratified": {
+        "unified_diff_path": "docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified-to-main.diff",
+        "unified_diff_sha256": "sha256:cc4f69e7c8b7c515c292200ccbee4bb3bac3c29bd4b7c7b057be317ae82554c7",
+        "unified_diff": "--- docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified.md\n+++ docs/governance/decomposition/RUNTIME-CONTRACT.proposed.md\n@@ -86,6 +86,13 @@\n does not block. This is an explicit conservative proposed rule, not an inference\n that a historical signature grants current authority.\n \n+For that rule to hold, the verifier consumes only `historical_prerequisites`,\n+which checks signatures and links over fixed step-2/Gate-2 locators. It never\n+consumes `inspect_governance`, whose registry-chain observation scans the local\n+working tree and, lacking any current key state, must treat every withdrawal as\n+indistinguishable from a rollback. That offline observation is local reporting:\n+a file present in a tree is not publication, not admission, and not authority.\n+\n ## Protected state and ordering\n \n `authenticated_clock()` supplies typed closed bounds, not a request timestamp.\n",
+        "insertion_anchor": "one paragraph plus one blank line inserted immediately before the heading \"## Protected state and ordering\"",
+        "description": "main adds one paragraph, absent from the ratified text: the clarification that the verifier consumes only historical_prerequisites and never inspect_governance. Directed as fix M2 on 2026-09-08 after the ratification, merged in PR #16.",
+        "ratification_scope": "The 2026-09-08T02:50:28Z ratification covers ratified_bytes only. The delta is a later directed clarification (fix M2), merged in PR #16, and is NOT ratified by this record. Installing the contract as present in main as \"ratified\" requires an explicit decision on this delta first.",
+        "recovery": "ratified bytes = the versioned file above; equivalently, apply the unified diff in reverse to the text in main"
+      }
+    }
+  },
+  "bound_inputs_not_in_repository": {
+    "dispositions.json": {
+      "sha256": "sha256:7a9d936346ec6b81a45046912fe66bdae70711fbc769d9019e9203c12c6ed5b9",
+      "note": "pre-ratification 122-unit dispositions with null decisions; input of dispositions.ratified.json"
+    },
+    "unit-decisions.reviewed.json": {
+      "sha256": "sha256:ca19144338e93e3e0f556ee810b6576c26f32969d0cb950d5d7bee9ce079281e",
+      "note": "reviewed recommendations that the human accepted as recommended"
+    }
+  },
+  "materialized_outputs": {
+    "dispositions.ratified.json": {
+      "path": "docs/governance/decomposition/ratification/dispositions.ratified.json",
+      "sha256": "sha256:8a09c0173b80798cfd0258c93d66f4befdbd0f584bbac2747ef2f8dc3f65574c",
+      "decisions_filled": true
+    },
+    "candidate.ratified.json": {
+      "sha256": "sha256:03fba796f4b76ddc1e9d3a625101e48bced25b6595ab605831323df15a677e91",
+      "versioned": false,
+      "reason": "derived artifact, rebuilt byte-identically from dispositions.ratified.json",
+      "rebuild": "python -m tools.governance.cli build-decomposition-manifest --legacy-repo <mbras-campaigns at d26c73d> --params docs/governance/decomposition/ratification/dispositions.ratified.json --generated-at 2026-09-08T02:50:28Z --out <fresh path>",
+      "build_validation_status": "STRUCTURALLY_VALID"
+    },
+    "RUNTIME-CONTRACT.ratified.md": {
+      "path": "docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified.md",
+      "sha256": "sha256:d260537bcccb37ef4eb61db09aab2258229fc580e1292e0dd98b9b1406c5da25"
+    }
+  },
+  "conditions_explicitly_preserved": [
+    "monotonic anti-rollback floor is not reverted after post-CAS failure",
+    "CPython3.12 parser ABI required for decomposition",
+    "coherent final head/clock observation and linearizable CAS must be supplied by protected runtime",
+    "all116profile tuples checked but only six D4predicates implemented",
+    "onlygenesis manifesto admitted by proposed implementation; immutable corrections reject",
+    "Pinna18/funnel3/Google5 remain deferred",
+    "source snapshot must originate from pinned resolve_scope",
+    "no signed artifact or protected authority installation is implied"
+  ],
+  "what_this_record_does_not_do": [
+    "It does not clear any admission blocker: the three blockers are a constant in tools/governance/decomposition.py emitted for every candidate, and only the protected-runtime path can admit.",
+    "It does not install protected configuration, issue a contract inventory, or issue or sign a manifest.",
+    "It does not change the approved ADR-0001 bytes.",
+    "It carries no P1 signature and confers no authority."
+  ],
+  "remaining_authority_work_in_contract_order": [
+    "protected config installation",
+    "authenticated head/clock/checkpoint integration",
+    "signed contract inventory",
+    "signed decomposition manifest",
+    "attestation of the human decision review"
+  ],
+  "derived_from_local_record_sha256": "sha256:1623246b37ea4a06862fe183941766948db66b3d03a448c3c226e3d6166a238e"
+}
