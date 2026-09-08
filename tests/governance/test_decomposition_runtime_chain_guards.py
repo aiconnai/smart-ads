@@ -4,20 +4,30 @@ Registry epoch rollback and same-epoch registry fork are reachable and are cover
 here: each test fails when its own guard is deleted.
 
 Three further guards — `head cycle`, `inventory cycle` and the completeness check
-`checkpoint not on complete head chain` — are unreachable by construction, so no
-honest test can kill them. Both chains advance only through strictly decreasing
-contiguous epochs, so a repeated locator is refused as a skipped epoch before any
-cycle can close; and the walked head chain covers every epoch from the tip down to
-1, with the signed checkpoint constrained to `0 < epoch <= floor <= tip`, so its
-epoch is always met and rejected by the specific fork check instead. The tests
-below pin the invariants that make them redundant: if a future change removes
-epoch contiguity or the checkpoint/floor ordering, these fail and the redundant
-guards must be revisited rather than trusted.
+`checkpoint not on complete head chain` — are unreachable in the current design,
+so no honest test can kill them.
+
+The cycle guards are unreachable because the store is content-addressed: a
+predecessor locator carries the digest of the object it names, so an object would
+have to contain its own digest to close a loop. The predecessor graph is therefore
+acyclic and the walk never revisits a node. Epoch contiguity alone does NOT prevent
+a cycle — `L0(epoch 3) -> L1(epoch 2) -> L1` satisfies `2 + 1 == 3` and would reach
+the cycle guard on the next step — so contiguity is the wrong invariant to lean on
+here, and the tests below say so explicitly.
+
+Completeness is unreachable because the signed checkpoint is constrained to
+`0 < epoch <= floor <= tip` while the walked chain covers every epoch from the tip
+down to 1, so the checkpoint epoch is always met and a divergence is rejected by
+the specific fork check. That argument also relies on the `head rollback` guard
+(`tip.epoch >= floor.epoch`), pinned below.
+
+The tests pin the invariants this reasoning actually depends on. They do not pin
+content-addressing, which lives in the store and not here: if that property is ever
+weakened, the cycle guards stop being redundant and nothing in this file will warn.
 """
 from __future__ import annotations
 
 import copy
-from dataclasses import replace
 
 import pytest
 
@@ -103,11 +113,14 @@ def test_same_epoch_registry_fork_between_head_links_rejects(world):
 
 # --- invariants that make the remaining guards redundant -----------------------
 
-def test_head_chain_requires_contiguous_epochs_so_a_cycle_cannot_close(world):
-    """A repeated head locator is refused as a skipped epoch, never reaching the cycle guard.
+def test_self_referencing_head_is_refused_before_the_cycle_guard(world):
+    """A head naming itself is stopped by epoch contiguity, before the cycle guard.
 
-    This is what makes `head cycle` unreachable. If contiguity is ever relaxed,
-    this test fails and the cycle guard stops being redundant.
+    Contiguity is not what makes `head cycle` unreachable — `L0(3) -> L1(2) -> L1`
+    would satisfy it and still reach the guard. Content-addressing is: an object
+    cannot carry its own digest. This pins the guard that fires in practice, and
+    the self-reference below is only expressible because the store is asked to
+    address an object built after the fact.
     """
     state = copy.deepcopy(world.objects['state'])
     state.update(epoch=2, predecessor_state_locator=world.objects['head']['current_state_locator'])
@@ -125,8 +138,8 @@ def test_head_chain_requires_contiguous_epochs_so_a_cycle_cannot_close(world):
     assert world.runtime.cas_calls == 0
 
 
-def test_inventory_chain_requires_contiguous_epochs_so_a_cycle_cannot_close(world):
-    """Same invariant on the inventory chain, making `inventory cycle` unreachable."""
+def test_self_referencing_inventory_is_refused_before_the_cycle_guard(world):
+    """Same ordering on the inventory chain: contiguity fires before `inventory cycle`."""
     inventory = copy.deepcopy(world.objects['inventory'])
     inventory['epoch'] = 2
     signed = _sign(world, inventory, INVENTORY)
@@ -156,6 +169,18 @@ def test_signed_checkpoint_epoch_is_always_met_by_the_walked_chain(world):
         world.verify()
     assert world.runtime.cas_calls == 0
     assert genesis_loc['content_digest'] != checkpoint['head_digest']
+
+
+def test_tip_epoch_may_not_be_below_the_protected_floor(world):
+    """`head rollback` is the other premise of the completeness argument above.
+
+    Without it a tip below the floor could be walked, and the floor epoch would
+    never be met on the chain, making the completeness check reachable again.
+    """
+    world.runtime.floor = Floor(9, 'sha256:' + '9' * 64, 'v0')
+    with pytest.raises(ValueError, match='head rollback'):
+        world.verify()
+    assert world.runtime.cas_calls == 0
 
 
 def test_checkpoint_may_not_exceed_the_protected_floor(world):
