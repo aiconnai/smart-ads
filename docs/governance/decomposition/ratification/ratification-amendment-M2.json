@@ -1,0 +1,61 @@
+{
+  "$schema": "smart_ads/decomposition_ratification_amendment/v1-draft-not-a-signed-envelope",
+  "amendment_id": "M2",
+  "purpose": "Record the subsequent explicit human ratification of delta M2 and the exact resulting runtime contract, preserving the original ratification record.",
+  "authority": "none",
+  "signable": false,
+  "recorded_at_utc": "2026-09-08T19:09:28Z",
+  "timestamp_semantics": "Materialization time read from the session clock; not an asserted exact time of the user message and not an authenticated runtime timestamp.",
+  "ratified_by": "principal:ronaldo",
+  "channel": "Explicit user message in this agent conversation",
+  "decision_source": {
+    "verbatim_user_message": "do fot me: ratificar M2 e acrescentar uma emenda datada",
+    "context": "Response to the explicit question whether to ratify delta M2 cc4f69e7…54c7 and incorporate resulting runtime contract 26061f31…4f8193af, with installation and signatures separate."
+  },
+  "decision": {
+    "status": "ratified",
+    "scope": "Delta M2 identified below and its exact resulting runtime contract; additive to the prior human ratification.",
+    "does_not_repeat_prior_decisions": true
+  },
+  "repository_snapshot": {
+    "repository": "aiconnai/smart-ads",
+    "main_commit_sha": "586dcd323a65567f8b500ec4ddef289ca9c81e3f"
+  },
+  "amends": {
+    "path": "docs/governance/decomposition/ratification/ratification-record.json",
+    "file_content_sha256": "sha256:f0b9c27eee957499cf39bd951ca0373ed34327fc7670e391d58900d37de11803",
+    "git_blob_oid": "ee0233755d72ca3b84729ad654e08404f734a877",
+    "original_ratified_at_utc": "2026-09-08T02:50:28Z",
+    "original_bytes_preserved": true
+  },
+  "bound_inputs": {
+    "previously_ratified_runtime_contract": {
+      "path": "docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified.md",
+      "file_content_sha256": "sha256:d260537bcccb37ef4eb61db09aab2258229fc580e1292e0dd98b9b1406c5da25",
+      "git_blob_oid": "72c403aa9d81a5c6753943e99a9a7a4aadf0cb0e"
+    },
+    "delta_M2": {
+      "path": "docs/governance/decomposition/ratification/RUNTIME-CONTRACT.ratified-to-main.diff",
+      "file_content_sha256": "sha256:cc4f69e7c8b7c515c292200ccbee4bb3bac3c29bd4b7c7b057be317ae82554c7",
+      "git_blob_oid": "428184db285f1711c77849535dc01b32df6423c9"
+    },
+    "resulting_ratified_runtime_contract": {
+      "path": "docs/governance/decomposition/RUNTIME-CONTRACT.proposed.md",
+      "file_content_sha256": "sha256:26061f317548841b0d3dfaec3ee1199f05d9724073162b51337d0c8a4f8193af",
+      "git_blob_oid": "08a332fc20afc256d4eabd7e23dc2f878aff9960"
+    }
+  },
+  "relationship_to_original_record": "The original delta_not_ratified field describes the scope of the 2026-09-08T02:50:28Z decision and remains unchanged. This later amendment ratifies that exact delta prospectively; it does not backdate or rewrite the earlier decision.",
+  "preserved_scope": {
+    "dispositions": "The 122 dispositions, their decisions and system_owner assignments are unchanged.",
+    "conditions": "All conditions_explicitly_preserved in the original record remain in force.",
+    "historical_artifacts": "Original ratification record, original ratified runtime text and unified diff remain byte-identical."
+  },
+  "what_this_amendment_does_not_do": [
+    "It is not a signed P1 envelope or an installed admission profile.",
+    "It does not install protected configuration or integrate head, clock or checkpoint.",
+    "It does not issue or sign a contract inventory, manifest or human-review attestation.",
+    "It does not change ADR-0001, code, registries, cell-objects or CLI admission blockers.",
+    "It does not authorize commit, push, PR publication or merge."
+  ]
+}
