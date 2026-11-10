@@ -13,13 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools.governance import cli
 from tools.governance import decomposition as dec
-from tools.governance import decomposition_decisions as decisions
-from tools.governance import decomposition_scope as scope
-from tools.governance import decomposition_selectors as selectors
-from tools.governance import decomposition_cli as dcli
 from tools.governance import decomposition_governance as governance
-from tools.governance.decomposition_common import digest, source_path
+from tools.governance import decomposition_scope as scope
+from tools.governance.locator import digest, source_path
+
+decisions = dec
+selectors = dec
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -276,22 +277,23 @@ def test_governance_rejects_corrupted_stored_registry(tmp_path):
 
 def test_draft_write_is_atomic_and_refuses_existing_target(tmp_path):
     path = tmp_path/'output.json'
-    dcli._write(str(path), {'draft': True})
+    cli._write_json_file(str(path), {'draft': True}, allow_overwrite=False)
     before = path.read_bytes()
-    with pytest.raises(ValueError, match='exists'): dcli._write(str(path), {'draft': False})
+    with pytest.raises(ValueError, match='exists'):
+        cli._write_json_file(str(path), {'draft': False}, allow_overwrite=False)
     assert path.read_bytes() == before
     assert list(tmp_path.glob('.decomposition-*')) == []
 
 
 def test_cli_does_not_write_after_invalid_assignment(tmp_path, monkeypatch):
     source = snapshot();inv = selectors.resolve_inventory(source)
-    monkeypatch.setattr(dcli, 'resolve_scope', lambda _: source)
+    monkeypatch.setattr(cli, 'resolve_scope', lambda _: source)
     p = tmp_path/'params.json';out = tmp_path/'result.json'
     p.write_text(json.dumps({'artifact_kind': 'decomposition_inputs_draft',
                             'draft_contract': dec.CONTRACT, 'inventory': inv, 'entries': []}))
     args = SimpleNamespace(command='build-decomposition-manifest', legacy_repo='unused',
                            params=str(p), out=str(out), generated_at='2026-09-07T00:00:00Z')
-    with pytest.raises(ValueError, match='unassigned'): dcli.run(args)
+    with pytest.raises(ValueError, match='unassigned'): cli.run_decomposition(args)
     assert not out.exists()
 
 

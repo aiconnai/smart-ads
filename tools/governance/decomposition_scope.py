@@ -6,10 +6,11 @@ from pathlib import Path
 import re
 import subprocess
 
-from tools.governance.decomposition_common import json_digest, source_path
+from tools.governance.locator import json_digest, source_path
 
 REPOSITORY = 'mbras-tech/mbras-campaigns'
 BASELINE = 'd26c73d8508c7c3d43161fe36a80c44a46bf0f2d'
+LEGACY_SOURCE_IDENTITY = {'repository': REPOSITORY, 'commit_sha': BASELINE}
 TREE = '68ff6d6dbd6d7ecaafa3bca7d5de85a54d705798'
 PATH_DIGEST = 'sha256:a0f50b3c10c145902851dec67c8e5a45e91ed5f9bffb463039a9d2cc7cdef32d'
 ROOTS = (
@@ -58,7 +59,9 @@ class SourceSnapshot:
                 'explicit_exclusions': [], 'path_universe_digest': json_digest(self.paths)}
 
 
-def _git(repo: Path, *args: str) -> bytes:
+def run_git_offline(
+    repo: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[bytes]:
     env = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
            'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_NO_REPLACE_OBJECTS': '1',
            'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'}
@@ -68,9 +71,16 @@ def _git(repo: Path, *args: str) -> bytes:
         result = subprocess.run(command, env=env, capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError('source: offline Git unavailable or timed out') from exc
-    if result.returncode:
-        raise ValueError('source: missing or unreadable pinned Git object')
-    return result.stdout
+    if check and result.returncode:
+        err = result.stderr.decode('utf-8', errors='replace').strip()
+        raise ValueError(
+            f"source: missing or unreadable pinned Git object ('git {' '.join(args)}'): {err}"
+        )
+    return result
+
+
+def _git(repo: Path, *args: str) -> bytes:
+    return run_git_offline(repo, *args).stdout
 
 
 def resolve_scope(repo: Path, baseline: str = BASELINE) -> SourceSnapshot:

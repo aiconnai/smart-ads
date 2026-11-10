@@ -518,3 +518,23 @@ def test_build_delivery_mode_rejects_wrong_run_context_locator_type(
     )
     assert r.returncode != 0
     assert "artifact_type" in r.stderr
+
+
+def test_cli_rejects_extra_fields_in_params(tmp_path: Path, anchor_key: Path) -> None:
+    anchor_raw32_b64 = _raw32_b64(anchor_key)
+    ta_params = tmp_path / "ta_params_extra.json"
+    ta_params.write_text(json.dumps({
+        "anchor_id": "trust-anchor:governance-root",
+        "anchor_public_key_base64": anchor_raw32_b64,
+        "valid_from_utc": "2026-01-01T00:00:00Z",
+        "valid_until_utc": "2027-01-01T00:00:00Z",
+        "allowed_registry_artifact_types": ["smart_ads/key_authorization_registry/v1"],
+        "unexpected_extra_field": True,
+    }))
+    out = tmp_path / "trust_anchor.json"
+    proc = run_cli(
+        "build-trust-anchor", "--params", str(ta_params), "--out", str(out), cwd=REPO_ROOT
+    )
+    assert proc.returncode == 1
+    assert "expected exactly" in proc.stderr
+    assert not out.exists()

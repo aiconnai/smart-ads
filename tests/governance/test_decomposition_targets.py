@@ -2,10 +2,14 @@
 import pytest
 
 from tools.governance import decomposition as dec
-from tools.governance.decomposition_decisions import decision_template
+from tools.governance.decomposition import (
+    SECURITY_PATH,
+    assembly_id,
+    decision_template,
+    resolve_inventory,
+    review_inputs,
+)
 from tools.governance.decomposition_scope import BASELINE, REPOSITORY, SourceSnapshot
-from tools.governance.decomposition_selectors import resolve_inventory, SECURITY_PATH
-from tools.governance.decomposition_targets import assembly_id, review_inputs
 
 
 def assembly():

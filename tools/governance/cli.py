@@ -1,10 +1,11 @@
 """argparse CLI for the Smart Ads governance toolkit.
 
 Every command prints JSON to stdout on success, or writes a file and prints
-its path, size and sha256. All file writes are verified: size must be > 0 and
-the bytes are re-read after write before the command reports success. Exit
-code 0 = success, 1 = expected/validated failure (verify failed, guard
-rejected the input), 2 = usage error.
+its path, size and sha256. All file writes are atomic and verified: size must
+be > 0 and the bytes are re-read after write before the command reports
+success. Exit code 0 = success, 1 = expected/validated failure (verify failed,
+guard rejected the input), 2 = usage error, 5 = incomplete decomposition
+candidate.
 
 Run as: `python3 -m tools.governance.cli <command> ...`
 """
@@ -14,13 +15,18 @@ import argparse
 import base64
 import hashlib
 import json
-import sys
+import os
 from pathlib import Path
+import sys
+import tempfile
 from typing import Any
 
-from tools.governance import artifacts, legacy_step2, p1
+from tools.governance import artifacts, decomposition as dec, legacy_step2, p1
+from tools.governance.decomposition_governance import inspect_governance
+from tools.governance.decomposition_review import build_review_bundle
+from tools.governance.decomposition_scope import resolve_scope
 from tools.governance.jcs import canonicalize, loads_strict
-from tools.governance.locator import Store, validate_locator
+from tools.governance.locator import Store, digest, exact_fields
 
 KEYGEN_INSTRUCTIONS = """\
 # Gerar chave Ed25519 (trust anchor OU operador) — executar OFFLINE.
@@ -43,16 +49,47 @@ def _read_json_file(path: str) -> dict[str, Any]:
     return value
 
 
-def _write_json_file(path: str, value: dict[str, Any]) -> dict[str, Any]:
+def _write_json_file(
+    path: str, value: dict[str, Any], *, allow_overwrite: bool
+) -> dict[str, Any]:
     canonical = canonicalize(value)
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_bytes(canonical)
+    if not allow_overwrite and out_path.exists():
+        raise ValueError("decomposition: output exists; choose a fresh output path")
+    fd, temp = tempfile.mkstemp(prefix=".decomposition-", dir=out_path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(canonical)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if allow_overwrite:
+            os.chmod(temp, 0o644)
+            os.replace(temp, out_path)
+        else:
+            os.link(temp, out_path)  # Atomic create, never overwrite a concurrently created file.
+        directory = os.open(out_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temp).unlink(missing_ok=True)
     written = out_path.read_bytes()
     if len(written) == 0 or written != canonical:
         raise ValueError(f"cli: write verification failed for {path}")
-    digest = hashlib.sha256(written).hexdigest()
-    return {"path": str(out_path), "size": len(written), "sha256": digest}
+    if allow_overwrite:
+        return {
+            "path": str(out_path),
+            "size": len(written),
+            "sha256": hashlib.sha256(written).hexdigest(),
+        }
+    return {
+        "path": str(out_path),
+        "size": len(written),
+        "sha256": digest(written),
+        "signable": False,
+    }
 
 
 def _print_json(value: Any) -> None:
@@ -92,7 +129,7 @@ def cmd_sign(args: argparse.Namespace) -> int:
         return 2
     envelope = _read_json_file(args.input)
     signed = p1.sign_envelope(envelope, prefix, Path(args.key))
-    info = _write_json_file(args.out, signed)
+    info = _write_json_file(args.out, signed, allow_overwrite=True)
     _print_json(info)
     return 0
 
@@ -131,6 +168,17 @@ def cmd_store_get(args: argparse.Namespace) -> int:
 
 def cmd_build_trust_anchor(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "anchor_id",
+            "anchor_public_key_base64",
+            "valid_from_utc",
+            "valid_until_utc",
+            "allowed_registry_artifact_types",
+        },
+        "build-trust-anchor params",
+    )
     raw32 = base64.b64decode(params["anchor_public_key_base64"], validate=True)
     config = artifacts.build_trust_anchor_config(
         anchor_id=params["anchor_id"],
@@ -139,7 +187,7 @@ def cmd_build_trust_anchor(args: argparse.Namespace) -> int:
         valid_until_utc=params["valid_until_utc"],
         allowed_registry_artifact_types=params["allowed_registry_artifact_types"],
     )
-    info = _write_json_file(args.out, config)
+    info = _write_json_file(args.out, config, allow_overwrite=True)
     info["trust_anchor_pin"] = artifacts.trust_anchor_pin(config)
     _print_json(info)
     return 0
@@ -147,6 +195,11 @@ def cmd_build_trust_anchor(args: argparse.Namespace) -> int:
 
 def cmd_build_registry(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {"trust_anchor_id", "epoch", "issued_at_utc", "entries", "signer_key_id"},
+        "build-registry params",
+    )
     registry = artifacts.build_key_registry(
         trust_anchor_id=params["trust_anchor_id"],
         epoch=params["epoch"],
@@ -154,13 +207,26 @@ def cmd_build_registry(args: argparse.Namespace) -> int:
         entries=params["entries"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, registry)
+    info = _write_json_file(args.out, registry, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
 def cmd_build_policy(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "repository",
+            "protected_ref",
+            "adr_path",
+            "ci_review_policy_digest",
+            "designated_principals",
+            "registry_locator",
+            "signer_key_id",
+        },
+        "build-policy params",
+    )
     policy = artifacts.build_gate2_authority_policy(
         repository=params["repository"],
         protected_ref=params["protected_ref"],
@@ -170,7 +236,7 @@ def cmd_build_policy(args: argparse.Namespace) -> int:
         registry_locator=params["registry_locator"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, policy)
+    info = _write_json_file(args.out, policy, allow_overwrite=True)
     _print_json(info)
     return 0
 
@@ -219,6 +285,23 @@ def _resolve_branch_protection(args: argparse.Namespace) -> bool:
 
 def cmd_build_merge_evidence(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "repository",
+            "protected_branch",
+            "pr_number",
+            "reviewed_head_sha",
+            "protected_merge_sha",
+            "adr_git_identity",
+            "required_ci_results",
+            "exact_head_review_evidence",
+            "branch_protection_policy",
+            "signer_key_id",
+            "registry_locator",
+        },
+        "build-merge-evidence params",
+    )
     verified = _resolve_branch_protection(args)
     try:
         evidence = artifacts.build_protected_merge_evidence(
@@ -238,13 +321,28 @@ def cmd_build_merge_evidence(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    info = _write_json_file(args.out, evidence)
+    info = _write_json_file(args.out, evidence, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
 def cmd_build_receipt(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "approved_adr_git_identity",
+            "legacy_source_identity",
+            "protected_merge_evidence_locator",
+            "protected_merge_sha",
+            "gate2_authority_policy_locator",
+            "approver_principal_ref",
+            "approved_at_utc",
+            "key_registry_snapshot_locator",
+            "signer_key_id",
+        },
+        "build-receipt params",
+    )
     receipt = artifacts.build_gate2_receipt(
         approved_adr_git_identity=params["approved_adr_git_identity"],
         legacy_source_identity=params["legacy_source_identity"],
@@ -256,13 +354,28 @@ def cmd_build_receipt(args: argparse.Namespace) -> int:
         key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, receipt)
+    info = _write_json_file(args.out, receipt, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
 def cmd_build_run_context(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "gate2_receipt_locator",
+            "approved_adr_git_identity",
+            "legacy_source_identity",
+            "tenant_ref",
+            "cell_ref",
+            "run_id",
+            "created_at_utc",
+            "key_registry_snapshot_locator",
+            "signer_key_id",
+        },
+        "build-run-context params",
+    )
     ctx = artifacts.build_migration_run_context(
         gate2_receipt_locator=params["gate2_receipt_locator"],
         approved_adr_git_identity=params["approved_adr_git_identity"],
@@ -274,13 +387,26 @@ def cmd_build_run_context(args: argparse.Namespace) -> int:
         key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, ctx)
+    info = _write_json_file(args.out, ctx, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
 def cmd_build_delivery_mode(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
+    exact_fields(
+        params,
+        {
+            "gate2_receipt_locator",
+            "approved_adr_git_identity",
+            "run_context_locator",
+            "decided_by_principal_ref",
+            "decided_at_utc",
+            "key_registry_snapshot_locator",
+            "signer_key_id",
+        },
+        "build-delivery-mode params",
+    )
     rec = artifacts.build_delivery_mode_decision(
         gate2_receipt_locator=params["gate2_receipt_locator"],
         approved_adr_git_identity=params["approved_adr_git_identity"],
@@ -290,7 +416,7 @@ def cmd_build_delivery_mode(args: argparse.Namespace) -> int:
         key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, rec)
+    info = _write_json_file(args.out, rec, allow_overwrite=True)
     _print_json(info)
     return 0
 
@@ -304,16 +430,19 @@ def cmd_resolve_legacy_step2(args: argparse.Namespace) -> int:
     facts = legacy_step2.resolve_legacy_step2_facts(
         Path(args.legacy_repo), args.baseline, **kwargs
     )
-    info = _write_json_file(args.out, facts)
+    info = _write_json_file(args.out, facts, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
 def cmd_build_legacy_step2_evidence(args: argparse.Namespace) -> int:
     params = _read_json_file(args.params)
-    if "facts" in params:
+    base_keys = {"resolved_at_utc", "key_registry_snapshot_locator", "signer_key_id"}
+    if "facts" in params and "facts_path" not in params:
+        exact_fields(params, base_keys | {"facts"}, "build-legacy-step2-evidence params")
         facts = params["facts"]
-    elif "facts_path" in params:
+    elif "facts_path" in params and "facts" not in params:
+        exact_fields(params, base_keys | {"facts_path"}, "build-legacy-step2-evidence params")
         facts = _read_json_file(params["facts_path"])
     else:
         raise ValueError(
@@ -325,15 +454,76 @@ def cmd_build_legacy_step2_evidence(args: argparse.Namespace) -> int:
         key_registry_snapshot_locator=params["key_registry_snapshot_locator"],
         signer_key_id=params["signer_key_id"],
     )
-    info = _write_json_file(args.out, evidence)
+    info = _write_json_file(args.out, evidence, allow_overwrite=True)
     _print_json(info)
     return 0
 
 
-def cmd_decomposition(args: argparse.Namespace) -> int:
-    from tools.governance.decomposition_cli import run
+def run_decomposition(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    try:
+        return _run_decomposition(args)
+    except (OSError, TypeError, UnicodeError) as exc:
+        raise ValueError(
+            f"decomposition: invalid input or local I/O failure ({type(exc).__name__})"
+        ) from exc
 
-    result, code = run(args)
+
+def _run_decomposition(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    source = resolve_scope(Path(args.legacy_repo))
+    if args.command in ("prepare-decomposition-review", "prepare-decomposition-dispositions"):
+        inventory, value = build_review_bundle(source)
+        if args.command == "prepare-decomposition-dispositions":
+            value = dec.review_inputs(source, inventory, value["unit_review"])
+        return _write_json_file(args.out, value, allow_overwrite=False), 0
+    if args.command == "resolve-decomposition-inventory":
+        inventory = dec.resolve_inventory(source)
+        value = {
+            "artifact_kind": "decomposition_inputs_draft",
+            "draft_contract": dec.CONTRACT,
+            "inventory": inventory,
+            "entries": dec.decision_template(inventory),
+        }
+        return _write_json_file(args.out, value, allow_overwrite=False), 0
+    if args.command == "build-decomposition-manifest":
+        inputs = _read_json_file(args.params)
+        exact_fields(
+            inputs,
+            {"artifact_kind", "draft_contract", "inventory", "entries"},
+            "decomposition inputs",
+        )
+        if (
+            inputs["artifact_kind"] != "decomposition_inputs_draft"
+            or inputs["draft_contract"] not in (dec.CONTRACT, dec.LEGACY_CONTRACT)
+        ):
+            raise ValueError("decomposition: unsupported input contract")
+        candidate = dec.build_candidate(
+            source,
+            inputs["inventory"],
+            inputs["entries"],
+            args.generated_at,
+            inputs["draft_contract"],
+        )
+        governance = inspect_governance()
+        result = _write_json_file(args.out, candidate, allow_overwrite=False)
+        result.update(
+            {"validation_status": candidate["validation_status"], "governance": governance}
+        )
+        return result, 0
+    candidate = _read_json_file(args.input)
+    dec.verify_candidate(source, candidate)
+    governance = inspect_governance()
+    return {
+        "candidate_matches_recomputation": True,
+        "validation_status": "INCOMPLETE",
+        "pending_decision_count": candidate["pending_decision_count"],
+        "admission_blockers": candidate["admission_blockers"],
+        "governance": governance,
+        "signable": False,
+    }, 5
+
+
+def cmd_decomposition(args: argparse.Namespace) -> int:
+    result, code = run_decomposition(args)
     _print_json(result)
     return code
 
@@ -464,9 +654,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_legacy.add_argument("--out", required=True)
     p_build_legacy.set_defaults(func=cmd_build_legacy_step2_evidence)
 
-    from tools.governance.decomposition_cli import register
+    for command in (
+        "resolve-decomposition-inventory",
+        "build-decomposition-manifest",
+        "verify-decomposition-manifest",
+        "prepare-decomposition-review",
+        "prepare-decomposition-dispositions",
+    ):
+        p_dec = sub.add_parser(
+            command, help="local unratified draft; never a signable envelope"
+        )
+        p_dec.add_argument("--legacy-repo", required=True)
+        if command != "verify-decomposition-manifest":
+            p_dec.add_argument("--out", required=True)
+        if command == "build-decomposition-manifest":
+            p_dec.add_argument("--params", required=True)
+            p_dec.add_argument("--generated-at", required=True)
+        elif command == "verify-decomposition-manifest":
+            p_dec.add_argument("--in", dest="input", required=True)
+        p_dec.set_defaults(func=cmd_decomposition)
 
-    register(sub, cmd_decomposition)
     return parser
 
 

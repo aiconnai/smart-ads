@@ -284,6 +284,32 @@ def test_build_gate2_authority_policy_rejects_blank_principal() -> None:
         )
 
 
+def test_build_gate2_authority_policy_rejects_wrong_registry_locator_type() -> None:
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_gate2_authority_policy(
+            repository="r",
+            protected_ref="main",
+            adr_path="p",
+            ci_review_policy_digest="sha256:" + "a" * 64,
+            designated_principals=["principal:x"],
+            registry_locator=POLICY_LOCATOR,
+            signer_key_id=ANCHOR_KEY_ID,
+        )
+
+
+def test_build_gate2_authority_policy_rejects_trailing_newline_digest() -> None:
+    with pytest.raises(ValueError):
+        artifacts.build_gate2_authority_policy(
+            repository="r",
+            protected_ref="main",
+            adr_path="p",
+            ci_review_policy_digest="sha256:" + "a" * 64 + "\n",
+            designated_principals=["principal:x"],
+            registry_locator=REGISTRY_LOCATOR,
+            signer_key_id=ANCHOR_KEY_ID,
+        )
+
+
 # ---------------------------------------------------------------------------
 # build_protected_merge_evidence
 # ---------------------------------------------------------------------------
@@ -355,6 +381,25 @@ def test_build_protected_merge_evidence_rejects_empty_review_evidence() -> None:
     kwargs = _merge_evidence_kwargs(exact_head_review_evidence=[])
     with pytest.raises(ValueError):
         artifacts.build_protected_merge_evidence(**kwargs)
+
+
+def test_build_protected_merge_evidence_rejects_wrong_locator_types() -> None:
+    bad_policy = {"locator": REGISTRY_LOCATOR, "digest": "sha256:" + "f" * 64}
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_protected_merge_evidence(
+            **_merge_evidence_kwargs(branch_protection_policy=bad_policy)
+        )
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_protected_merge_evidence(
+            **_merge_evidence_kwargs(registry_locator=POLICY_LOCATOR)
+        )
+
+
+def test_build_protected_merge_evidence_rejects_trailing_newline_sha() -> None:
+    with pytest.raises(ValueError):
+        artifacts.build_protected_merge_evidence(
+            **_merge_evidence_kwargs(reviewed_head_sha="d" * 40 + "\n")
+        )
 
 
 def test_build_protected_merge_evidence_is_under_50_lines() -> None:
@@ -455,6 +500,21 @@ def test_build_gate2_receipt_rejects_bad_locator() -> None:
     with pytest.raises(ValueError):
         artifacts.build_gate2_receipt(
             **_receipt_kwargs(key_registry_snapshot_locator=bad_locator)
+        )
+
+
+def test_build_gate2_receipt_rejects_wrong_locator_types() -> None:
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_gate2_receipt(
+            **_receipt_kwargs(protected_merge_evidence_locator=POLICY_LOCATOR)
+        )
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_gate2_receipt(
+            **_receipt_kwargs(gate2_authority_policy_locator=REGISTRY_LOCATOR)
+        )
+    with pytest.raises(ValueError, match="artifact_type"):
+        artifacts.build_gate2_receipt(
+            **_receipt_kwargs(key_registry_snapshot_locator=POLICY_LOCATOR)
         )
 
 

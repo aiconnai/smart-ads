@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.governance.jcs import canonicalize
+from tools.governance.locator import exact_fields, timestamp
 
 DOMAIN_PREFIXES: dict[str, str] = {
     "key_authorization_registry/v1": "SMART-ADS:KEY-REGISTRY:V1\n",
@@ -201,3 +202,52 @@ def verify_envelope(
     msg = message(envelope, domain_prefix)
     if not _openssl_verify(public_key_raw32, msg, sig):
         raise ValueError("p1.verify_envelope: Ed25519 signature verification failed")
+
+
+def decode_public_key_entry(value: dict[str, Any], label: str = "p1") -> bytes:
+    """Validate and decode a canonical 32-byte Ed25519 public key object with sha256 pin."""
+    pub_b64 = value.get("public_key_base64")
+    if not isinstance(pub_b64, str):
+        raise ValueError(f"{label}: invalid public key encoding")
+    raw = _strict_base64_decode(pub_b64)
+    if len(raw) != 32:
+        raise ValueError(f"{label}: public key must be canonical 32-byte Ed25519")
+    expected_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if value.get("public_key_sha256") != expected_sha:
+        raise ValueError(f"{label}: public key hash mismatch")
+    return raw
+
+
+def verify_historical_signer(
+    envelope: dict[str, Any],
+    registry: dict[str, Any],
+    domain_prefix: str,
+    action: str,
+    issued_at_utc: str,
+    *,
+    required_role: str | None = None,
+    label: str = "governance",
+) -> dict[str, Any]:
+    """Verify `envelope` against its historical `registry` snapshot at `issued_at_utc`."""
+    if timestamp(registry["issued_at_utc"]) > timestamp(issued_at_utc):
+        raise ValueError(f"{label}: registry issued after artifact")
+    signer_key_id = envelope["integrity"]["key_id"]
+    matches = [
+        e for e in registry["entries"]
+        if isinstance(e, dict) and e.get("key_id") == signer_key_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{label}: signer must match exactly one historical registry entry")
+    entry = matches[0]
+    if entry.get("lifecycle_state") != "active":
+        raise ValueError(f"{label}: historical signer lifecycle mismatch")
+    if required_role is not None and entry.get("role") != required_role:
+        raise ValueError(f"{label}: historical signer role mismatch")
+    if {"schema": envelope["$schema"], "action": action} not in entry.get("allowed_actions", []):
+        raise ValueError(f"{label}: signer lacks exact action")
+    exact_fields(entry.get("validity"), {"from", "until"}, "validity")
+    when = timestamp(issued_at_utc)
+    if not timestamp(entry["validity"]["from"]) <= when < timestamp(entry["validity"]["until"]):
+        raise ValueError(f"{label}: signer outside historical validity interval")
+    verify_envelope(envelope, domain_prefix, decode_public_key_entry(entry, label))
+    return entry

@@ -71,6 +71,30 @@ def test_validate_locator_rejects_uppercase_hex() -> None:
         validate_locator(loc)
 
 
+def test_validate_locator_rejects_trailing_newline_in_hex() -> None:
+    loc = make_locator("smart_ads/gate2_authority_policy/v1", b"payload")
+    loc["content_digest"] = loc["content_digest"] + "\n"
+    loc["object_ref"] = loc["object_ref"] + "\n"
+    with pytest.raises(ValueError):
+        validate_locator(loc)
+
+
+def test_validate_locator_enforces_expected_type() -> None:
+    loc = make_locator("smart_ads/gate2_authority_policy/v1", b"payload")
+    validate_locator(loc, "smart_ads/gate2_authority_policy/v1")
+    with pytest.raises(ValueError, match="artifact_type"):
+        validate_locator(loc, "smart_ads/key_authorization_registry/v1")
+
+
+def test_store_get_enforces_expected_type(tmp_path: Path) -> None:
+    store = Store(tmp_path)
+    envelope = {"$schema": "smart_ads/gate2_authority_policy/v1", "a": 1}
+    loc = store.put(envelope)
+    assert store.get(loc, "smart_ads/gate2_authority_policy/v1") == envelope
+    with pytest.raises(ValueError, match="artifact_type"):
+        store.get(loc, "smart_ads/key_authorization_registry/v1")
+
+
 def test_store_put_get_roundtrip(tmp_path: Path) -> None:
     store = Store(tmp_path)
     envelope = {"$schema": "smart_ads/gate2_authority_policy/v1", "a": 1}
