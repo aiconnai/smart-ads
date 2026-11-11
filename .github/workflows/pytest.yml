@@ -19,7 +19,7 @@ jobs:
         with:
           # Decomposition AST identity is pinned to the actual CPython 3.12 ABI.
           python-version: '3.12'
-      - name: Install pytest
-        run: python3 -m pip install --upgrade pip pytest
+      - name: Install test and build dependencies
+        run: python3 -m pip install --upgrade pip hatchling==1.33.0 build==1.6.1 pytest==9.2.0
       - name: Run tests
         run: python3 -m pytest -q -p no:cacheprovider
