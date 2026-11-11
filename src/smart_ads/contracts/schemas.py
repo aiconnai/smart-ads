@@ -42,6 +42,7 @@ from smart_ads.contracts.scalars import (
     validate_iso_date,
     validate_non_empty_str,
     validate_opaque_ref,
+    validate_resource_ref,
     validate_sha256_prefixed,
     validate_timestamp_utc6,
     validate_timestamp_utc_seconds,
@@ -1289,10 +1290,9 @@ class ReconciliationRowKey:
     breakdown_signature: str
 
     def __post_init__(self) -> None:
-        validate_opaque_ref(
+        validate_resource_ref(
             self.resource_ref,
             field_name="reconciliation_row_key.resource_ref",
-            expected_prefix="resource",
         )
         validate_iso_date(
             self.metric_date, field_name="reconciliation_row_key.metric_date"
@@ -1353,10 +1353,9 @@ class FactKey:
             field_name="fact_key.account_ref",
             expected_prefix="account",
         )
-        validate_opaque_ref(
+        validate_resource_ref(
             self.resource_ref,
             field_name="fact_key.resource_ref",
-            expected_prefix="resource",
         )
         if self.resource_level != "campaign":
             raise ClosedValidationError(
@@ -1463,6 +1462,11 @@ class NormalizedCollectionFact:
                 "normalized_collection_fact.presence_status: invalid provider presence_status "
                 f"{self.presence_status!r}"
             )
+        inferred_qc = (
+            self.currency
+            if isinstance(self.currency, str) and len(self.currency) > 0
+            else "BRL"
+        )
         validate_numeric_state(
             metric_origin="provider_observation",
             presence_status=self.presence_status,
@@ -1472,7 +1476,7 @@ class NormalizedCollectionFact:
             raw_numeric_value=self.raw_numeric_value,
             unit=self.unit,
             currency=self.currency,
-            query_currency="BRL",
+            query_currency=inferred_qc,
         )
         _enforce_base_metric_compatibility(
             metric_semantic_ref=self.fact_key.metric_semantic_ref,
@@ -1526,6 +1530,11 @@ def compute_normalized_fact_set_digest(
         if not isinstance(item, NormalizedCollectionFact):
             raise ClosedValidationError(
                 "normalized_fact_set: every item must be NormalizedCollectionFact"
+            )
+        if item.presence_status not in {"observed", "retracted_tombstone"}:
+            raise ClosedValidationError(
+                "normalized_fact_set: complete facts require presence_status in "
+                f"{{'observed', 'retracted_tombstone'}}, got {item.presence_status!r}"
             )
         if item.fact_key.attribution_ref != "attribution:not_applicable":
             raise ClosedValidationError(
@@ -1632,6 +1641,11 @@ class SemanticObservationProjection:
             raise ClosedValidationError(
                 "semantic_observation_projection.fact_key: expected FactKey"
             )
+        inferred_qc = (
+            self.currency
+            if isinstance(self.currency, str) and len(self.currency) > 0
+            else "BRL"
+        )
         validate_numeric_state(
             metric_origin=self.metric_origin,
             presence_status=self.presence_status,
@@ -1641,7 +1655,7 @@ class SemanticObservationProjection:
             raw_numeric_value=self.raw_numeric_value,
             unit=self.unit,
             currency=self.currency,
-            query_currency="BRL",
+            query_currency=inferred_qc,
         )
         _enforce_origin_vs_source_metric_ref(
             metric_origin=self.metric_origin,
@@ -2141,7 +2155,9 @@ class CollectionResult:
             raise ClosedValidationError(
                 "collection_result.candidates: expected list or tuple of AnalyticsLandingRow"
             )
-        for row in self.candidates:
+        candidate_tuple = tuple(self.candidates)
+        candidate_sort_keys: list[bytes] = []
+        for row in candidate_tuple:
             if not isinstance(row, AnalyticsLandingRow):
                 raise ClosedValidationError(
                     "collection_result.candidates: every element must be AnalyticsLandingRow"
@@ -2151,28 +2167,80 @@ class CollectionResult:
                     "collection_result.candidates: row.collected_at_utc must equal "
                     "retrieval_context.retrieved_at_utc"
                 )
-        sorted_candidates = tuple(
-            sorted(self.candidates, key=lambda r: r.candidate_sort_key_jcs())
-        )
-        object.__setattr__(self, "candidates", sorted_candidates)
+            if row.source_observation_ref != self.retrieval_context.source_observation_ref:
+                raise ClosedValidationError(
+                    "collection_result.candidates: row.source_observation_ref must equal "
+                    "retrieval_context.source_observation_ref"
+                )
+            if row.adapter_version != self.retrieval_context.adapter_version:
+                raise ClosedValidationError(
+                    "collection_result.candidates: row.adapter_version must equal "
+                    "retrieval_context.adapter_version"
+                )
+            if row.semantic_version != self.retrieval_context.semantic_version:
+                raise ClosedValidationError(
+                    "collection_result.candidates: row.semantic_version must equal "
+                    "retrieval_context.semantic_version"
+                )
+            candidate_sort_keys.append(row.candidate_sort_key_jcs())
 
-        if (self.normalized_fact_set is None) != (
-            self.normalized_fact_set_digest is None
-        ):
+        for prev_key, curr_key in zip(candidate_sort_keys, candidate_sort_keys[1:]):
+            if not (prev_key <= curr_key):
+                raise ClosedValidationError(
+                    "collection_result.candidates: candidates must be sorted in "
+                    "non-decreasing candidate_sort_key_jcs() order"
+                )
+
+        candidate_currencies = {
+            r.currency
+            for r in candidate_tuple
+            if r.value_type == "int64_minor_currency"
+        }
+        if len(candidate_currencies) > 1:
             raise ClosedValidationError(
-                "collection_result: normalized_fact_set and normalized_fact_set_digest "
-                "must both be None or both be non-None"
+                "collection_result.candidates: multiple currencies across candidate rows "
+                "are forbidden"
             )
-        if self.normalized_fact_set is not None:
+        object.__setattr__(self, "candidates", candidate_tuple)
+
+        if self.normalized_fact_set is None:
+            if self.normalized_fact_set_digest is not None:
+                raise ClosedValidationError(
+                    "collection_result: normalized_fact_set and normalized_fact_set_digest "
+                    "must both be None or both be non-None"
+                )
+        else:
+            if self.normalized_fact_set_digest is None:
+                raise ClosedValidationError(
+                    "collection_result: normalized_fact_set and normalized_fact_set_digest "
+                    "must both be None or both be non-None"
+                )
             if not isinstance(self.normalized_fact_set, (list, tuple)):
                 raise ClosedValidationError(
                     "collection_result.normalized_fact_set: expected list or tuple"
                 )
-            assert self.normalized_fact_set_digest is not None
             validate_sha256_prefixed(
                 self.normalized_fact_set_digest,
                 field_name="collection_result.normalized_fact_set_digest",
             )
+            to = self.transport_outcome
+            if not (
+                to.network_ok is True
+                and to.http_status == 200
+                and to.media_and_encoding_valid is True
+                and to.auth_ok is True
+                and to.jsonrpc_error is False
+                and to.payload_schema_valid is True
+                and to.response_date_mismatch is False
+                and to.truncated_2mib is False
+                and to.non_empty_continuation is False
+                and to.reducer_order_or_count_mismatch is False
+                and to.duplicate_provider_observation is False
+            ):
+                raise ClosedValidationError(
+                    "collection_result: non-null normalized_fact_set requires all "
+                    "transport_outcome complete-eligibility flags to be clean"
+                )
             fact_tuple = tuple(self.normalized_fact_set)
             sorted_facts, recomputed_digest = compute_normalized_fact_set_digest(
                 fact_tuple
@@ -2185,6 +2253,48 @@ class CollectionResult:
                 raise ClosedValidationError(
                     "collection_result.normalized_fact_set_digest: recomputed "
                     f"{recomputed_digest!r} != asserted {self.normalized_fact_set_digest!r}"
+                )
+            for prev_key, curr_key in zip(
+                candidate_sort_keys, candidate_sort_keys[1:]
+            ):
+                if not (prev_key < curr_key):
+                    raise ClosedValidationError(
+                        "collection_result.candidates: complete result requires strictly "
+                        "increasing unique candidate_sort_key_jcs() keys"
+                    )
+            if len(candidate_tuple) != len(fact_tuple) or len(candidate_tuple) == 0:
+                raise ClosedValidationError(
+                    "collection_result.candidates: complete result requires non-empty "
+                    "1-to-1 candidate count matching normalized_fact_set"
+                )
+            fact_currencies = {
+                f.currency
+                for f in fact_tuple
+                if f.value_type == "int64_minor_currency" and f.currency is not None
+            }
+            if len(fact_currencies) > 1:
+                raise ClosedValidationError(
+                    "collection_result.normalized_fact_set: multiple currencies across "
+                    "facts are forbidden"
+                )
+            inferred_qc = next(iter(fact_currencies), "BRL")
+            expected_candidates = tuple(
+                sorted(
+                    (
+                        project_collection_fact_to_landing_row(
+                            f,
+                            retrieval_context=self.retrieval_context,
+                            query_currency=inferred_qc,
+                        )
+                        for f in fact_tuple
+                    ),
+                    key=lambda r: r.candidate_sort_key_jcs(),
+                )
+            )
+            if candidate_tuple != expected_candidates:
+                raise ClosedValidationError(
+                    "collection_result.candidates: complete result requires exact 1-to-1 "
+                    "equality between candidates and projected normalized_fact_set rows"
                 )
             object.__setattr__(self, "normalized_fact_set", fact_tuple)
 

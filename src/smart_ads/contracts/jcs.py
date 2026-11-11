@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Callable, Iterable, Mapping
-import copy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -25,6 +24,7 @@ T = TypeVar("T")
 
 MAX_JCS_SAFE_INT: Final[int] = (1 << 53) - 1
 MIN_JCS_SAFE_INT: Final[int] = -((1 << 53) - 1)
+_MAX_JCS_NESTING_DEPTH: Final[int] = 128
 
 _SHORT_ESCAPES: Final[Mapping[str, str]] = MappingProxyType(
     {
@@ -96,7 +96,11 @@ def _escape_jcs_string(value: str) -> str:
     return "".join(out)
 
 
-def _dump_jcs(value: object, out: list[str]) -> None:
+def _dump_jcs(value: object, out: list[str], depth: int = 0) -> None:
+    if depth > _MAX_JCS_NESTING_DEPTH:
+        raise ClosedValidationError(
+            "canonicalize_jcs: maximum nesting depth exceeded"
+        )
     if value is None:
         out.append("null")
         return
@@ -123,7 +127,7 @@ def _dump_jcs(value: object, out: list[str]) -> None:
         for idx, item in enumerate(value):
             if idx:
                 out.append(",")
-            _dump_jcs(item, out)
+            _dump_jcs(item, out, depth + 1)
         out.append("]")
         return
     if isinstance(value, Mapping):
@@ -146,7 +150,7 @@ def _dump_jcs(value: object, out: list[str]) -> None:
                 out.append(",")
             out.append(_escape_jcs_string(key))
             out.append(":")
-            _dump_jcs(value[key], out)
+            _dump_jcs(value[key], out, depth + 1)
         out.append("}")
         return
     raise ClosedValidationError(
@@ -209,15 +213,19 @@ def _strict_parse_int(token: str) -> int:
     return parsed
 
 
-def _check_loaded_strings(node: Any) -> None:
+def _check_loaded_strings(node: Any, depth: int = 0) -> None:
+    if depth > _MAX_JCS_NESTING_DEPTH:
+        raise ClosedValidationError(
+            "loads_strict_json: maximum nesting depth exceeded"
+        )
     if isinstance(node, str):
         _reject_surrogates(node, label="loads_strict_json")
     elif isinstance(node, list):
         for elem in node:
-            _check_loaded_strings(elem)
+            _check_loaded_strings(elem, depth + 1)
     elif isinstance(node, dict):
         for val in node.values():
-            _check_loaded_strings(val)
+            _check_loaded_strings(val, depth + 1)
 
 
 def loads_strict_json(raw: str | bytes) -> Any:
@@ -584,14 +592,33 @@ class P1Integrity:
         return out
 
 
-def _deep_copy_json_tree(value: Any) -> Any:
+def _deep_copy_json_tree(value: Any, depth: int = 0) -> Any:
+    if depth > _MAX_JCS_NESTING_DEPTH:
+        raise ClosedValidationError(
+            "JCS/P1 nesting depth exceeded recursion limit"
+        )
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        raise ClosedValidationError(
+            f"p1_preimage: floating point values are forbidden (got {value!r})"
+        )
     if isinstance(value, Mapping):
-        return {k: _deep_copy_json_tree(v) for k, v in value.items()}
+        copied: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise ClosedValidationError(
+                    f"p1_preimage: object keys must be str, got {type(k).__name__}"
+                )
+            copied[k] = _deep_copy_json_tree(v, depth + 1)
+        return copied
     if isinstance(value, list):
-        return [_deep_copy_json_tree(v) for v in value]
+        return [_deep_copy_json_tree(v, depth + 1) for v in value]
     if isinstance(value, tuple):
-        return tuple(_deep_copy_json_tree(v) for v in value)
-    return copy.deepcopy(value)
+        return tuple(_deep_copy_json_tree(v, depth + 1) for v in value)
+    raise ClosedValidationError(
+        f"p1_preimage: unsupported JSON leaf type {type(value).__name__}"
+    )
 
 
 def p1_preimage(envelope: Mapping[str, Any]) -> dict[str, Any]:
@@ -602,7 +629,12 @@ def p1_preimage(envelope: Mapping[str, Any]) -> dict[str, Any]:
             "p1_preimage: envelope must contain mapping member 'integrity'"
         )
     require_mapping(checked_env["integrity"], label="p1.envelope.integrity")
-    cloned: dict[str, Any] = _deep_copy_json_tree(checked_env)
+    try:
+        cloned: dict[str, Any] = _deep_copy_json_tree(checked_env)
+    except RecursionError as exc:
+        raise ClosedValidationError(
+            "JCS/P1 nesting depth exceeded recursion limit"
+        ) from exc
     integrity = cloned["integrity"]
     integrity.pop("content_digest", None)
     integrity.pop("signature_base64", None)

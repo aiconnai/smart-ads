@@ -4,15 +4,16 @@ from __future__ import annotations
 import bisect
 from dataclasses import dataclass
 import datetime
-from typing import Any, ClassVar, Final, Protocol, runtime_checkable
+from typing import Any, ClassVar, Final, Literal, Protocol, runtime_checkable
 
 from smart_ads.contracts.jcs import (
     MAX_JCS_SAFE_INT,
-    MIN_JCS_SAFE_INT,
     ArtifactLocator,
     P1Integrity,
+    canonicalize_jcs,
     p1_content_digest,
 )
+from smart_ads.contracts.numerics import MAX_INT64
 from smart_ads.contracts.scalars import (
     ClosedValidationError,
     parse_timestamp_utc_micros,
@@ -65,20 +66,30 @@ _LIVE_CERT_TRANSITION_SCHEMA: Final[str] = (
 _LIVE_CERT_CERTIFICATE_SCHEMA: Final[str] = (
     "smart_ads/live_certification_certificate/v1"
 )
+_GATE3_SELECTION_SCHEMA: Final[str] = "smart_ads/gate3_selection_receipt/v1"
+_HERMES_DELEGATION_SCHEMA: Final[str] = (
+    "smart_ads/ibvi_ads_delegation_context/v1"
+)
+_ALLOWED_GATE3_ROLES: Final[frozenset[str]] = frozenset(
+    {"certification", "operational_renewal"}
+)
 
 
 class AmbiguousLocalDayError(ClosedValidationError):
     """Raised when `[now_utc - uncertainty, now_utc + uncertainty]` straddles midnight or lacks tz rules."""
 
 
-def _validate_safe_int(value: object, *, field_name: str) -> int:
+_MIN_INT64: Final[int] = -(1 << 63)
+
+
+def _validate_utc_micros(value: object, *, field_name: str) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
-        or not (MIN_JCS_SAFE_INT <= value <= MAX_JCS_SAFE_INT)
+        or not (_MIN_INT64 <= value <= MAX_INT64)
     ):
         raise ClosedValidationError(
-            f"{field_name}: expected RFC 8785 safe int, got {value!r}"
+            f"{field_name}: expected int64 UTC microseconds, got {value!r}"
         )
     return value
 
@@ -260,7 +271,7 @@ class UtcOffsetTransition:
     utc_offset_seconds: int
 
     def __post_init__(self) -> None:
-        _validate_safe_int(
+        _validate_utc_micros(
             self.effective_from_utc_micros,
             field_name="utc_offset_transition.effective_from_utc_micros",
         )
@@ -335,7 +346,7 @@ class TimezoneRuleSnapshot:
 
     def offset_seconds_at(self, utc_micros: int) -> int:
         """Return active UTC offset in seconds at `utc_micros`, failing closed if uncovered."""
-        _validate_safe_int(utc_micros, field_name="utc_micros")
+        _validate_utc_micros(utc_micros, field_name="utc_micros")
         starts = [t.effective_from_utc_micros for t in self.transitions]
         idx = bisect.bisect_right(starts, utc_micros) - 1
         if idx < 0:
@@ -350,7 +361,13 @@ class TimezoneRuleSnapshot:
         offset_seconds = self.offset_seconds_at(utc_micros)
         local_micros = utc_micros + offset_seconds * _MICROSECONDS_PER_SECOND
         days_since_epoch = local_micros // _MICROSECONDS_PER_DAY
-        return _UNIX_EPOCH_DATE + datetime.timedelta(days=days_since_epoch)
+        try:
+            return _UNIX_EPOCH_DATE + datetime.timedelta(days=days_since_epoch)
+        except OverflowError as exc:
+            raise ClosedValidationError(
+                f"timezone_rule_snapshot: local civil date at {utc_micros} "
+                "overflows supported ISO-8601 date range"
+            ) from exc
 
     def compute_previous_local_day(
         self,
@@ -359,8 +376,8 @@ class TimezoneRuleSnapshot:
         upper_utc_micros: int,
     ) -> str:
         """Derive unambiguous `previous_local_day` across `[lower_utc_micros, upper_utc_micros]` (P-07)."""
-        _validate_safe_int(lower_utc_micros, field_name="lower_utc_micros")
-        _validate_safe_int(upper_utc_micros, field_name="upper_utc_micros")
+        _validate_utc_micros(lower_utc_micros, field_name="lower_utc_micros")
+        _validate_utc_micros(upper_utc_micros, field_name="upper_utc_micros")
         if lower_utc_micros > upper_utc_micros:
             raise ClosedValidationError(
                 f"compute_previous_local_day: lower_utc_micros ({lower_utc_micros}) "
@@ -385,7 +402,13 @@ class TimezoneRuleSnapshot:
             )
 
         (unique_local_date,) = tuple(local_dates)
-        return (unique_local_date - datetime.timedelta(days=1)).isoformat()
+        try:
+            return (unique_local_date - datetime.timedelta(days=1)).isoformat()
+        except OverflowError as exc:
+            raise ClosedValidationError(
+                "timezone_rule_snapshot: previous_local_day before "
+                f"{unique_local_date.isoformat()} underflows supported ISO-8601 date range"
+            ) from exc
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -437,6 +460,15 @@ class ResolvedClockState:
             raise ClosedValidationError(
                 "resolved_clock_state.configured_max_uncertainty_ms: expected int"
             )
+        expected_locator = ArtifactLocator.for_canonical_bytes(
+            ClockAttestation.SCHEMA,
+            canonicalize_jcs(self.attestation.to_dict()),
+        )
+        if self.locator != expected_locator:
+            raise ClosedValidationError(
+                "resolved_clock_state.locator: locator does not match canonical "
+                "JCS digest of ClockAttestation"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -465,6 +497,207 @@ class ResolvedRegistryState:
             raise ClosedValidationError(
                 "resolved_registry_state.driver_contract: expected PipeboardPhase1Contract"
             )
+        expected_snap_loc = ArtifactLocator.for_canonical_bytes(
+            PrivateRegistrySnapshot.SCHEMA,
+            canonicalize_jcs(self.snapshot.to_dict()),
+        )
+        if self.locator != expected_snap_loc:
+            raise ClosedValidationError(
+                "resolved_registry_state.locator: locator does not match canonical "
+                "JCS digest of PrivateRegistrySnapshot"
+            )
+        expected_drv_loc = ArtifactLocator.for_canonical_bytes(
+            PipeboardPhase1Contract.SCHEMA,
+            canonicalize_jcs(self.driver_contract.to_dict()),
+        )
+        if self.driver_contract_locator != expected_drv_loc:
+            raise ClosedValidationError(
+                "resolved_registry_state.driver_contract_locator: locator does not "
+                "match canonical JCS digest of PipeboardPhase1Contract"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedGate3SelectionState:
+    """Resolved Gate-3 selection/renewal receipt state and 900s/60s freshness profile (ADR-0001 §5.3)."""
+
+    locator: ArtifactLocator
+    selection_role: Literal["certification", "operational_renewal"]
+    revalidated_at_utc: str
+    valid_until_utc: str
+    candidate_driver_contract_digest: str
+    canonical_query_digest: str
+    schema_bundle_digest: str
+    resource_mapping_contract_digest: str
+    authorized_certification_scope: str
+    certification_fingerprint_digest: str
+    maximum_age_seconds: int = 900
+    maximum_clock_uncertainty_ms: int = 1000
+    maximum_provider_dispatch_deadline_seconds: int = 60
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.locator, ArtifactLocator)
+            or self.locator.artifact_type != _GATE3_SELECTION_SCHEMA
+        ):
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state.locator: expected "
+                f"ArtifactLocator for {_GATE3_SELECTION_SCHEMA!r}"
+            )
+        if (
+            not isinstance(self.selection_role, str)
+            or self.selection_role not in _ALLOWED_GATE3_ROLES
+        ):
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state.selection_role: expected "
+                f"one of {sorted(_ALLOWED_GATE3_ROLES)}, got {self.selection_role!r}"
+            )
+        validate_timestamp_utc_seconds(
+            self.revalidated_at_utc,
+            field_name="resolved_gate3_selection_state.revalidated_at_utc",
+        )
+        validate_timestamp_utc_seconds(
+            self.valid_until_utc,
+            field_name="resolved_gate3_selection_state.valid_until_utc",
+        )
+        revalidated_us = parse_timestamp_utc_micros(
+            self.revalidated_at_utc,
+            field_name="resolved_gate3_selection_state.revalidated_at_utc",
+            allow_whole_seconds=True,
+        )
+        valid_until_us = parse_timestamp_utc_micros(
+            self.valid_until_utc,
+            field_name="resolved_gate3_selection_state.valid_until_utc",
+            allow_whole_seconds=True,
+        )
+        if valid_until_us - revalidated_us != 900 * _MICROSECONDS_PER_SECOND:
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state: Gate-3 freshness profile requires "
+                "valid_until_utc - revalidated_at_utc == 900 seconds"
+            )
+        if (
+            isinstance(self.maximum_age_seconds, bool)
+            or self.maximum_age_seconds != 900
+        ):
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state.maximum_age_seconds: must equal 900"
+            )
+        if (
+            isinstance(self.maximum_clock_uncertainty_ms, bool)
+            or self.maximum_clock_uncertainty_ms != 1000
+        ):
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state.maximum_clock_uncertainty_ms: must equal 1000"
+            )
+        if (
+            isinstance(self.maximum_provider_dispatch_deadline_seconds, bool)
+            or self.maximum_provider_dispatch_deadline_seconds != 60
+        ):
+            raise ClosedValidationError(
+                "resolved_gate3_selection_state.maximum_provider_dispatch_deadline_seconds: "
+                "must equal 60"
+            )
+        validate_sha256_prefixed(
+            self.candidate_driver_contract_digest,
+            field_name="resolved_gate3_selection_state.candidate_driver_contract_digest",
+        )
+        validate_sha256_prefixed(
+            self.canonical_query_digest,
+            field_name="resolved_gate3_selection_state.canonical_query_digest",
+        )
+        validate_sha256_prefixed(
+            self.schema_bundle_digest,
+            field_name="resolved_gate3_selection_state.schema_bundle_digest",
+        )
+        validate_sha256_prefixed(
+            self.resource_mapping_contract_digest,
+            field_name="resolved_gate3_selection_state.resource_mapping_contract_digest",
+        )
+        validate_opaque_ref(
+            self.authorized_certification_scope,
+            field_name="resolved_gate3_selection_state.authorized_certification_scope",
+            expected_prefix="scope",
+        )
+        validate_sha256_prefixed(
+            self.certification_fingerprint_digest,
+            field_name="resolved_gate3_selection_state.certification_fingerprint_digest",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedHermesDelegationState:
+    """Resolved runtime-owned `smart_ads/ibvi_ads_delegation_context/v1` state (ADR-0001 §4.2)."""
+
+    locator: ArtifactLocator
+    tenant_ref: str
+    front_ref: str
+    profile_ref: str
+    binding_ref: str
+    resource_scope_ref: str
+    issued_at_utc: str
+    valid_until_utc: str
+    route: str = "/ibvi-ads"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.locator, ArtifactLocator)
+            or self.locator.artifact_type != _HERMES_DELEGATION_SCHEMA
+        ):
+            raise ClosedValidationError(
+                "resolved_hermes_delegation_state.locator: expected "
+                f"ArtifactLocator for {_HERMES_DELEGATION_SCHEMA!r}"
+            )
+        validate_opaque_ref(
+            self.tenant_ref,
+            field_name="resolved_hermes_delegation_state.tenant_ref",
+            expected_prefix="tenant",
+        )
+        validate_opaque_ref(
+            self.front_ref,
+            field_name="resolved_hermes_delegation_state.front_ref",
+            expected_prefix="front",
+        )
+        validate_opaque_ref(
+            self.profile_ref,
+            field_name="resolved_hermes_delegation_state.profile_ref",
+            expected_prefix="profile",
+        )
+        validate_opaque_ref(
+            self.binding_ref,
+            field_name="resolved_hermes_delegation_state.binding_ref",
+            expected_prefix="binding",
+        )
+        validate_opaque_ref(
+            self.resource_scope_ref,
+            field_name="resolved_hermes_delegation_state.resource_scope_ref",
+            expected_prefix="scope",
+        )
+        validate_timestamp_utc_seconds(
+            self.issued_at_utc,
+            field_name="resolved_hermes_delegation_state.issued_at_utc",
+        )
+        validate_timestamp_utc_seconds(
+            self.valid_until_utc,
+            field_name="resolved_hermes_delegation_state.valid_until_utc",
+        )
+        issued_us = parse_timestamp_utc_micros(
+            self.issued_at_utc,
+            field_name="resolved_hermes_delegation_state.issued_at_utc",
+            allow_whole_seconds=True,
+        )
+        valid_until_us = parse_timestamp_utc_micros(
+            self.valid_until_utc,
+            field_name="resolved_hermes_delegation_state.valid_until_utc",
+            allow_whole_seconds=True,
+        )
+        if issued_us > valid_until_us:
+            raise ClosedValidationError(
+                "resolved_hermes_delegation_state: issued_at_utc must not exceed valid_until_utc"
+            )
+        if self.route != "/ibvi-ads":
+            raise ClosedValidationError(
+                "resolved_hermes_delegation_state.route: must equal '/ibvi-ads'"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,8 +707,17 @@ class ResolvedLiveCertificationState:
     head_locator: ArtifactLocator
     transition_locator: ArtifactLocator
     certificate_locator: ArtifactLocator
-    certified_fingerprint_digest: str
+    tenant_ref: str
+    binding_ref: str
+    resource_scope_ref: str
+    driver_id: str
+    driver_contract_digest: str
+    canonical_query_digest: str
+    schema_bundle_digest: str
+    resource_mapping_contract_digest: str
+    certificate_issued_at_utc: str
     certificate_valid_until_utc: str
+    certified_fingerprint_digest: str
     renewal_selection_role: str
     renewal_fingerprint_digest: str
 
@@ -506,13 +748,71 @@ class ResolvedLiveCertificationState:
                 "resolved_live_certification_state.certificate_locator: expected "
                 f"ArtifactLocator for {_LIVE_CERT_CERTIFICATE_SCHEMA!r}"
             )
+        validate_opaque_ref(
+            self.tenant_ref,
+            field_name="resolved_live_certification_state.tenant_ref",
+            expected_prefix="tenant",
+        )
+        validate_opaque_ref(
+            self.binding_ref,
+            field_name="resolved_live_certification_state.binding_ref",
+            expected_prefix="binding",
+        )
+        validate_opaque_ref(
+            self.resource_scope_ref,
+            field_name="resolved_live_certification_state.resource_scope_ref",
+            expected_prefix="scope",
+        )
+        checked_driver = validate_non_empty_str(
+            self.driver_id,
+            field_name="resolved_live_certification_state.driver_id",
+        )
+        if any(ch.isspace() for ch in checked_driver):
+            raise ClosedValidationError(
+                "resolved_live_certification_state.driver_id: whitespace is forbidden"
+            )
         validate_sha256_prefixed(
-            self.certified_fingerprint_digest,
-            field_name="resolved_live_certification_state.certified_fingerprint_digest",
+            self.driver_contract_digest,
+            field_name="resolved_live_certification_state.driver_contract_digest",
+        )
+        validate_sha256_prefixed(
+            self.canonical_query_digest,
+            field_name="resolved_live_certification_state.canonical_query_digest",
+        )
+        validate_sha256_prefixed(
+            self.schema_bundle_digest,
+            field_name="resolved_live_certification_state.schema_bundle_digest",
+        )
+        validate_sha256_prefixed(
+            self.resource_mapping_contract_digest,
+            field_name="resolved_live_certification_state.resource_mapping_contract_digest",
+        )
+        validate_timestamp_utc_seconds(
+            self.certificate_issued_at_utc,
+            field_name="resolved_live_certification_state.certificate_issued_at_utc",
         )
         validate_timestamp_utc_seconds(
             self.certificate_valid_until_utc,
             field_name="resolved_live_certification_state.certificate_valid_until_utc",
+        )
+        cert_issued_us = parse_timestamp_utc_micros(
+            self.certificate_issued_at_utc,
+            field_name="resolved_live_certification_state.certificate_issued_at_utc",
+            allow_whole_seconds=True,
+        )
+        cert_valid_until_us = parse_timestamp_utc_micros(
+            self.certificate_valid_until_utc,
+            field_name="resolved_live_certification_state.certificate_valid_until_utc",
+            allow_whole_seconds=True,
+        )
+        if cert_issued_us > cert_valid_until_us:
+            raise ClosedValidationError(
+                "resolved_live_certification_state: certificate_issued_at_utc "
+                "must not exceed certificate_valid_until_utc"
+            )
+        validate_sha256_prefixed(
+            self.certified_fingerprint_digest,
+            field_name="resolved_live_certification_state.certified_fingerprint_digest",
         )
         validate_non_empty_str(
             self.renewal_selection_role,
@@ -526,21 +826,24 @@ class ResolvedLiveCertificationState:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedPrerequisiteBundle:
-    """Resolved purpose-discriminated prerequisite locators and role/certification metadata."""
+    """Resolved purpose-discriminated prerequisite locators and role/certification/delegation metadata."""
 
     locators: PurposePrerequisiteLocators
-    gate3_7b_selection_role: str | None = None
+    gate3_selection: ResolvedGate3SelectionState | None = None
     live_certification: ResolvedLiveCertificationState | None = None
+    hermes_delegation: ResolvedHermesDelegationState | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.locators, PurposePrerequisiteLocators):
             raise ClosedValidationError(
                 "resolved_prerequisite_bundle.locators: expected PurposePrerequisiteLocators"
             )
-        if self.gate3_7b_selection_role is not None:
-            validate_non_empty_str(
-                self.gate3_7b_selection_role,
-                field_name="resolved_prerequisite_bundle.gate3_7b_selection_role",
+        if self.gate3_selection is not None and not isinstance(
+            self.gate3_selection, ResolvedGate3SelectionState
+        ):
+            raise ClosedValidationError(
+                "resolved_prerequisite_bundle.gate3_selection: expected "
+                "ResolvedGate3SelectionState or None"
             )
         if self.live_certification is not None and not isinstance(
             self.live_certification, ResolvedLiveCertificationState
@@ -548,6 +851,13 @@ class ResolvedPrerequisiteBundle:
             raise ClosedValidationError(
                 "resolved_prerequisite_bundle.live_certification: expected "
                 "ResolvedLiveCertificationState or None"
+            )
+        if self.hermes_delegation is not None and not isinstance(
+            self.hermes_delegation, ResolvedHermesDelegationState
+        ):
+            raise ClosedValidationError(
+                "resolved_prerequisite_bundle.hermes_delegation: expected "
+                "ResolvedHermesDelegationState or None"
             )
 
 
@@ -581,6 +891,7 @@ class PurposePrerequisitePort(Protocol):
         *,
         request: CollectionRequest,
         canonical_query: CanonicalQueryContract,
+        clock_state: ResolvedClockState,
     ) -> ResolvedPrerequisiteBundle: ...
 
 
@@ -633,6 +944,28 @@ class CellRuntimePorts:
     require_hermes_delegation: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.clock_port, ClockAttestationPort):
+            raise ClosedValidationError(
+                "cell_runtime_ports.clock_port: expected ClockAttestationPort"
+            )
+        if not isinstance(self.timezone_port, TimezonePolicyPort):
+            raise ClosedValidationError(
+                "cell_runtime_ports.timezone_port: expected TimezonePolicyPort"
+            )
+        if not isinstance(self.registry_port, ProtectedRegistryPort):
+            raise ClosedValidationError(
+                "cell_runtime_ports.registry_port: expected ProtectedRegistryPort"
+            )
+        if not isinstance(self.prerequisite_port, PurposePrerequisitePort):
+            raise ClosedValidationError(
+                "cell_runtime_ports.prerequisite_port: expected PurposePrerequisitePort"
+            )
+        if self.signer_port is not None and not isinstance(
+            self.signer_port, EnvelopeSignerPort
+        ):
+            raise ClosedValidationError(
+                "cell_runtime_ports.signer_port: expected EnvelopeSignerPort or None"
+            )
         if not isinstance(self.require_hermes_delegation, bool):
             raise ClosedValidationError(
                 "cell_runtime_ports.require_hermes_delegation: expected bool"
@@ -650,6 +983,8 @@ __all__ = [
     "PurposePrerequisitePort",
     "ReservationPort",
     "ResolvedClockState",
+    "ResolvedGate3SelectionState",
+    "ResolvedHermesDelegationState",
     "ResolvedLiveCertificationState",
     "ResolvedPrerequisiteBundle",
     "ResolvedRegistryState",

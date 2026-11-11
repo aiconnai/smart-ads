@@ -246,7 +246,16 @@ def _check_numeric_matrix(
                 raise ClosedValidationError(
                     f"raw_numeric_value: invalid int64_count lexical form {raw_numeric_value!r}"
                 )
-            parsed_int = int(raw_numeric_value, 10)
+            if len(raw_numeric_value) > 20:
+                raise ClosedValidationError(
+                    "raw_numeric_value: int64_count digit length exceeds 20 digits"
+                )
+            try:
+                parsed_int = int(raw_numeric_value, 10)
+            except ValueError as exc:
+                raise ClosedValidationError(
+                    "raw_numeric_value: invalid int64_count integer representation"
+                ) from exc
             if not (0 <= parsed_int <= MAX_INT64):
                 raise ClosedValidationError(
                     f"raw_numeric_value: int64_count {parsed_int} exceeds MAX_INT64"
@@ -261,7 +270,16 @@ def _check_numeric_matrix(
                 raise ClosedValidationError(
                     f"raw_numeric_value: invalid int64_minor_currency lexical form {raw_numeric_value!r}"
                 )
-            parsed_money = int(raw_numeric_value, 10)
+            if len(raw_numeric_value) > 20:
+                raise ClosedValidationError(
+                    "raw_numeric_value: int64_minor_currency digit length exceeds 20 digits"
+                )
+            try:
+                parsed_money = int(raw_numeric_value, 10)
+            except ValueError as exc:
+                raise ClosedValidationError(
+                    "raw_numeric_value: invalid int64_minor_currency integer representation"
+                ) from exc
             if not (0 <= parsed_money <= MAX_INT64):
                 raise ClosedValidationError(
                     f"raw_numeric_value: int64_minor_currency {parsed_money} exceeds MAX_INT64"
@@ -387,7 +405,17 @@ def parse_brl_decimal_to_minor_units(raw: object) -> str:
         raise ClosedValidationError(
             f"brl_decimal: expected canonical unsigned BRL decimal with <=2 fractional digits, got {raw!r}"
         )
-    major = int(match.group(1), 10)
+    major_str = match.group(1)
+    if len(major_str) > 20:
+        raise ClosedValidationError(
+            "brl_decimal: major-unit digit length exceeds 20 digits"
+        )
+    try:
+        major = int(major_str, 10)
+    except ValueError as exc:
+        raise ClosedValidationError(
+            "brl_decimal: invalid major-unit integer representation"
+        ) from exc
     frac_str = match.group(2)
     if frac_str is None:
         minor = 0

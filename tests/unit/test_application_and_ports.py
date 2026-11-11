@@ -43,6 +43,7 @@ from smart_ads.contracts import (
     TransportOutcome,
     canonicalize_jcs,
     compute_normalized_fact_set_digest,
+    compute_schema_bundle_digest,
     jcs_sha256,
     parse_timestamp_utc_micros,
 )
@@ -85,6 +86,8 @@ from smart_ads.ports import (
     PurposePrerequisitePort,
     ReservationPort,
     ResolvedClockState,
+    ResolvedGate3SelectionState,
+    ResolvedHermesDelegationState,
     ResolvedLiveCertificationState,
     ResolvedPrerequisiteBundle,
     ResolvedRegistryState,
@@ -309,18 +312,100 @@ def _make_sao_paulo_tz_rules(
     )
 
 
+def _default_canonical_query() -> CanonicalQueryContract:
+    return CanonicalQueryContract(
+        tenant_ref="tenant:ibvi",
+        binding_ref="binding:meta-primary",
+        account_ref="account:ibvi-01",
+        resource_scope_ref="scope:campaigns-active",
+        ad_platform_ref="meta",
+        date_rule="previous_local_day",
+        date_range=DateRange("2026-11-10", "2026-11-10", True),
+        reporting_timezone="America/Sao_Paulo",
+        tzdb_version="2026a",
+        resource_level="campaign",
+        metric_semantic_refs=(
+            "metric:clicks_v1",
+            "metric:impressions_v1",
+            "metric:spend_v1",
+        ),
+        requested_capabilities=("cap:campaign-basic-v1",),
+        breakdowns=(),
+        currency="BRL",
+    )
+
+
 def _make_prereq_bundle(
     purpose: CollectionPurpose,
     *,
-    gate3_7b_selection_role: str | None = "certification",
+    gate3_7b_selection_role: str = "certification",
+    gate3_ops_selection_role: str = "operational_renewal",
+    gate3_revalidated_at_utc: str = "2026-11-11T14:55:00Z",
+    gate3_valid_until_utc: str = "2026-11-11T15:10:00Z",
+    gate3_driver_contract_digest: str | None = None,
+    gate3_canonical_query_digest: str | None = None,
+    gate3_schema_bundle_digest: str | None = None,
+    gate3_resource_mapping_digest: str | None = None,
+    gate3_scope: str = "scope:campaigns-active",
+    gate3_fp: str = "sha256:" + ("c" * 64),
+    omit_gate3_selection: bool = False,
+    mismatch_gate3_locator: bool = False,
     renewal_selection_role: str = "operational_renewal",
     certified_fp: str = "sha256:" + ("c" * 64),
     renewal_fp: str = "sha256:" + ("c" * 64),
+    certificate_issued_at_utc: str = "2026-11-11T00:00:00Z",
     certificate_valid_until_utc: str = "2026-11-12T00:00:00Z",
+    cert_tenant_ref: str = "tenant:ibvi",
+    cert_binding_ref: str = "binding:meta-primary",
+    cert_scope_ref: str = "scope:campaigns-active",
+    cert_driver_id: str = "pipeboard_hosted",
+    cert_driver_contract_digest: str | None = None,
+    cert_canonical_query_digest: str | None = None,
+    cert_schema_bundle_digest: str | None = None,
+    cert_resource_mapping_digest: str | None = None,
     include_delegation_context: bool = False,
+    omit_hermes_state_only: bool = False,
+    omit_delegation_locator_only: bool = False,
+    mismatch_delegation_locator: bool = False,
+    delegation_tenant_ref: str = "tenant:ibvi",
+    delegation_front_ref: str = "front:ibvi",
+    delegation_profile_ref: str = "profile:reader",
+    delegation_binding_ref: str = "binding:meta-primary",
+    delegation_scope_ref: str = "scope:campaigns-active",
+    delegation_issued_at_utc: str = "2026-11-11T14:55:00Z",
+    delegation_valid_until_utc: str = "2026-11-11T15:10:00Z",
     omit_live_cert: bool = False,
     mismatch_head_locator: bool = False,
+    extra_gate3_on_7a: ResolvedGate3SelectionState | None = None,
+    extra_hermes_on_non_ops: ResolvedHermesDelegationState | None = None,
 ) -> ResolvedPrerequisiteBundle:
+    default_reg = _make_registry_state()
+    default_drv_digest = default_reg.driver_contract_locator.content_digest
+    default_query_digest = _default_canonical_query().canonical_query_digest
+    default_schema_digest = compute_schema_bundle_digest()
+    default_rmc_digest = default_reg.snapshot.resource_mapping_contract_digest
+
+    eff_g3_drv = (
+        default_drv_digest
+        if gate3_driver_contract_digest is None
+        else gate3_driver_contract_digest
+    )
+    eff_g3_q = (
+        default_query_digest
+        if gate3_canonical_query_digest is None
+        else gate3_canonical_query_digest
+    )
+    eff_g3_schema = (
+        default_schema_digest
+        if gate3_schema_bundle_digest is None
+        else gate3_schema_bundle_digest
+    )
+    eff_g3_rmc = (
+        default_rmc_digest
+        if gate3_resource_mapping_digest is None
+        else gate3_resource_mapping_digest
+    )
+
     if purpose == "fixture_7a":
         return ResolvedPrerequisiteBundle(
             locators=PurposePrerequisiteLocators(
@@ -332,8 +417,33 @@ def _make_prereq_bundle(
                     "smart_ads/regression_fixture/v1", "2"
                 ),
             ),
+            gate3_selection=extra_gate3_on_7a,
+            hermes_delegation=extra_hermes_on_non_ops,
         )
+
+    g3_loc = _loc("smart_ads/gate3_selection_receipt/v1", "5")
+    g3_state_loc = (
+        _loc("smart_ads/gate3_selection_receipt/v1", "e")
+        if mismatch_gate3_locator
+        else g3_loc
+    )
     if purpose == "live_verification_7b":
+        g3_7b = (
+            None
+            if omit_gate3_selection
+            else ResolvedGate3SelectionState(
+                locator=g3_state_loc,
+                selection_role=gate3_7b_selection_role,  # type: ignore[arg-type]
+                revalidated_at_utc=gate3_revalidated_at_utc,
+                valid_until_utc=gate3_valid_until_utc,
+                candidate_driver_contract_digest=eff_g3_drv,
+                canonical_query_digest=eff_g3_q,
+                schema_bundle_digest=eff_g3_schema,
+                resource_mapping_contract_digest=eff_g3_rmc,
+                authorized_certification_scope=gate3_scope,
+                certification_fingerprint_digest=gate3_fp,
+            )
+        )
         return ResolvedPrerequisiteBundle(
             locators=PurposePrerequisiteLocators(
                 purpose="live_verification_7b",
@@ -343,9 +453,7 @@ def _make_prereq_bundle(
                 live_read_activation_receipt_locator=_loc(
                     "smart_ads/smart_ads_live_read_activation_receipt/v1", "4"
                 ),
-                gate3_selection_receipt_locator=_loc(
-                    "smart_ads/gate3_selection_receipt/v1", "5"
-                ),
+                gate3_selection_receipt_locator=g3_loc,
                 workload_identity_effect_proof_locator=_loc(
                     "smart_ads/effect_proof/v1", "6"
                 ),
@@ -353,7 +461,8 @@ def _make_prereq_bundle(
                     "smart_ads/effect_proof/v1", "7"
                 ),
             ),
-            gate3_7b_selection_role=gate3_7b_selection_role,
+            gate3_selection=g3_7b,
+            hermes_delegation=extra_hermes_on_non_ops,
         )
 
     head_loc = _loc("smart_ads/live_certification_head/v1", "8")
@@ -361,8 +470,42 @@ def _make_prereq_bundle(
     cert_loc = _loc("smart_ads/live_certification_certificate/v1", "a")
     delegation_loc = (
         _loc("smart_ads/ibvi_ads_delegation_context/v1", "b")
-        if include_delegation_context
+        if include_delegation_context and not omit_delegation_locator_only
         else None
+    )
+    hermes_state = (
+        ResolvedHermesDelegationState(
+            locator=(
+                _loc("smart_ads/ibvi_ads_delegation_context/v1", "d")
+                if mismatch_delegation_locator
+                else _loc("smart_ads/ibvi_ads_delegation_context/v1", "b")
+            ),
+            tenant_ref=delegation_tenant_ref,
+            front_ref=delegation_front_ref,
+            profile_ref=delegation_profile_ref,
+            binding_ref=delegation_binding_ref,
+            resource_scope_ref=delegation_scope_ref,
+            issued_at_utc=delegation_issued_at_utc,
+            valid_until_utc=delegation_valid_until_utc,
+        )
+        if include_delegation_context and not omit_hermes_state_only
+        else None
+    )
+    g3_ops = (
+        None
+        if omit_gate3_selection
+        else ResolvedGate3SelectionState(
+            locator=g3_state_loc,
+            selection_role=gate3_ops_selection_role,  # type: ignore[arg-type]
+            revalidated_at_utc=gate3_revalidated_at_utc,
+            valid_until_utc=gate3_valid_until_utc,
+            candidate_driver_contract_digest=eff_g3_drv,
+            canonical_query_digest=eff_g3_q,
+            schema_bundle_digest=eff_g3_schema,
+            resource_mapping_contract_digest=eff_g3_rmc,
+            authorized_certification_scope=gate3_scope,
+            certification_fingerprint_digest=gate3_fp,
+        )
     )
     live_cert = (
         None
@@ -375,8 +518,33 @@ def _make_prereq_bundle(
             ),
             transition_locator=tr_loc,
             certificate_locator=cert_loc,
-            certified_fingerprint_digest=certified_fp,
+            tenant_ref=cert_tenant_ref,
+            binding_ref=cert_binding_ref,
+            resource_scope_ref=cert_scope_ref,
+            driver_id=cert_driver_id,
+            driver_contract_digest=(
+                default_drv_digest
+                if cert_driver_contract_digest is None
+                else cert_driver_contract_digest
+            ),
+            canonical_query_digest=(
+                default_query_digest
+                if cert_canonical_query_digest is None
+                else cert_canonical_query_digest
+            ),
+            schema_bundle_digest=(
+                default_schema_digest
+                if cert_schema_bundle_digest is None
+                else cert_schema_bundle_digest
+            ),
+            resource_mapping_contract_digest=(
+                default_rmc_digest
+                if cert_resource_mapping_digest is None
+                else cert_resource_mapping_digest
+            ),
+            certificate_issued_at_utc=certificate_issued_at_utc,
             certificate_valid_until_utc=certificate_valid_until_utc,
+            certified_fingerprint_digest=certified_fp,
             renewal_selection_role=renewal_selection_role,
             renewal_fingerprint_digest=renewal_fp,
         )
@@ -393,9 +561,7 @@ def _make_prereq_bundle(
             live_certification_head_locator=head_loc,
             live_certification_transition_locator=tr_loc,
             live_certification_certificate_locator=cert_loc,
-            gate3_operational_renewal_locator=_loc(
-                "smart_ads/gate3_selection_receipt/v1", "5"
-            ),
+            gate3_operational_renewal_locator=g3_loc,
             workload_identity_effect_proof_locator=_loc(
                 "smart_ads/effect_proof/v1", "6"
             ),
@@ -404,7 +570,9 @@ def _make_prereq_bundle(
             ),
             delegation_context_locator=delegation_loc,
         ),
+        gate3_selection=g3_ops,
         live_certification=live_cert,
+        hermes_delegation=hermes_state,
     )
 
 
@@ -529,11 +697,13 @@ def _full_campaign_observations(
 
 @dataclass
 class StaticClockPort:
-    state: ResolvedClockState
+    state: Any
     calls: int = 0
 
     def get_authenticated_clock(self) -> ResolvedClockState:
         self.calls += 1
+        if callable(self.state):
+            return self.state()
         return self.state
 
 
@@ -563,14 +733,17 @@ class StaticRegistryPort:
 class StaticPrerequisitePort:
     bundle: ResolvedPrerequisiteBundle
     calls: int = 0
+    seen_clock_states: list[ResolvedClockState] = field(default_factory=list)
 
     def resolve_prerequisites(
         self,
         *,
         request: CollectionRequest,
         canonical_query: CanonicalQueryContract,
+        clock_state: ResolvedClockState,
     ) -> ResolvedPrerequisiteBundle:
         self.calls += 1
+        self.seen_clock_states.append(clock_state)
         return self.bundle
 
 
@@ -699,6 +872,8 @@ def test_ports_and_application_packages_reexport_all_public_symbols() -> None:
         "UtcOffsetTransition",
         "TimezoneRuleSnapshot",
         "ResolvedClockState",
+        "ResolvedGate3SelectionState",
+        "ResolvedHermesDelegationState",
         "ResolvedRegistryState",
         "ResolvedLiveCertificationState",
         "ResolvedPrerequisiteBundle",
@@ -1126,14 +1301,20 @@ def test_admission_clock_failures_emit_zero_io_counters() -> None:
             ),
             "clock_freshness_failed",
         ),
-        # Wrong clock locator type
+        # Wrong clock locator type (constructed lazily or mutated)
         (
-            _make_clock_state(
+            lambda: _make_clock_state(
                 locator_override=_loc("smart_ads/effect_proof/v1", "1"),
             ),
-            "invalid_clock_locator",
+            "admission_validation_failed",
         ),
     )
+
+    mutated_clock = _make_clock_state()
+    object.__setattr__(
+        mutated_clock, "locator", _loc("smart_ads/effect_proof/v1", "1")
+    )
+    bad_clocks = (*bad_clocks, (mutated_clock, "invalid_clock_locator"))
 
     for bad_clock, expected_code in bad_clocks:
         ports = CellRuntimePorts(
@@ -1945,3 +2126,762 @@ def test_execute_admitted_call_runs_7b_candidate_and_reference_independently() -
                 provider_port=SpyProviderPort(_make_default_live_batch()),
                 inventory_port=SpyInventoryPort(inventory),
             )
+
+
+# ---------------------------------------------------------------------------
+# 7. Final Fix-Wave Regression Coverage (Security, Completeness, Reliability)
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_locator_content_digest_enforced_on_resolved_states_and_bundle() -> None:
+    # 1. ResolvedClockState rejects tampered content_digest even with matching artifact_type
+    valid_clock = _make_clock_state()
+    with pytest.raises(ClosedValidationError):
+        ResolvedClockState(
+            locator=_loc(ClockAttestation.SCHEMA, "f"),
+            attestation=valid_clock.attestation,
+            configured_max_uncertainty_ms=1000,
+        )
+
+    # 2. ResolvedRegistryState rejects tampered snapshot locator or driver_contract_locator
+    valid_reg = _make_registry_state()
+    with pytest.raises(ClosedValidationError):
+        ResolvedRegistryState(
+            locator=_loc(PrivateRegistrySnapshot.SCHEMA, "f"),
+            snapshot=valid_reg.snapshot,
+            driver_contract_locator=valid_reg.driver_contract_locator,
+            driver_contract=valid_reg.driver_contract,
+        )
+    with pytest.raises(ClosedValidationError):
+        ResolvedRegistryState(
+            locator=valid_reg.locator,
+            snapshot=valid_reg.snapshot,
+            driver_contract_locator=_loc(PipeboardPhase1Contract.SCHEMA, "f"),
+            driver_contract=valid_reg.driver_contract,
+        )
+
+    # 3. AdmittedCollectionBundle rejects tampered bundle/registry/driver_contract locators
+    cell_ports = CellRuntimePorts(
+        clock_port=StaticClockPort(valid_clock),
+        timezone_port=StaticTimezonePort(_make_sao_paulo_tz_rules()),
+        registry_port=StaticRegistryPort(valid_reg),
+        prerequisite_port=StaticPrerequisitePort(_make_prereq_bundle("operational_read")),
+    )
+    bundle = admit_collection(
+        _make_request("operational_read"),
+        cell_ports,
+        admission_id="admission:bundle-digest-001",
+    )
+    with pytest.raises(ClosedValidationError):
+        AdmittedCollectionBundle(
+            admitted=bundle.admitted,
+            locator=_loc("smart_ads/admitted_collection/v1", "f"),
+            registry_snapshot=bundle.registry_snapshot,
+            driver_contract=bundle.driver_contract,
+        )
+    other_reg = _make_registry_state(cap_state="declared")
+    with pytest.raises(ClosedValidationError):
+        AdmittedCollectionBundle(
+            admitted=bundle.admitted,
+            locator=bundle.locator,
+            registry_snapshot=other_reg.snapshot,
+            driver_contract=bundle.driver_contract,
+        )
+    other_contract = replace(
+        bundle.driver_contract, contract_id="driver-contract:pipeboard-phase1-alt"
+    )
+    with pytest.raises(ClosedValidationError):
+        AdmittedCollectionBundle(
+            admitted=bundle.admitted,
+            locator=bundle.locator,
+            registry_snapshot=bundle.registry_snapshot,
+            driver_contract=other_contract,
+        )
+
+    # 4. admit_collection rejects tampered content_digest on mutated ResolvedClockState / ResolvedRegistryState with zero I/O
+    tampered_clock = _make_clock_state()
+    object.__setattr__(
+        tampered_clock, "locator", _loc(ClockAttestation.SCHEMA, "f")
+    )
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        replace(cell_ports, clock_port=StaticClockPort(tampered_clock)),
+        expected_reason_code="invalid_clock_locator",
+    )
+
+    tampered_reg = _make_registry_state()
+    object.__setattr__(
+        tampered_reg, "locator", _loc(PrivateRegistrySnapshot.SCHEMA, "f")
+    )
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        replace(cell_ports, registry_port=StaticRegistryPort(tampered_reg)),
+        expected_reason_code="invalid_registry_locator",
+    )
+
+    tampered_drv_reg = _make_registry_state()
+    object.__setattr__(
+        tampered_drv_reg,
+        "driver_contract_locator",
+        _loc(PipeboardPhase1Contract.SCHEMA, "f"),
+    )
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        replace(cell_ports, registry_port=StaticRegistryPort(tampered_drv_reg)),
+        expected_reason_code="invalid_driver_contract_locator",
+    )
+
+
+def test_gate3_freshness_bindings_and_hermes_delegation_fail_closed_with_zero_io() -> None:
+    clock = _make_clock_state()  # 2026-11-11T15:00:00.250000Z +/- 500ms -> upper 15:00:00.750000Z
+    tz = _make_sao_paulo_tz_rules()
+    reg = _make_registry_state(cap_state="live_certified")
+    bad_sha = "sha256:" + ("0" * 64)
+
+    # ResolvedGate3SelectionState enforces exact 900s window, max_age=900, max_uncertainty=1000, deadline=60
+    valid_g3 = _make_prereq_bundle("operational_read").gate3_selection
+    assert valid_g3 is not None
+    with pytest.raises(ClosedValidationError):
+        replace(valid_g3, valid_until_utc="2026-11-11T15:10:01Z")
+    with pytest.raises(ClosedValidationError):
+        replace(valid_g3, maximum_age_seconds=901)
+    with pytest.raises(ClosedValidationError):
+        replace(valid_g3, maximum_clock_uncertainty_ms=1500)
+    with pytest.raises(ClosedValidationError):
+        replace(valid_g3, maximum_provider_dispatch_deadline_seconds=30)
+
+    # ResolvedHermesDelegationState enforces route == '/ibvi-ads' and issued <= valid_until
+    valid_hermes = _make_prereq_bundle(
+        "operational_read", include_delegation_context=True
+    ).hermes_delegation
+    assert valid_hermes is not None
+    with pytest.raises(ClosedValidationError):
+        replace(valid_hermes, route="/other-route")
+    with pytest.raises(ClosedValidationError):
+        replace(
+            valid_hermes,
+            issued_at_utc="2026-11-11T15:10:00Z",
+            valid_until_utc="2026-11-11T15:09:59Z",
+        )
+
+    # fixture_7a rejects non-None gate3_selection or hermes_delegation
+    for bad_7a_prereq in (
+        _make_prereq_bundle("fixture_7a", extra_gate3_on_7a=valid_g3),
+        _make_prereq_bundle("fixture_7a", extra_hermes_on_non_ops=valid_hermes),
+    ):
+        _assert_zero_io_admission_failure(
+            _make_request("fixture_7a"),
+            CellRuntimePorts(
+                clock_port=StaticClockPort(clock),
+                timezone_port=StaticTimezonePort(tz),
+                registry_port=StaticRegistryPort(_make_registry_state(cap_state="declared")),
+                prerequisite_port=StaticPrerequisitePort(bad_7a_prereq),
+            ),
+            expected_reason_code="unexpected_live_prerequisite_metadata",
+        )
+
+    # live_verification_7b rejects non-None hermes_delegation
+    _assert_zero_io_admission_failure(
+        _make_request("live_verification_7b"),
+        CellRuntimePorts(
+            clock_port=StaticClockPort(clock),
+            timezone_port=StaticTimezonePort(tz),
+            registry_port=StaticRegistryPort(reg),
+            prerequisite_port=StaticPrerequisitePort(
+                _make_prereq_bundle(
+                    "live_verification_7b", extra_hermes_on_non_ops=valid_hermes
+                )
+            ),
+        ),
+        expected_reason_code="unexpected_hermes_delegation_state",
+    )
+
+    # configured_max_uncertainty_ms > 1000 rejected against Gate-3 profile
+    wide_cfg_clock = _make_clock_state(
+        uncertainty_ms=500, configured_max_uncertainty_ms=1500
+    )
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        CellRuntimePorts(
+            clock_port=StaticClockPort(wide_cfg_clock),
+            timezone_port=StaticTimezonePort(tz),
+            registry_port=StaticRegistryPort(reg),
+            prerequisite_port=StaticPrerequisitePort(_make_prereq_bundle("operational_read")),
+        ),
+        expected_reason_code="gate3_clock_uncertainty_exceeded",
+    )
+
+    # Gate-3 freshness & exact bindings across BOTH live_verification_7b and operational_read
+    for purpose in ("live_verification_7b", "operational_read"):
+        req = _make_request(purpose)
+        for prereq_kwargs, expected_code in (
+            ({"omit_gate3_selection": True}, "missing_gate3_selection"),
+            ({"mismatch_gate3_locator": True}, "gate3_locator_mismatch"),
+            # Future Gate-3 receipt: revalidated_at 15:00:01Z > lower 14:59:59.750Z
+            (
+                {
+                    "gate3_revalidated_at_utc": "2026-11-11T15:00:01Z",
+                    "gate3_valid_until_utc": "2026-11-11T15:15:01Z",
+                },
+                "gate3_selection_not_yet_valid",
+            ),
+            # Expired Gate-3 receipt: valid_until 15:00:00Z < upper 15:00:00.750Z
+            (
+                {
+                    "gate3_revalidated_at_utc": "2026-11-11T14:45:00Z",
+                    "gate3_valid_until_utc": "2026-11-11T15:00:00Z",
+                },
+                "expired_gate3_selection",
+            ),
+            # < 60s remaining before valid_until_utc: valid_until 15:01:00Z < upper (15:00:00.750Z) + 60s
+            (
+                {
+                    "gate3_revalidated_at_utc": "2026-11-11T14:46:00Z",
+                    "gate3_valid_until_utc": "2026-11-11T15:01:00Z",
+                },
+                "gate3_dispatch_deadline_exceeds_validity",
+            ),
+            ({"gate3_driver_contract_digest": bad_sha}, "gate3_driver_contract_mismatch"),
+            ({"gate3_canonical_query_digest": bad_sha}, "gate3_canonical_query_mismatch"),
+            ({"gate3_schema_bundle_digest": bad_sha}, "gate3_schema_bundle_mismatch"),
+            ({"gate3_resource_mapping_digest": bad_sha}, "gate3_resource_mapping_mismatch"),
+            ({"gate3_scope": "scope:campaigns-other"}, "gate3_scope_mismatch"),
+        ):
+            _assert_zero_io_admission_failure(
+                req,
+                CellRuntimePorts(
+                    clock_port=StaticClockPort(clock),
+                    timezone_port=StaticTimezonePort(tz),
+                    registry_port=StaticRegistryPort(reg),
+                    prerequisite_port=StaticPrerequisitePort(
+                        _make_prereq_bundle(purpose, **prereq_kwargs)
+                    ),
+                ),
+                expected_reason_code=expected_code,
+            )
+
+    # Live certification bindings & Hermes delegation authorization on operational_read
+    ops_req = _make_request("operational_read")
+    for ops_kwargs, req_hermes, expected_code in (
+        ({"gate3_ops_selection_role": "certification"}, False, "invalid_gate3_selection_role"),
+        ({"gate3_fp": bad_sha}, False, "renewal_fingerprint_mismatch"),
+        ({"cert_tenant_ref": "tenant:other"}, False, "live_certificate_tenant_mismatch"),
+        ({"cert_binding_ref": "binding:meta-other"}, False, "live_certificate_binding_mismatch"),
+        ({"cert_scope_ref": "scope:campaigns-other"}, False, "live_certificate_scope_mismatch"),
+        ({"cert_driver_id": "meta_direct"}, False, "live_certificate_driver_mismatch"),
+        (
+            {"cert_driver_contract_digest": bad_sha},
+            False,
+            "live_certificate_driver_contract_mismatch",
+        ),
+        (
+            {"cert_canonical_query_digest": bad_sha},
+            False,
+            "live_certificate_canonical_query_mismatch",
+        ),
+        (
+            {"cert_schema_bundle_digest": bad_sha},
+            False,
+            "live_certificate_schema_bundle_mismatch",
+        ),
+        (
+            {"cert_resource_mapping_digest": bad_sha},
+            False,
+            "live_certificate_resource_mapping_mismatch",
+        ),
+        (
+            {"certificate_issued_at_utc": "2026-11-11T15:00:01Z"},
+            False,
+            "future_live_certificate",
+        ),
+        # Partial Hermes delegation (locator without state or state without locator)
+        (
+            {"include_delegation_context": True, "omit_hermes_state_only": True},
+            False,
+            "missing_hermes_delegation_context",
+        ),
+        (
+            {"include_delegation_context": True, "omit_delegation_locator_only": True},
+            False,
+            "missing_hermes_delegation_context",
+        ),
+        (
+            {"include_delegation_context": True, "mismatch_delegation_locator": True},
+            True,
+            "hermes_delegation_locator_mismatch",
+        ),
+        (
+            {"include_delegation_context": True, "delegation_tenant_ref": "tenant:other"},
+            True,
+            "hermes_delegation_tenant_mismatch",
+        ),
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_binding_ref": "binding:meta-other",
+            },
+            True,
+            "hermes_delegation_binding_mismatch",
+        ),
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_scope_ref": "scope:campaigns-other",
+            },
+            True,
+            "hermes_delegation_scope_mismatch",
+        ),
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_issued_at_utc": "2026-11-11T15:00:01Z",
+            },
+            True,
+            "future_hermes_delegation",
+        ),
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_valid_until_utc": "2026-11-11T15:00:00Z",
+            },
+            True,
+            "expired_hermes_delegation",
+        ),
+        # Unauthorized Hermes (front_ref, profile_ref) not in snapshot.authorized_scopes
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_front_ref": "front:rogue-front",
+            },
+            True,
+            "unauthorized_hermes_delegation_scope",
+        ),
+        (
+            {
+                "include_delegation_context": True,
+                "delegation_profile_ref": "profile:rogue-profile",
+            },
+            True,
+            "unauthorized_hermes_delegation_scope",
+        ),
+    ):
+        _assert_zero_io_admission_failure(
+            ops_req,
+            CellRuntimePorts(
+                clock_port=StaticClockPort(clock),
+                timezone_port=StaticTimezonePort(tz),
+                registry_port=StaticRegistryPort(reg),
+                prerequisite_port=StaticPrerequisitePort(
+                    _make_prereq_bundle("operational_read", **ops_kwargs)
+                ),
+                require_hermes_delegation=req_hermes,
+            ),
+            expected_reason_code=expected_code,
+        )
+
+
+def test_cell_runtime_ports_protocol_validation_and_non_ports_rejection() -> None:
+    clock_p = StaticClockPort(_make_clock_state())
+    tz_p = StaticTimezonePort(_make_sao_paulo_tz_rules())
+    reg_p = StaticRegistryPort(_make_registry_state())
+    pre_p = StaticPrerequisitePort(_make_prereq_bundle("operational_read"))
+
+    for bad_kwargs in (
+        {"clock_port": None, "timezone_port": tz_p, "registry_port": reg_p, "prerequisite_port": pre_p},
+        {"clock_port": object(), "timezone_port": tz_p, "registry_port": reg_p, "prerequisite_port": pre_p},
+        {"clock_port": clock_p, "timezone_port": object(), "registry_port": reg_p, "prerequisite_port": pre_p},
+        {"clock_port": clock_p, "timezone_port": tz_p, "registry_port": object(), "prerequisite_port": pre_p},
+        {"clock_port": clock_p, "timezone_port": tz_p, "registry_port": reg_p, "prerequisite_port": object()},
+        {
+            "clock_port": clock_p,
+            "timezone_port": tz_p,
+            "registry_port": reg_p,
+            "prerequisite_port": pre_p,
+            "signer_port": object(),
+        },
+    ):
+        with pytest.raises(ClosedValidationError):
+            CellRuntimePorts(**bad_kwargs)  # type: ignore[arg-type]
+
+    with pytest.raises(AdmissionError) as exc_info:
+        admit_collection(
+            _make_request("operational_read"),
+            object(),  # type: ignore[arg-type]
+            admission_id="admission:bad-ports-001",
+        )
+    assert exc_info.value.reason_code == "invalid_runtime_ports"
+    assert exc_info.value.counters == ExternalIOCounters.zero()
+
+
+def test_timezone_rule_snapshot_year_0001_and_9999_boundaries_fail_closed() -> None:
+    earliest = parse_timestamp_utc_micros(
+        "0001-01-01T00:00:00Z", allow_whole_seconds=True
+    )
+    tz_minus3 = TimezoneRuleSnapshot(
+        timezone_name="America/Sao_Paulo",
+        tzdb_version="2026a",
+        transitions=(UtcOffsetTransition(earliest, -10_800),),
+    )
+    tz_plus2 = TimezoneRuleSnapshot(
+        timezone_name="America/Sao_Paulo",
+        tzdb_version="2026a",
+        transitions=(UtcOffsetTransition(earliest, 7_200),),
+    )
+
+    # 1. 0001-01-01T01:00:00.000000Z in UTC-3 underflows date.min in local_civil_date_at
+    ts_underflow_local = parse_timestamp_utc_micros("0001-01-01T01:00:00.000000Z")
+    with pytest.raises(ClosedValidationError):
+        tz_minus3.local_civil_date_at(ts_underflow_local)
+
+    # 2. 0001-01-01T12:00:00.000000Z in UTC-3 has local date 0001-01-01 -> previous_local_day underflows date.min
+    ts_prev_day_underflow = parse_timestamp_utc_micros("0001-01-01T12:00:00.000000Z")
+    with pytest.raises(ClosedValidationError):
+        tz_minus3.compute_previous_local_day(
+            lower_utc_micros=ts_prev_day_underflow,
+            upper_utc_micros=ts_prev_day_underflow,
+        )
+
+    # 3. 9999-12-31T23:59:59.000000Z in UTC+2 overflows date.max in local_civil_date_at
+    ts_overflow_max = parse_timestamp_utc_micros("9999-12-31T23:59:59.000000Z")
+    with pytest.raises(ClosedValidationError):
+        tz_plus2.local_civil_date_at(ts_overflow_max)
+
+    # Verify admit_collection wraps all extreme boundary clocks into AdmissionError(counters=0)
+    reg = _make_registry_state(
+        cap_state="live_certified",
+        issued_at_utc="0001-01-01T00:00:00Z",
+        valid_until_utc="9999-12-31T23:59:59Z",
+    )
+    for now_str, issued_str, valid_str, tz_obj in (
+        (
+            "0001-01-01T01:00:00.000000Z",
+            "0001-01-01T00:59:50Z",
+            "0001-01-01T01:00:10Z",
+            tz_minus3,
+        ),
+        (
+            "0001-01-01T12:00:00.000000Z",
+            "0001-01-01T11:59:50Z",
+            "0001-01-01T12:00:10Z",
+            tz_minus3,
+        ),
+        (
+            "9999-12-31T23:59:59.000000Z",
+            "9999-12-31T23:59:50Z",
+            "9999-12-31T23:59:59Z",
+            tz_plus2,
+        ),
+    ):
+        extreme_clock = _make_clock_state(
+            now_utc=now_str,
+            uncertainty_ms=100,
+            issued_at_utc=issued_str,
+            valid_until_utc=valid_str,
+            maximum_age_seconds=30,
+        )
+        _assert_zero_io_admission_failure(
+            _make_request("operational_read"),
+            CellRuntimePorts(
+                clock_port=StaticClockPort(extreme_clock),
+                timezone_port=StaticTimezonePort(tz_obj),
+                registry_port=StaticRegistryPort(reg),
+                prerequisite_port=StaticPrerequisitePort(_make_prereq_bundle("operational_read")),
+            ),
+        )
+
+
+def test_completeness_http_status_none_and_complete_evaluation_invariants() -> None:
+    reg = _make_registry_state(cap_state="live_certified")
+    inventory = _make_expected_inventory(registry_snapshot_locator=reg.locator)
+    required_metrics = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
+    mappings = dict(PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS)
+    universe = build_expected_fact_universe(
+        inventory=inventory,
+        required_metrics=required_metrics,
+        metric_source_mappings=mappings,
+    )
+    complete_facts = [
+        NormalizedCollectionFact(
+            fact_key=fk,
+            presence_status="observed",
+            value_type="int64_minor_currency" if fk.metric_semantic_ref == "metric:spend_v1" else "int64_count",
+            raw_numeric_value="100",
+            unit="minor_currency" if fk.metric_semantic_ref == "metric:spend_v1" else "count",
+            currency="BRL" if fk.metric_semantic_ref == "metric:spend_v1" else None,
+        )
+        for fk in universe
+    ]
+
+    # TransportOutcome(network_ok=True, http_status=None, ...) MUST evaluate to FAILED
+    missing_http_ev = recompute_collection_completeness(
+        admission_succeeded=True,
+        inventory=inventory,
+        required_metrics=required_metrics,
+        metric_source_mappings=mappings,
+        transport_outcome=_ok_transport_outcome(http_status=None),
+        candidate_facts=complete_facts,
+    )
+    assert missing_http_ev.status == "failed"
+    assert "http_status_missing" in missing_http_ev.reasons
+    assert missing_http_ev.normalized_fact_set is None
+    assert missing_http_ev.normalized_fact_set_digest is None
+
+    # CompletenessEvaluation.__post_init__ rejects empty expected_fact_keys or mismatched keys on complete
+    sorted_facts, digest = compute_normalized_fact_set_digest(complete_facts)
+    with pytest.raises(ClosedValidationError):
+        CompletenessEvaluation(
+            status="complete",
+            reasons=(),
+            expected_fact_keys=frozenset(),
+            normalized_fact_set=sorted_facts,
+            normalized_fact_set_digest=digest,
+        )
+    with pytest.raises(ClosedValidationError):
+        CompletenessEvaluation(
+            status="complete",
+            reasons=(),
+            expected_fact_keys=frozenset(universe[:-1]),
+            normalized_fact_set=sorted_facts,
+            normalized_fact_set_digest=digest,
+        )
+
+
+def test_signer_port_payload_mutation_and_non_tuple_fail_closed(tmp_path: Path) -> None:
+    priv = tmp_path / "malicious_signer_ed25519.pem"
+    subprocess.run(
+        ["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(priv)],
+        check=True,
+        capture_output=True,
+    )
+    pub_raw = gov_p1.raw_public_key_from_pem(priv)
+    key_id = gov_p1.key_id_for(pub_raw)
+    key_reg_loc = _loc("smart_ads/key_authorization_registry/v1", "9")
+
+    @dataclass
+    class _MutatingAdmissionSigner:
+        def sign_and_store(
+            self, envelope_dict: dict[str, Any], *, domain_prefix: str
+        ) -> tuple[dict[str, Any], ArtifactLocator]:
+            mutated = dict(envelope_dict, tenant_ref="tenant:attacker")
+            mutated["canonical_query_contract"] = dict(
+                envelope_dict["canonical_query_contract"],
+                tenant_ref="tenant:attacker",
+            )
+            rebuilt_cqc = CanonicalQueryContract.from_dict(
+                dict(mutated["canonical_query_contract"], canonical_query_digest="")
+            ) if False else CanonicalQueryContract(
+                tenant_ref="tenant:attacker",
+                binding_ref=envelope_dict["binding_ref"],
+                account_ref=envelope_dict["account_ref"],
+                resource_scope_ref=envelope_dict["resource_scope_ref"],
+                ad_platform_ref="meta",
+                date_rule="previous_local_day",
+                date_range=DateRange.from_dict(envelope_dict["computed_date_range"]),
+                reporting_timezone=envelope_dict["reporting_timezone"],
+                tzdb_version=envelope_dict["tzdb_version"],
+                resource_level=envelope_dict["resource_level"],
+                metric_semantic_refs=tuple(
+                    envelope_dict["canonical_query_contract"]["metric_semantic_refs"]
+                ),
+                requested_capabilities=tuple(envelope_dict["requested_capabilities"]),
+                breakdowns=(),
+                currency=envelope_dict["currency"],
+            )
+            mutated["canonical_query_contract"] = rebuilt_cqc.to_dict()
+            mutated["canonical_query_digest"] = rebuilt_cqc.canonical_query_digest
+            mutated["integrity"] = {
+                "key_id": key_id,
+                "key_registry_snapshot_locator": key_reg_loc.to_dict(),
+            }
+            signed = gov_p1.sign_envelope(mutated, domain_prefix, priv)
+            loc = ArtifactLocator.for_canonical_bytes(
+                signed["$schema"], canonicalize_jcs(signed)
+            )
+            return signed, loc
+
+    @dataclass
+    class _NonTupleSigner:
+        def sign_and_store(
+            self, envelope_dict: dict[str, Any], *, domain_prefix: str
+        ) -> Any:
+            return [envelope_dict]
+
+    reg = _make_registry_state(cap_state="live_certified")
+    base_ports = CellRuntimePorts(
+        clock_port=StaticClockPort(_make_clock_state()),
+        timezone_port=StaticTimezonePort(_make_sao_paulo_tz_rules()),
+        registry_port=StaticRegistryPort(reg),
+        prerequisite_port=StaticPrerequisitePort(_make_prereq_bundle("operational_read")),
+    )
+
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        replace(base_ports, signer_port=_MutatingAdmissionSigner()),
+        expected_reason_code="signed_admission_payload_mismatch",
+    )
+    _assert_zero_io_admission_failure(
+        _make_request("operational_read"),
+        replace(base_ports, signer_port=_NonTupleSigner()),
+        expected_reason_code="invalid_signer_response",
+    )
+
+    # Also test execute_admitted_call signer payload mutation & non-2-tuple rejection
+    bundle = admit_collection(
+        _make_request("operational_read"),
+        base_ports,
+        admission_id="admission:result-signer-001",
+    )
+    res_loc = _loc("smart_ads/authorization_reservation_record/v1", "1")
+    inventory = _make_expected_inventory(registry_snapshot_locator=reg.locator)
+
+    @dataclass
+    class _MutatingResultSigner:
+        def sign_and_store(
+            self, envelope_dict: dict[str, Any], *, domain_prefix: str
+        ) -> tuple[dict[str, Any], ArtifactLocator]:
+            mutated = dict(
+                envelope_dict,
+                call_side="candidate",
+                integrity={
+                    "key_id": key_id,
+                    "key_registry_snapshot_locator": key_reg_loc.to_dict(),
+                },
+            )
+            signed = gov_p1.sign_envelope(mutated, domain_prefix, priv)
+            loc = ArtifactLocator.for_canonical_bytes(
+                signed["$schema"], canonicalize_jcs(signed)
+            )
+            return signed, loc
+
+    for bad_result_signer in (_MutatingResultSigner(), _NonTupleSigner()):
+        with pytest.raises(ClosedValidationError):
+            execute_admitted_call(
+                bundle=bundle,
+                call_side="operational",
+                reservation_locator=res_loc,
+                provider_port=SpyProviderPort(_make_default_live_batch()),
+                inventory_port=SpyInventoryPort(inventory),
+                signer_port=bad_result_signer,
+            )
+
+
+def test_collect_predispatch_admission_error_and_post_rpc_fail_closed_reduction() -> None:
+    reg = _make_registry_state(cap_state="live_certified")
+    cell_ports = CellRuntimePorts(
+        clock_port=StaticClockPort(_make_clock_state()),
+        timezone_port=StaticTimezonePort(_make_sao_paulo_tz_rules()),
+        registry_port=StaticRegistryPort(reg),
+        prerequisite_port=StaticPrerequisitePort(_make_prereq_bundle("operational_read")),
+    )
+    inventory = _make_expected_inventory(registry_snapshot_locator=reg.locator)
+
+    # 1. Pre-dispatch reservation failures in collect() MUST raise AdmissionError with zero counters and 0 RPC calls
+    @dataclass
+    class _RaisingReservationPort:
+        def reserve_admitted_call(
+            self, *, admitted_collection_locator: ArtifactLocator, call_side: CallSide
+        ) -> ArtifactLocator:
+            raise ClosedValidationError("reservation store unavailable")
+
+    @dataclass
+    class _WrongTypeReservationPort:
+        def reserve_admitted_call(
+            self, *, admitted_collection_locator: ArtifactLocator, call_side: CallSide
+        ) -> ArtifactLocator:
+            return _loc("smart_ads/effect_proof/v1", "1")
+
+    for bad_res_port in (_RaisingReservationPort(), _WrongTypeReservationPort(), object()):
+        prov_spy = SpyProviderPort(_make_default_live_batch())
+        inv_spy = SpyInventoryPort(inventory)
+        with pytest.raises(AdmissionError) as exc_info:
+            collect(
+                _make_request("operational_read"),
+                admission_id="admission:predispatch-res-fail",
+                cell_ports=cell_ports,
+                reservation_port=bad_res_port,  # type: ignore[arg-type]
+                provider_port=prov_spy,
+                inventory_port=inv_spy,
+            )
+        assert exc_info.value.counters == ExternalIOCounters.zero()
+        assert len(prov_spy.calls) == 0
+        assert inv_spy.calls == 0
+
+    # Invalid request in collect() also raises AdmissionError with zero counters
+    with pytest.raises(AdmissionError) as req_exc:
+        collect(
+            object(),  # type: ignore[arg-type]
+            admission_id="admission:bad-req",
+            cell_ports=cell_ports,
+            reservation_port=SpyReservationPort(),
+            provider_port=SpyProviderPort(_make_default_live_batch()),
+            inventory_port=SpyInventoryPort(inventory),
+        )
+    assert req_exc.value.counters == ExternalIOCounters.zero()
+
+    # 2. Post-RPC corrupt inventory_port (raising ClosedValidationError or returning garbage) -> FAILED outcome + CollectionResult + io_counters
+    bundle = admit_collection(
+        _make_request("operational_read"),
+        cell_ports,
+        admission_id="admission:post-rpc-001",
+    )
+    res_loc = _loc("smart_ads/authorization_reservation_record/v1", "1")
+
+    @dataclass
+    class _RaisingInventoryPort:
+        def resolve_expected_inventory(self, **kwargs: Any) -> ExpectedResourceInventory | None:
+            raise ClosedValidationError("corrupt inventory envelope")
+
+    @dataclass
+    class _BogusInventoryPort:
+        def resolve_expected_inventory(self, **kwargs: Any) -> Any:
+            return {"not": "ExpectedResourceInventory"}
+
+    for corrupt_inv_port in (_RaisingInventoryPort(), _BogusInventoryPort()):
+        outcome = execute_admitted_call(
+            bundle=bundle,
+            call_side="operational",
+            reservation_locator=res_loc,
+            provider_port=SpyProviderPort(_make_default_live_batch()),
+            inventory_port=corrupt_inv_port,
+        )
+        assert outcome.completeness.status == "failed"
+        assert "missing_expected_inventory" in outcome.completeness.reasons
+        assert outcome.result.normalized_fact_set is None
+        assert len(outcome.result.candidates) == 6
+        assert outcome.io_counters == _make_default_live_batch().io_counters
+
+    # 3. Post-RPC unmapped metric_semantic_ref in provider batch -> PARTIAL outcome + CollectionResult + io_counters
+    base_obs_a = _full_campaign_observations(CAMPAIGN_REF_A)
+    extra_unmapped_obs = SanitizedMetricObservation(
+        metric_semantic_ref="metric:unknown_extra_v1",
+        presence_status="observed",
+        value_type="int64_count",
+        raw_numeric_value="7",
+        unit="count",
+        currency=None,
+    )
+    obs_a_with_unmapped = SanitizedResourceObservation(
+        resource_ref=CAMPAIGN_REF_A,
+        metric_date="2026-11-10",
+        metric_observations=(*base_obs_a.metric_observations, extra_unmapped_obs),
+    )
+    unmapped_batch = replace(
+        _make_default_live_batch(),
+        resource_observations=(
+            obs_a_with_unmapped,
+            _full_campaign_observations(CAMPAIGN_REF_B),
+        ),
+    )
+    unmapped_outcome = execute_admitted_call(
+        bundle=bundle,
+        call_side="operational",
+        reservation_locator=res_loc,
+        provider_port=SpyProviderPort(unmapped_batch),
+        inventory_port=SpyInventoryPort(inventory),
+    )
+    assert unmapped_outcome.completeness.status == "partial"
+    assert "reducer_order_or_count_mismatch" in unmapped_outcome.completeness.reasons
+    assert unmapped_outcome.result.transport_outcome.reducer_order_or_count_mismatch is True
+    assert unmapped_outcome.result.normalized_fact_set is None
+    assert len(unmapped_outcome.result.candidates) == 6
+    assert unmapped_outcome.io_counters == unmapped_batch.io_counters

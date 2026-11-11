@@ -5,50 +5,14 @@ import base64
 from dataclasses import dataclass, field
 import hashlib
 import hmac
-import re
-from typing import Final
 
 from smart_ads.contracts.scalars import (
+    CANONICAL_RESOURCE_REF_RE,
     ClosedValidationError,
     validate_non_empty_str,
     validate_opaque_ref,
+    validate_resource_ref,
 )
-
-CANONICAL_RESOURCE_REF_RE: Final[re.Pattern[str]] = re.compile(
-    r"^resource:[a-z2-7]{51}[aq]$"
-)
-
-
-def validate_resource_ref(
-    value: object,
-    *,
-    field_name: str = "resource_ref",
-) -> str:
-    """Validate canonical 256-bit RFC 4648 lowercase unpadded Base32 `resource_ref`."""
-    if (
-        not isinstance(value, str)
-        or "\n" in value
-        or "\r" in value
-        or CANONICAL_RESOURCE_REF_RE.fullmatch(value) is None
-    ):
-        raise ClosedValidationError(
-            f"{field_name}: expected canonical '^resource:[a-z2-7]{{51}}[aq]$'"
-        )
-    body = value.split(":", 1)[1]
-    try:
-        raw = base64.b32decode(body.upper() + "====", casefold=False)
-    except Exception as exc:
-        raise ClosedValidationError(
-            f"{field_name}: invalid RFC 4648 Base32 encoding"
-        ) from exc
-    if (
-        len(raw) != 32
-        or base64.b32encode(raw).decode("ascii").rstrip("=").lower() != body
-    ):
-        raise ClosedValidationError(
-            f"{field_name}: non-canonical 256-bit Base32 resource_ref"
-        )
-    return value
 
 
 def _validate_redacted_raw_provider_id(raw_provider_id: object) -> str:

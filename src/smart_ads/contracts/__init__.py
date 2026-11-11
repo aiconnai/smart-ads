@@ -43,6 +43,7 @@ from smart_ads.contracts.numerics import (
     validate_numeric_state,
 )
 from smart_ads.contracts.scalars import (
+    CANONICAL_RESOURCE_REF_RE,
     ClosedValidationError,
     parse_iso_date,
     parse_timestamp_utc_micros,
@@ -54,6 +55,7 @@ from smart_ads.contracts.scalars import (
     validate_iso_date,
     validate_non_empty_str,
     validate_opaque_ref,
+    validate_resource_ref,
     validate_sha256_prefixed,
     validate_timestamp_utc6,
     validate_timestamp_utc_seconds,
@@ -96,6 +98,7 @@ __all__ = [
     "AnalyticsLandingRow",
     "ArtifactLocator",
     "BaseMetricDefinition",
+    "CANONICAL_RESOURCE_REF_RE",
     "CORE_SCHEMA_DESCRIPTORS",
     "CalculationStatus",
     "CallSide",
@@ -162,6 +165,7 @@ __all__ = [
     "validate_non_empty_str",
     "validate_numeric_state",
     "validate_opaque_ref",
+    "validate_resource_ref",
     "validate_sha256_prefixed",
     "validate_source_metric_ref",
     "validate_timestamp_utc6",

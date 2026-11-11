@@ -51,6 +51,11 @@ from smart_ads.contracts.schemas import (
 from tools.governance import p1 as gov_p1
 
 
+VALID_REF_1 = "resource:" + ("a" * 52)
+VALID_REF_2 = "resource:" + ("b" * 51) + "a"
+VALID_REF_3 = "resource:" + ("c" * 51) + "a"
+
+
 def _loc(artifact_type: str, fill: str = "a") -> ArtifactLocator:
     return ArtifactLocator.from_digest(artifact_type, "sha256:" + (fill * 64))
 
@@ -87,7 +92,7 @@ def _make_canonical_query() -> CanonicalQueryContract:
 
 def _make_fact_key(
     *,
-    resource_ref: str = "resource:cmp-1",
+    resource_ref: str = VALID_REF_1,
     metric_date: str = "2026-11-10",
     metric_semantic_ref: str = "metric:impressions_v1",
     source_metric_ref: str = "source-metric:provider:pipeboard.impressions:v1",
@@ -529,14 +534,14 @@ def test_purpose_prerequisite_locators_and_admitted_collection(tmp_path: Path) -
 def test_facts_projection_landing_rows_and_derived_support() -> None:
     fk = _make_fact_key()
     assert fk.reconciliation_row_key == ReconciliationRowKey(
-        resource_ref="resource:cmp-1",
+        resource_ref=VALID_REF_1,
         metric_date="2026-11-10",
         resource_level="campaign",
         breakdown_signature="breakdown:none",
     )
     assert fk.canonical_metric_ref == "metric:impressions_v1"
     assert fk.set_identity_array() == [
-        "resource:cmp-1",
+        VALID_REF_1,
         "2026-11-10",
         "campaign",
         "breakdown:none",
@@ -759,7 +764,7 @@ def test_facts_projection_landing_rows_and_derived_support() -> None:
 def test_compute_normalized_fact_set_digest_ordering_and_rejections() -> None:
     f_b = NormalizedCollectionFact(
         fact_key=_make_fact_key(
-            resource_ref="resource:cmp-2",
+            resource_ref=VALID_REF_2,
             metric_semantic_ref="metric:impressions_v1",
             source_metric_ref="source-metric:provider:pipeboard.impressions:v1",
         ),
@@ -771,7 +776,7 @@ def test_compute_normalized_fact_set_digest_ordering_and_rejections() -> None:
     )
     f_a = NormalizedCollectionFact(
         fact_key=_make_fact_key(
-            resource_ref="resource:cmp-1",
+            resource_ref=VALID_REF_1,
             metric_semantic_ref="metric:clicks_v1",
             source_metric_ref="source-metric:provider:pipeboard.clicks:v1",
         ),
@@ -787,6 +792,44 @@ def test_compute_normalized_fact_set_digest_ordering_and_rejections() -> None:
         ADR_DATA_DOMAIN_PREFIXES["normalized_fact_set"],
         [f_a.to_dict(), f_b.to_dict()],
     )
+
+    # Retracted tombstone is valid inside complete normalized_fact_set (P-03)
+    f_tombstone = NormalizedCollectionFact(
+        fact_key=_make_fact_key(
+            resource_ref=VALID_REF_3,
+            metric_semantic_ref="metric:spend_v1",
+            source_metric_ref="source-metric:provider:pipeboard.spend:v1",
+        ),
+        presence_status="retracted_tombstone",
+        value_type=None,
+        raw_numeric_value=None,
+        unit=None,
+        currency=None,
+    )
+    sorted_with_tomb, _ = compute_normalized_fact_set_digest([f_tombstone, f_a])
+    assert sorted_with_tomb == (f_a, f_tombstone)
+
+    # Non-complete presence statuses MUST be rejected by compute_normalized_fact_set_digest (P-03)
+    for incomplete_presence in (
+        "missing",
+        "unproven_zero",
+        "timeout",
+        "not_applicable_at_level",
+    ):
+        bad_presence_fact = NormalizedCollectionFact(
+            fact_key=_make_fact_key(
+                resource_ref=VALID_REF_3,
+                metric_semantic_ref="metric:spend_v1",
+                source_metric_ref="source-metric:provider:pipeboard.spend:v1",
+            ),
+            presence_status=incomplete_presence,  # type: ignore[arg-type]
+            value_type=None,
+            raw_numeric_value=None,
+            unit=None,
+            currency=None,
+        )
+        with pytest.raises(ClosedValidationError):
+            compute_normalized_fact_set_digest([f_a, bad_presence_fact])
 
     # Empty fact set rejects
     with pytest.raises(ClosedValidationError):
@@ -807,7 +850,7 @@ def test_compute_normalized_fact_set_digest_ordering_and_rejections() -> None:
     # Non-not_applicable or multiple attribution_ref rejects (P-12)
     f_bad_attr = NormalizedCollectionFact(
         fact_key=_make_fact_key(
-            resource_ref="resource:cmp-3",
+            resource_ref=VALID_REF_3,
             attribution_ref="attribution:7d_click",
         ),
         presence_status="observed",
@@ -842,7 +885,7 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
 
     f1 = NormalizedCollectionFact(
         fact_key=_make_fact_key(
-            resource_ref="resource:cmp-1",
+            resource_ref=VALID_REF_1,
             metric_semantic_ref="metric:clicks_v1",
             source_metric_ref="source-metric:provider:pipeboard.clicks:v1",
         ),
@@ -854,7 +897,7 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
     )
     f2 = NormalizedCollectionFact(
         fact_key=_make_fact_key(
-            resource_ref="resource:cmp-1",
+            resource_ref=VALID_REF_1,
             metric_semantic_ref="metric:impressions_v1",
             source_metric_ref="source-metric:provider:pipeboard.impressions:v1",
         ),
@@ -867,6 +910,9 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
     sorted_facts, fact_set_digest = compute_normalized_fact_set_digest([f2, f1])
     r1 = project_collection_fact_to_landing_row(f1, ctx)
     r2 = project_collection_fact_to_landing_row(f2, ctx)
+    sorted_complete_candidates = tuple(
+        sorted((r2, r1), key=lambda r: r.candidate_sort_key_jcs())
+    )
 
     priv = tmp_path / "ed25519.pem"
     subprocess.run(
@@ -888,7 +934,7 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
         observed_capabilities=("cap:campaign-basic-v1",),
         retrieval_context=ctx,
         transport_outcome=_make_transport_outcome(),
-        candidates=(r2, r1),
+        candidates=sorted_complete_candidates,
         normalized_fact_set=sorted_facts,
         normalized_fact_set_digest=fact_set_digest,
         normalized_errors=(),
@@ -902,6 +948,24 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
     assert [r.candidate_sort_key_jcs() for r in complete_res.candidates] == sorted(
         [r1.candidate_sort_key_jcs(), r2.candidate_sort_key_jcs()]
     )
+
+    # Direct constructor also rejects out-of-order candidates
+    with pytest.raises(ClosedValidationError):
+        CollectionResult(
+            admitted_collection_locator=adm_loc,
+            admitted_collection_digest=adm_loc.content_digest,
+            call_side="operational",
+            registry_snapshot_locator=reg_loc,
+            registry_snapshot_digest=reg_loc.content_digest,
+            requested_capabilities=("cap:campaign-basic-v1",),
+            observed_capabilities=("cap:campaign-basic-v1",),
+            retrieval_context=ctx,
+            transport_outcome=_make_transport_outcome(),
+            candidates=(sorted_complete_candidates[1], sorted_complete_candidates[0]),
+            normalized_fact_set=sorted_facts,
+            normalized_fact_set_digest=fact_set_digest,
+            normalized_errors=(),
+        )
 
     signed_res_dict = gov_p1.sign_envelope(
         res_dict, ADR_P1_DOMAIN_PREFIXES[CollectionResult.SCHEMA], priv
@@ -935,27 +999,112 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
             dict(res_dict, normalized_fact_set=[f2.to_dict(), f1.to_dict()])
         )
 
-    # Candidate collected_at_utc mismatch against retrieval_context rejects
-    other_ctx = _make_retrieval_context("2026-11-11T04:15:01.000000Z")
-    r_mismatch = project_collection_fact_to_landing_row(f1, other_ctx)
-    with pytest.raises(ClosedValidationError):
-        CollectionResult(
-            admitted_collection_locator=adm_loc,
-            admitted_collection_digest=adm_loc.content_digest,
-            call_side="candidate",
-            registry_snapshot_locator=reg_loc,
-            registry_snapshot_digest=reg_loc.content_digest,
-            requested_capabilities=("cap:campaign-basic-v1",),
-            observed_capabilities=("cap:campaign-basic-v1",),
-            retrieval_context=ctx,
-            transport_outcome=_make_transport_outcome(),
-            candidates=(r_mismatch,),
-            normalized_fact_set=None,
-            normalized_fact_set_digest=None,
-            normalized_errors=(),
-        )
+    # All 4 retrieval_context provenance fields must match on every candidate row
+    for bad_ctx in (
+        _make_retrieval_context("2026-11-11T04:15:01.000000Z"),
+        RetrievalContext(
+            retrieved_at_utc=ctx.retrieved_at_utc,
+            source_observation_ref="observation:other-obs",
+            adapter_version=ctx.adapter_version,
+            semantic_version=ctx.semantic_version,
+        ),
+        RetrievalContext(
+            retrieved_at_utc=ctx.retrieved_at_utc,
+            source_observation_ref=ctx.source_observation_ref,
+            adapter_version="pipeboard-adapter-9.9.9",
+            semantic_version=ctx.semantic_version,
+        ),
+        RetrievalContext(
+            retrieved_at_utc=ctx.retrieved_at_utc,
+            source_observation_ref=ctx.source_observation_ref,
+            adapter_version=ctx.adapter_version,
+            semantic_version="smart-ads-semantic-9.9.9",
+        ),
+    ):
+        r_mismatch = project_collection_fact_to_landing_row(f1, bad_ctx)
+        with pytest.raises(ClosedValidationError):
+            CollectionResult(
+                admitted_collection_locator=adm_loc,
+                admitted_collection_digest=adm_loc.content_digest,
+                call_side="candidate",
+                registry_snapshot_locator=reg_loc,
+                registry_snapshot_digest=reg_loc.content_digest,
+                requested_capabilities=("cap:campaign-basic-v1",),
+                observed_capabilities=("cap:campaign-basic-v1",),
+                retrieval_context=ctx,
+                transport_outcome=_make_transport_outcome(),
+                candidates=(r_mismatch,),
+                normalized_fact_set=None,
+                normalized_fact_set_digest=None,
+                normalized_errors=(),
+            )
 
-    # Partial result preserves duplicate fact_key rows sorted by K
+    # Dirty transport_outcome flags when normalized_fact_set is non-null MUST reject
+    for dirty_to in (
+        _make_transport_outcome(network_ok=False),
+        _make_transport_outcome(http_status=None),
+        _make_transport_outcome(http_status=503),
+        _make_transport_outcome(media_and_encoding_valid=False),
+        _make_transport_outcome(auth_ok=False),
+        _make_transport_outcome(jsonrpc_error=True),
+        _make_transport_outcome(payload_schema_valid=False),
+        _make_transport_outcome(response_date_mismatch=True),
+        _make_transport_outcome(truncated_2mib=True),
+        _make_transport_outcome(non_empty_continuation=True),
+        _make_transport_outcome(reducer_order_or_count_mismatch=True),
+        _make_transport_outcome(duplicate_provider_observation=True),
+    ):
+        with pytest.raises(ClosedValidationError):
+            CollectionResult(
+                admitted_collection_locator=adm_loc,
+                admitted_collection_digest=adm_loc.content_digest,
+                call_side="operational",
+                registry_snapshot_locator=reg_loc,
+                registry_snapshot_digest=reg_loc.content_digest,
+                requested_capabilities=("cap:campaign-basic-v1",),
+                observed_capabilities=("cap:campaign-basic-v1",),
+                retrieval_context=ctx,
+                transport_outcome=dirty_to,
+                candidates=sorted_complete_candidates,
+                normalized_fact_set=sorted_facts,
+                normalized_fact_set_digest=fact_set_digest,
+                normalized_errors=(),
+            )
+
+    # Divergent candidates vs projected normalized_fact_set MUST reject
+    f1_different_val = NormalizedCollectionFact(
+        fact_key=f1.fact_key,
+        presence_status="observed",
+        value_type="int64_count",
+        raw_numeric_value="999",
+        unit="count",
+        currency=None,
+    )
+    r1_different_val = project_collection_fact_to_landing_row(f1_different_val, ctx)
+    for bad_candidates in (
+        (),
+        (r1,),
+        tuple(sorted((r1_different_val, r2), key=lambda r: r.candidate_sort_key_jcs())),
+        tuple(sorted((r1, r1, r2), key=lambda r: r.candidate_sort_key_jcs())),
+    ):
+        with pytest.raises(ClosedValidationError):
+            CollectionResult(
+                admitted_collection_locator=adm_loc,
+                admitted_collection_digest=adm_loc.content_digest,
+                call_side="operational",
+                registry_snapshot_locator=reg_loc,
+                registry_snapshot_digest=reg_loc.content_digest,
+                requested_capabilities=("cap:campaign-basic-v1",),
+                observed_capabilities=("cap:campaign-basic-v1",),
+                retrieval_context=ctx,
+                transport_outcome=_make_transport_outcome(),
+                candidates=bad_candidates,
+                normalized_fact_set=sorted_facts,
+                normalized_fact_set_digest=fact_set_digest,
+                normalized_errors=(),
+            )
+
+    # Partial result preserves duplicate fact_key rows (and even identical duplicate rows) sorted by K
     f1_alt = NormalizedCollectionFact(
         fact_key=f1.fact_key,
         presence_status="observed",
@@ -965,6 +1114,9 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
         currency=None,
     )
     r1_alt = project_collection_fact_to_landing_row(f1_alt, ctx)
+    partial_candidates = tuple(
+        sorted((r1_alt, r1), key=lambda r: r.candidate_sort_key_jcs())
+    )
     partial_res = CollectionResult(
         admitted_collection_locator=adm_loc,
         admitted_collection_digest=adm_loc.content_digest,
@@ -975,7 +1127,7 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
         observed_capabilities=(),
         retrieval_context=ctx,
         transport_outcome=_make_transport_outcome(duplicate_provider_observation=True),
-        candidates=(r1_alt, r1),
+        candidates=partial_candidates,
         normalized_fact_set=None,
         normalized_fact_set_digest=None,
         normalized_errors=(
@@ -993,6 +1145,178 @@ def test_collection_result_complete_and_partial_invariants(tmp_path: Path) -> No
         <= partial_res.candidates[1].candidate_sort_key_jcs()
     )
     assert CollectionResult.from_dict(partial_res.to_dict()) == partial_res
+
+    # Identical duplicate provider observations remain representable on partial CollectionResult (P-04)
+    partial_identical_dup = CollectionResult(
+        admitted_collection_locator=adm_loc,
+        admitted_collection_digest=adm_loc.content_digest,
+        call_side="reference",
+        registry_snapshot_locator=reg_loc,
+        registry_snapshot_digest=reg_loc.content_digest,
+        requested_capabilities=("cap:campaign-basic-v1",),
+        observed_capabilities=(),
+        retrieval_context=ctx,
+        transport_outcome=_make_transport_outcome(duplicate_provider_observation=True),
+        candidates=(r1, r1),
+        normalized_fact_set=None,
+        normalized_fact_set_digest=None,
+        normalized_errors=(),
+    )
+    assert len(partial_identical_dup.candidates) == 2
+
+
+def test_fact_key_and_reconciliation_row_key_enforce_canonical_resource_ref() -> None:
+    ctx = _make_retrieval_context()
+    valid_fact = NormalizedCollectionFact(
+        fact_key=_make_fact_key(resource_ref=VALID_REF_1),
+        presence_status="observed",
+        value_type="int64_count",
+        raw_numeric_value="7",
+        unit="count",
+        currency=None,
+    )
+    valid_row = project_collection_fact_to_landing_row(valid_fact, ctx)
+    valid_res = CollectionResult(
+        admitted_collection_locator=_loc("smart_ads/admitted_collection/v1", "4"),
+        admitted_collection_digest="sha256:" + ("4" * 64),
+        call_side="operational",
+        registry_snapshot_locator=_loc("smart_ads/private_registry_snapshot/v1", "5"),
+        registry_snapshot_digest="sha256:" + ("5" * 64),
+        requested_capabilities=("cap:campaign-basic-v1",),
+        observed_capabilities=("cap:campaign-basic-v1",),
+        retrieval_context=ctx,
+        transport_outcome=_make_transport_outcome(),
+        candidates=(valid_row,),
+        normalized_fact_set=(valid_fact,),
+        normalized_fact_set_digest=compute_normalized_fact_set_digest([valid_fact])[1],
+        normalized_errors=(),
+    )
+
+    for bad_ref in (
+        "resource:cmp-1",
+        "resource:120210987654321",
+        "resource:" + ("A" * 52),
+        "resource:" + ("a" * 51) + "b",
+        "resource:" + ("a" * 51) + "7",
+        "account:ibvi-01",
+    ):
+        with pytest.raises(ClosedValidationError):
+            FactKey(
+                binding_ref="binding:meta-primary",
+                account_ref="account:ibvi-01",
+                resource_ref=bad_ref,
+                resource_level="campaign",
+                metric_date="2026-11-10",
+                metric_semantic_ref="metric:impressions_v1",
+                source_metric_ref="source-metric:provider:pipeboard.impressions:v1",
+                attribution_ref="attribution:not_applicable",
+                breakdown_signature="breakdown:none",
+            )
+        with pytest.raises(ClosedValidationError):
+            ReconciliationRowKey(
+                resource_ref=bad_ref,
+                metric_date="2026-11-10",
+                resource_level="campaign",
+                breakdown_signature="breakdown:none",
+            )
+        bad_fk_dict = dict(valid_fact.fact_key.to_dict(), resource_ref=bad_ref)
+        with pytest.raises(ClosedValidationError):
+            NormalizedCollectionFact.from_dict(
+                dict(valid_fact.to_dict(), fact_key=bad_fk_dict)
+            )
+        with pytest.raises(ClosedValidationError):
+            AnalyticsLandingRow.from_dict(
+                dict(valid_row.to_dict(), fact_key=bad_fk_dict)
+            )
+        bad_res_dict = dict(
+            valid_res.to_dict(),
+            candidates=[dict(valid_row.to_dict(), fact_key=bad_fk_dict)],
+            normalized_fact_set=None,
+            normalized_fact_set_digest=None,
+        )
+        with pytest.raises(ClosedValidationError):
+            CollectionResult.from_dict(bad_res_dict)
+
+
+def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
+    ctx = _make_retrieval_context()
+    spend_fk = _make_fact_key(
+        resource_ref=VALID_REF_1,
+        metric_semantic_ref="metric:spend_v1",
+        source_metric_ref="source-metric:provider:pipeboard.spend:v1",
+    )
+    usd_fact = NormalizedCollectionFact(
+        fact_key=spend_fk,
+        presence_status="observed",
+        value_type="int64_minor_currency",
+        raw_numeric_value="450",
+        unit="minor_currency",
+        currency="USD",
+    )
+    assert NormalizedCollectionFact.from_dict(usd_fact.to_dict()) == usd_fact
+
+    usd_row = project_collection_fact_to_landing_row(
+        usd_fact, ctx, query_currency="USD"
+    )
+    assert usd_row.currency == "USD"
+    assert AnalyticsLandingRow.from_dict(usd_row.to_dict()) == usd_row
+
+    # Reject mismatched query_currency when projecting
+    with pytest.raises(ClosedValidationError):
+        project_collection_fact_to_landing_row(usd_fact, ctx, query_currency="BRL")
+
+    # Complete CollectionResult supports consistent single non-BRL currency, rejects mixed currencies
+    brl_fact = NormalizedCollectionFact(
+        fact_key=_make_fact_key(
+            resource_ref=VALID_REF_2,
+            metric_semantic_ref="metric:spend_v1",
+            source_metric_ref="source-metric:provider:pipeboard.spend:v1",
+        ),
+        presence_status="observed",
+        value_type="int64_minor_currency",
+        raw_numeric_value="500",
+        unit="minor_currency",
+        currency="BRL",
+    )
+    brl_row = project_collection_fact_to_landing_row(
+        brl_fact, ctx, query_currency="BRL"
+    )
+    usd_complete = CollectionResult(
+        admitted_collection_locator=_loc("smart_ads/admitted_collection/v1", "4"),
+        admitted_collection_digest="sha256:" + ("4" * 64),
+        call_side="operational",
+        registry_snapshot_locator=_loc("smart_ads/private_registry_snapshot/v1", "5"),
+        registry_snapshot_digest="sha256:" + ("5" * 64),
+        requested_capabilities=("cap:campaign-basic-v1",),
+        observed_capabilities=("cap:campaign-basic-v1",),
+        retrieval_context=ctx,
+        transport_outcome=_make_transport_outcome(),
+        candidates=(usd_row,),
+        normalized_fact_set=(usd_fact,),
+        normalized_fact_set_digest=compute_normalized_fact_set_digest([usd_fact])[1],
+        normalized_errors=(),
+    )
+    assert CollectionResult.from_dict(usd_complete.to_dict()) == usd_complete
+
+    mixed_candidates = tuple(
+        sorted((usd_row, brl_row), key=lambda r: r.candidate_sort_key_jcs())
+    )
+    with pytest.raises(ClosedValidationError):
+        CollectionResult(
+            admitted_collection_locator=_loc("smart_ads/admitted_collection/v1", "4"),
+            admitted_collection_digest="sha256:" + ("4" * 64),
+            call_side="operational",
+            registry_snapshot_locator=_loc("smart_ads/private_registry_snapshot/v1", "5"),
+            registry_snapshot_digest="sha256:" + ("5" * 64),
+            requested_capabilities=("cap:campaign-basic-v1",),
+            observed_capabilities=(),
+            retrieval_context=ctx,
+            transport_outcome=_make_transport_outcome(payload_schema_valid=False),
+            candidates=mixed_candidates,
+            normalized_fact_set=None,
+            normalized_fact_set_digest=None,
+            normalized_errors=(),
+        )
 
 
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:

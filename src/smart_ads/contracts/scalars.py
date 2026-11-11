@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import base64
 import datetime
 import re
 from typing import AbstractSet, Any, Final
@@ -14,6 +15,9 @@ _ED25519_KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
 )
 _OPAQUE_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"\A[a-z][a-z0-9_]*:[A-Za-z0-9._:-]+\Z"
+)
+CANONICAL_RESOURCE_REF_RE: Final[re.Pattern[str]] = re.compile(
+    r"^resource:[a-z2-7]{51}[aq]$"
 )
 _CURRENCY_ISO4217_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Z]{3}\Z")
 _ISO_DATE_RE: Final[re.Pattern[str]] = re.compile(
@@ -162,6 +166,38 @@ def validate_opaque_ref(
     return checked
 
 
+def validate_resource_ref(
+    value: object,
+    *,
+    field_name: str = "resource_ref",
+) -> str:
+    """Validate canonical 256-bit RFC 4648 lowercase unpadded Base32 `resource_ref`."""
+    if (
+        not isinstance(value, str)
+        or "\n" in value
+        or "\r" in value
+        or CANONICAL_RESOURCE_REF_RE.fullmatch(value) is None
+    ):
+        raise ClosedValidationError(
+            f"{field_name}: expected canonical '^resource:[a-z2-7]{{51}}[aq]$'"
+        )
+    body = value.split(":", 1)[1]
+    try:
+        raw = base64.b32decode(body.upper() + "====", casefold=False)
+    except Exception as exc:
+        raise ClosedValidationError(
+            f"{field_name}: invalid RFC 4648 Base32 encoding"
+        ) from exc
+    if (
+        len(raw) != 32
+        or base64.b32encode(raw).decode("ascii").rstrip("=").lower() != body
+    ):
+        raise ClosedValidationError(
+            f"{field_name}: non-canonical 256-bit Base32 resource_ref"
+        )
+    return value
+
+
 def validate_currency_iso4217(value: object, *, field_name: str = "currency") -> str:
     """Validate uppercase 3-letter ISO 4217 currency code `^[A-Z]{3}$`."""
     if not isinstance(value, str) or not _CURRENCY_ISO4217_RE.fullmatch(value):
@@ -222,8 +258,11 @@ def parse_iso_date(value: object, *, field_name: str) -> datetime.date:
 
 def validate_iso_date(value: object, *, field_name: str) -> str:
     """Validate `YYYY-MM-DD` proleptic Gregorian calendar date and return the string."""
+    if not isinstance(value, str):
+        raise ClosedValidationError(
+            f"{field_name}: expected ISO date str, got {type(value).__name__}"
+        )
     parse_iso_date(value, field_name=field_name)
-    assert isinstance(value, str)
     return value
 
 
@@ -328,6 +367,7 @@ def parse_timestamp_utc_micros(
 
 
 __all__ = [
+    "CANONICAL_RESOURCE_REF_RE",
     "ClosedValidationError",
     "parse_iso_date",
     "parse_timestamp_utc_micros",
@@ -339,6 +379,7 @@ __all__ = [
     "validate_iso_date",
     "validate_non_empty_str",
     "validate_opaque_ref",
+    "validate_resource_ref",
     "validate_sha256_prefixed",
     "validate_timestamp_utc6",
     "validate_timestamp_utc_seconds",

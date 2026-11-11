@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Final
 
@@ -27,6 +27,7 @@ from smart_ads.contracts.schemas import (
     CanonicalQueryContract,
     CollectionRequest,
     DateRange,
+    compute_schema_bundle_digest,
 )
 from smart_ads.domain.capabilities import is_io_denied_state
 from smart_ads.domain.pipeboard_contract import PipeboardPhase1Contract
@@ -125,6 +126,33 @@ class AdmittedCollectionBundle:
             raise ClosedValidationError(
                 "admitted_collection_bundle.driver_contract: expected PipeboardPhase1Contract"
             )
+        expected_admitted_loc = ArtifactLocator.for_canonical_bytes(
+            AdmittedCollection.SCHEMA,
+            canonicalize_jcs(self.admitted.to_dict()),
+        )
+        if self.locator != expected_admitted_loc:
+            raise ClosedValidationError(
+                "admitted_collection_bundle.locator: locator does not match canonical "
+                "JCS digest of AdmittedCollection"
+            )
+        expected_snap_loc = ArtifactLocator.for_canonical_bytes(
+            PrivateRegistrySnapshot.SCHEMA,
+            canonicalize_jcs(self.registry_snapshot.to_dict()),
+        )
+        if self.admitted.registry_snapshot_locator != expected_snap_loc:
+            raise ClosedValidationError(
+                "admitted_collection_bundle.registry_snapshot: snapshot does not "
+                "match admitted.registry_snapshot_locator canonical JCS digest"
+            )
+        expected_drv_loc = ArtifactLocator.for_canonical_bytes(
+            PipeboardPhase1Contract.SCHEMA,
+            canonicalize_jcs(self.driver_contract.to_dict()),
+        )
+        if self.admitted.driver_contract_locator != expected_drv_loc:
+            raise ClosedValidationError(
+                "admitted_collection_bundle.driver_contract: driver_contract does "
+                "not match admitted.driver_contract_locator canonical JCS digest"
+            )
 
 
 def _admit_collection_unchecked(
@@ -164,6 +192,15 @@ def _admit_collection_unchecked(
             "invalid_clock_locator",
             f"expected locator artifact_type {ClockAttestation.SCHEMA!r}, "
             f"got {clock_state.locator.artifact_type!r}",
+        )
+    expected_clock_loc = ArtifactLocator.for_canonical_bytes(
+        ClockAttestation.SCHEMA,
+        canonicalize_jcs(clock_state.attestation.to_dict()),
+    )
+    if clock_state.locator != expected_clock_loc:
+        raise AdmissionError(
+            "invalid_clock_locator",
+            "clock_state.locator does not match canonical JCS digest of ClockAttestation",
         )
     if not (0 < clock_state.configured_max_uncertainty_ms <= MAX_JCS_SAFE_INT):
         raise AdmissionError(
@@ -233,6 +270,15 @@ def _admit_collection_unchecked(
             "invalid_registry_locator",
             f"expected locator artifact_type {PrivateRegistrySnapshot.SCHEMA!r}",
         )
+    expected_registry_loc = ArtifactLocator.for_canonical_bytes(
+        PrivateRegistrySnapshot.SCHEMA,
+        canonicalize_jcs(registry_state.snapshot.to_dict()),
+    )
+    if registry_state.locator != expected_registry_loc:
+        raise AdmissionError(
+            "invalid_registry_locator",
+            "registry_state.locator does not match canonical JCS digest of PrivateRegistrySnapshot",
+        )
     if (
         registry_state.driver_contract_locator.artifact_type
         != PipeboardPhase1Contract.SCHEMA
@@ -240,6 +286,16 @@ def _admit_collection_unchecked(
         raise AdmissionError(
             "invalid_driver_contract_locator",
             f"expected locator artifact_type {PipeboardPhase1Contract.SCHEMA!r}",
+        )
+    expected_driver_contract_loc = ArtifactLocator.for_canonical_bytes(
+        PipeboardPhase1Contract.SCHEMA,
+        canonicalize_jcs(registry_state.driver_contract.to_dict()),
+    )
+    if registry_state.driver_contract_locator != expected_driver_contract_loc:
+        raise AdmissionError(
+            "invalid_driver_contract_locator",
+            "registry_state.driver_contract_locator does not match canonical JCS "
+            "digest of PipeboardPhase1Contract",
         )
 
     snapshot = registry_state.snapshot
@@ -366,10 +422,11 @@ def _admit_collection_unchecked(
         currency=binding.currency,
     )
 
-    # 5. Purpose-specific prerequisites & live certification / renewal verification
+    # 5. Purpose-specific prerequisites & live certification / renewal / Hermes verification
     prereq = ports.prerequisite_port.resolve_prerequisites(
         request=request,
         canonical_query=canonical_query,
+        clock_state=clock_state,
     )
     if not isinstance(prereq, ResolvedPrerequisiteBundle):
         raise AdmissionError(
@@ -383,76 +440,306 @@ def _admit_collection_unchecked(
             f"request purpose {request.collection_purpose!r}",
         )
 
+    expected_schema_bundle_digest = compute_schema_bundle_digest()
+    expected_resource_mapping_digest = snapshot.resource_mapping_contract_digest
+
     if request.collection_purpose == "fixture_7a":
         if (
-            prereq.gate3_7b_selection_role is not None
+            prereq.gate3_selection is not None
             or prereq.live_certification is not None
+            or prereq.hermes_delegation is not None
         ):
             raise AdmissionError(
                 "unexpected_live_prerequisite_metadata",
-                "fixture_7a forbids 7B selection role or live certification state",
+                "fixture_7a forbids Gate-3 selection, live certification, or Hermes delegation state",
             )
-    elif request.collection_purpose == "live_verification_7b":
-        if prereq.gate3_7b_selection_role != "certification":
+    else:
+        gate3 = prereq.gate3_selection
+        if gate3 is None:
+            raise AdmissionError(
+                "missing_gate3_selection",
+                f"{request.collection_purpose} requires resolved Gate-3 selection receipt state",
+            )
+        expected_gate3_locator = (
+            prereq.locators.gate3_selection_receipt_locator
+            if request.collection_purpose == "live_verification_7b"
+            else prereq.locators.gate3_operational_renewal_locator
+        )
+        if gate3.locator != expected_gate3_locator:
+            raise AdmissionError(
+                "gate3_locator_mismatch",
+                "resolved gate3_selection.locator must match purpose_prerequisite_locators",
+            )
+        expected_gate3_role = (
+            "certification"
+            if request.collection_purpose == "live_verification_7b"
+            else "operational_renewal"
+        )
+        if gate3.selection_role != expected_gate3_role:
             raise AdmissionError(
                 "invalid_gate3_selection_role",
-                "live_verification_7b requires gate3_7b_selection_role == 'certification'",
-            )
-        if prereq.live_certification is not None:
-            raise AdmissionError(
-                "unexpected_live_certification_state",
-                "live_verification_7b forbids operational live_certification state",
-            )
-    elif request.collection_purpose == "operational_read":
-        live_cert = prereq.live_certification
-        if live_cert is None:
-            raise AdmissionError(
-                "missing_live_certification",
-                "operational_read requires resolved live_certification head/transition/certificate",
+                f"{request.collection_purpose} requires Gate-3 selection_role == "
+                f"{expected_gate3_role!r}, got {gate3.selection_role!r}",
             )
         if (
-            live_cert.head_locator
-            != prereq.locators.live_certification_head_locator
-            or live_cert.transition_locator
-            != prereq.locators.live_certification_transition_locator
-            or live_cert.certificate_locator
-            != prereq.locators.live_certification_certificate_locator
+            clock_state.configured_max_uncertainty_ms
+            > gate3.maximum_clock_uncertainty_ms
+            or clock_state.attestation.uncertainty_ms
+            > gate3.maximum_clock_uncertainty_ms
         ):
             raise AdmissionError(
-                "live_certification_locator_mismatch",
-                "resolved live_certification locators must match purpose_prerequisite_locators",
+                "gate3_clock_uncertainty_exceeded",
+                "clock uncertainty exceeds Gate-3 maximum_clock_uncertainty_ms (1000ms)",
             )
-        if live_cert.renewal_selection_role != "operational_renewal":
-            raise AdmissionError(
-                "invalid_renewal_selection_role",
-                "operational_read requires Gate-3 selection_role == 'operational_renewal'",
-            )
-        if (
-            live_cert.renewal_fingerprint_digest
-            != live_cert.certified_fingerprint_digest
-        ):
-            raise AdmissionError(
-                "renewal_fingerprint_mismatch",
-                "operational_renewal fingerprint must equal certified_fingerprint_digest",
-            )
-        cert_valid_until_us = parse_timestamp_utc_micros(
-            live_cert.certificate_valid_until_utc,
-            field_name="certificate_valid_until_utc",
+
+        revalidated_us = parse_timestamp_utc_micros(
+            gate3.revalidated_at_utc,
+            field_name="gate3.revalidated_at_utc",
             allow_whole_seconds=True,
         )
-        if upper_us > cert_valid_until_us:
+        gate3_valid_until_us = parse_timestamp_utc_micros(
+            gate3.valid_until_utc,
+            field_name="gate3.valid_until_utc",
+            allow_whole_seconds=True,
+        )
+        if lower_us < revalidated_us:
             raise AdmissionError(
-                "expired_live_certificate",
-                "authenticated clock upper bound exceeds live_certification_certificate valid_until_utc",
+                "gate3_selection_not_yet_valid",
+                "authenticated clock lower bound precedes Gate-3 revalidated_at_utc",
+            )
+        if upper_us > gate3_valid_until_us:
+            raise AdmissionError(
+                "expired_gate3_selection",
+                "authenticated clock upper bound exceeds Gate-3 valid_until_utc",
             )
         if (
-            ports.require_hermes_delegation
-            and prereq.locators.delegation_context_locator is None
+            upper_us
+            + gate3.maximum_provider_dispatch_deadline_seconds * 1_000_000
+            > gate3_valid_until_us
         ):
             raise AdmissionError(
-                "missing_hermes_delegation_context",
-                "Hermes operational traffic requires runtime-owned ibvi_ads_delegation_context/v1",
+                "gate3_dispatch_deadline_exceeds_validity",
+                "authenticated clock upper bound + 60s provider dispatch deadline "
+                "exceeds Gate-3 valid_until_utc",
             )
+
+        if (
+            gate3.candidate_driver_contract_digest
+            != registry_state.driver_contract_locator.content_digest
+        ):
+            raise AdmissionError(
+                "gate3_driver_contract_mismatch",
+                "Gate-3 candidate_driver_contract_digest does not match active driver contract",
+            )
+        if gate3.canonical_query_digest != canonical_query.canonical_query_digest:
+            raise AdmissionError(
+                "gate3_canonical_query_mismatch",
+                "Gate-3 canonical_query_digest does not match admitted CanonicalQueryContract",
+            )
+        if gate3.schema_bundle_digest != expected_schema_bundle_digest:
+            raise AdmissionError(
+                "gate3_schema_bundle_mismatch",
+                "Gate-3 schema_bundle_digest does not match active core schema bundle",
+            )
+        if gate3.resource_mapping_contract_digest != expected_resource_mapping_digest:
+            raise AdmissionError(
+                "gate3_resource_mapping_mismatch",
+                "Gate-3 resource_mapping_contract_digest does not match active registry snapshot",
+            )
+        if gate3.authorized_certification_scope != request.resource_scope_ref:
+            raise AdmissionError(
+                "gate3_scope_mismatch",
+                "Gate-3 authorized_certification_scope does not match request.resource_scope_ref",
+            )
+
+        if request.collection_purpose == "live_verification_7b":
+            if prereq.live_certification is not None:
+                raise AdmissionError(
+                    "unexpected_live_certification_state",
+                    "live_verification_7b forbids operational live_certification state",
+                )
+            if prereq.hermes_delegation is not None:
+                raise AdmissionError(
+                    "unexpected_hermes_delegation_state",
+                    "live_verification_7b forbids operational Hermes delegation state",
+                )
+        else:
+            live_cert = prereq.live_certification
+            if live_cert is None:
+                raise AdmissionError(
+                    "missing_live_certification",
+                    "operational_read requires resolved live_certification head/transition/certificate",
+                )
+            if (
+                live_cert.head_locator
+                != prereq.locators.live_certification_head_locator
+                or live_cert.transition_locator
+                != prereq.locators.live_certification_transition_locator
+                or live_cert.certificate_locator
+                != prereq.locators.live_certification_certificate_locator
+            ):
+                raise AdmissionError(
+                    "live_certification_locator_mismatch",
+                    "resolved live_certification locators must match purpose_prerequisite_locators",
+                )
+            if live_cert.renewal_selection_role != "operational_renewal":
+                raise AdmissionError(
+                    "invalid_renewal_selection_role",
+                    "operational_read requires Gate-3 selection_role == 'operational_renewal'",
+                )
+            if not (
+                gate3.certification_fingerprint_digest
+                == live_cert.renewal_fingerprint_digest
+                == live_cert.certified_fingerprint_digest
+            ):
+                raise AdmissionError(
+                    "renewal_fingerprint_mismatch",
+                    "Gate-3 operational_renewal fingerprint must equal certified_fingerprint_digest",
+                )
+            if live_cert.tenant_ref != request.tenant_ref:
+                raise AdmissionError(
+                    "live_certificate_tenant_mismatch",
+                    "live_certification_certificate tenant_ref does not match request.tenant_ref",
+                )
+            if live_cert.binding_ref != request.binding_ref:
+                raise AdmissionError(
+                    "live_certificate_binding_mismatch",
+                    "live_certification_certificate binding_ref does not match request.binding_ref",
+                )
+            if live_cert.resource_scope_ref != request.resource_scope_ref:
+                raise AdmissionError(
+                    "live_certificate_scope_mismatch",
+                    "live_certification_certificate resource_scope_ref does not match request.resource_scope_ref",
+                )
+            if live_cert.driver_id != binding.driver_id:
+                raise AdmissionError(
+                    "live_certificate_driver_mismatch",
+                    "live_certification_certificate driver_id does not match binding.driver_id",
+                )
+            if (
+                live_cert.driver_contract_digest
+                != registry_state.driver_contract_locator.content_digest
+            ):
+                raise AdmissionError(
+                    "live_certificate_driver_contract_mismatch",
+                    "live_certification_certificate driver_contract_digest does not match active driver contract",
+                )
+            if (
+                live_cert.canonical_query_digest
+                != canonical_query.canonical_query_digest
+            ):
+                raise AdmissionError(
+                    "live_certificate_canonical_query_mismatch",
+                    "live_certification_certificate canonical_query_digest does not match CanonicalQueryContract",
+                )
+            if live_cert.schema_bundle_digest != expected_schema_bundle_digest:
+                raise AdmissionError(
+                    "live_certificate_schema_bundle_mismatch",
+                    "live_certification_certificate schema_bundle_digest does not match core schema bundle",
+                )
+            if (
+                live_cert.resource_mapping_contract_digest
+                != expected_resource_mapping_digest
+            ):
+                raise AdmissionError(
+                    "live_certificate_resource_mapping_mismatch",
+                    "live_certification_certificate resource_mapping_contract_digest does not match registry snapshot",
+                )
+
+            cert_issued_us = parse_timestamp_utc_micros(
+                live_cert.certificate_issued_at_utc,
+                field_name="certificate_issued_at_utc",
+                allow_whole_seconds=True,
+            )
+            cert_valid_until_us = parse_timestamp_utc_micros(
+                live_cert.certificate_valid_until_utc,
+                field_name="certificate_valid_until_utc",
+                allow_whole_seconds=True,
+            )
+            if lower_us < cert_issued_us:
+                raise AdmissionError(
+                    "future_live_certificate",
+                    "authenticated clock lower bound precedes live_certification_certificate issued_at_utc",
+                )
+            if upper_us > cert_valid_until_us:
+                raise AdmissionError(
+                    "expired_live_certificate",
+                    "authenticated clock upper bound exceeds live_certification_certificate valid_until_utc",
+                )
+
+            if (
+                ports.require_hermes_delegation
+                or prereq.locators.delegation_context_locator is not None
+                or prereq.hermes_delegation is not None
+            ):
+                deleg = prereq.hermes_delegation
+                if (
+                    prereq.locators.delegation_context_locator is None
+                    or deleg is None
+                ):
+                    raise AdmissionError(
+                        "missing_hermes_delegation_context",
+                        "Hermes operational traffic requires both delegation_context_locator and ResolvedHermesDelegationState",
+                    )
+                if deleg.locator != prereq.locators.delegation_context_locator:
+                    raise AdmissionError(
+                        "hermes_delegation_locator_mismatch",
+                        "resolved hermes_delegation.locator must match delegation_context_locator",
+                    )
+                if deleg.route != "/ibvi-ads":
+                    raise AdmissionError(
+                        "invalid_hermes_delegation_route",
+                        "Hermes delegation context route must equal '/ibvi-ads'",
+                    )
+                if deleg.tenant_ref != request.tenant_ref:
+                    raise AdmissionError(
+                        "hermes_delegation_tenant_mismatch",
+                        "Hermes delegation tenant_ref does not match request.tenant_ref",
+                    )
+                if deleg.binding_ref != request.binding_ref:
+                    raise AdmissionError(
+                        "hermes_delegation_binding_mismatch",
+                        "Hermes delegation binding_ref does not match request.binding_ref",
+                    )
+                if deleg.resource_scope_ref != request.resource_scope_ref:
+                    raise AdmissionError(
+                        "hermes_delegation_scope_mismatch",
+                        "Hermes delegation resource_scope_ref does not match request.resource_scope_ref",
+                    )
+                deleg_issued_us = parse_timestamp_utc_micros(
+                    deleg.issued_at_utc,
+                    field_name="hermes_delegation.issued_at_utc",
+                    allow_whole_seconds=True,
+                )
+                deleg_valid_until_us = parse_timestamp_utc_micros(
+                    deleg.valid_until_utc,
+                    field_name="hermes_delegation.valid_until_utc",
+                    allow_whole_seconds=True,
+                )
+                if lower_us < deleg_issued_us:
+                    raise AdmissionError(
+                        "future_hermes_delegation",
+                        "authenticated clock lower bound precedes Hermes delegation issued_at_utc",
+                    )
+                if upper_us > deleg_valid_until_us:
+                    raise AdmissionError(
+                        "expired_hermes_delegation",
+                        "authenticated clock upper bound exceeds Hermes delegation valid_until_utc",
+                    )
+                deleg_authorized = any(
+                    rel.front_ref == deleg.front_ref
+                    and rel.profile_ref == deleg.profile_ref
+                    and rel.binding_ref == deleg.binding_ref
+                    and rel.resource_scope_ref == deleg.resource_scope_ref
+                    for rel in snapshot.authorized_scopes
+                )
+                if not deleg_authorized:
+                    raise AdmissionError(
+                        "unauthorized_hermes_delegation_scope",
+                        "no authorized_scopes relation permits Hermes delegation "
+                        f"({deleg.front_ref!r}, {deleg.profile_ref!r}, "
+                        f"{deleg.binding_ref!r}, {deleg.resource_scope_ref!r})",
+                    )
 
     # 6. Construct immutable AdmittedCollection & sign/store if signer_port is configured
     admitted = AdmittedCollection(
@@ -487,13 +774,25 @@ def _admit_collection_unchecked(
     )
 
     if ports.signer_port is not None:
+        unsigned_admitted = admitted
         domain_prefix = ADR_P1_DOMAIN_PREFIXES[AdmittedCollection.SCHEMA]
-        signed_dict, admitted_locator = ports.signer_port.sign_and_store(
-            admitted.to_dict(), domain_prefix=domain_prefix
+        sign_out = ports.signer_port.sign_and_store(
+            unsigned_admitted.to_dict(), domain_prefix=domain_prefix
         )
+        if not isinstance(sign_out, tuple) or len(sign_out) != 2:
+            raise AdmissionError(
+                "invalid_signer_response",
+                "signer_port.sign_and_store must return a 2-tuple of (signed_dict, ArtifactLocator)",
+            )
+        signed_dict, admitted_locator = sign_out
         admitted = AdmittedCollection.from_dict(
             signed_dict, require_signed=True
         )
+        if replace(admitted, integrity=None) != unsigned_admitted:
+            raise AdmissionError(
+                "signed_admission_payload_mismatch",
+                "signer_port mutated AdmittedCollection payload fields outside integrity",
+            )
         expected_loc = ArtifactLocator.for_canonical_bytes(
             AdmittedCollection.SCHEMA,
             canonicalize_jcs(admitted.to_dict()),

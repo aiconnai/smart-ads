@@ -58,6 +58,7 @@ def test_contracts_package_reexports_public_api() -> None:
         "ADR_DATA_DOMAIN_PREFIXES",
         "ADR_P1_DOMAIN_PREFIXES",
         "ArtifactLocator",
+        "CANONICAL_RESOURCE_REF_RE",
         "ClosedValidationError",
         "MAX_JCS_SAFE_INT",
         "MIN_JCS_SAFE_INT",
@@ -84,6 +85,7 @@ def test_contracts_package_reexports_public_api() -> None:
         "validate_iso_date",
         "validate_non_empty_str",
         "validate_opaque_ref",
+        "validate_resource_ref",
         "validate_sha256_prefixed",
         "validate_timestamp_utc6",
         "validate_timestamp_utc_seconds",
@@ -418,6 +420,52 @@ def test_p1_helpers_reject_malformed_envelopes() -> None:
         p1_preimage({"integrity": "not-a-mapping"})
     with pytest.raises(ClosedValidationError):
         p1_preimage("not-a-mapping")  # type: ignore[arg-type]
+
+
+def test_p1_helpers_reject_cyclic_deep_float_and_custom_deepcopy_leaves() -> None:
+    p1_prefix = ADR_P1_DOMAIN_PREFIXES["smart_ads/private_registry_snapshot/v1"]
+    integrity_stub = {
+        "key_id": "key:ed25519:" + ("a" * 64),
+        "key_registry_snapshot_locator": {
+            "$schema": "smart_ads/artifact_locator/v1",
+            "artifact_type": "smart_ads/key_authorization_registry/v1",
+            "content_digest": "sha256:" + ("1" * 64),
+        },
+    }
+
+    class _ExplodingDeepCopy:
+        def __deepcopy__(self, memo: object) -> object:
+            raise AssertionError("__deepcopy__ must never be invoked")
+
+    cyclic: dict[str, object] = {"integrity": dict(integrity_stub)}
+    cyclic["self"] = cyclic
+
+    deep_leaf: object = 1
+    for _ in range(600):
+        deep_leaf = {"nested": deep_leaf}
+    deep_envelope: dict[str, object] = {
+        "integrity": dict(integrity_stub),
+        "payload": deep_leaf,
+    }
+
+    float_envelope: dict[str, object] = {
+        "integrity": dict(integrity_stub),
+        "ratio": 1.5,
+    }
+    exploding_envelope: dict[str, object] = {
+        "integrity": dict(integrity_stub),
+        "custom": _ExplodingDeepCopy(),
+    }
+
+    for bad_env in (cyclic, deep_envelope, float_envelope, exploding_envelope):
+        with pytest.raises(ClosedValidationError):
+            p1_preimage(bad_env)
+        with pytest.raises(ClosedValidationError):
+            p1_content_digest(bad_env)
+        with pytest.raises(ClosedValidationError):
+            p1_signing_message(bad_env, p1_prefix)
+        with pytest.raises(ClosedValidationError):
+            self_digest_jcs_sha256(bad_env, digest_member="snapshot_digest")
     with pytest.raises(ClosedValidationError):
         p1_signing_message({"integrity": {"key_id": "k"}}, "")
 

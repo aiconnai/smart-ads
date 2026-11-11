@@ -66,16 +66,28 @@ class CompletenessEvaluation:
             raise ClosedValidationError(
                 "completeness_evaluation.expected_fact_keys: expected frozenset of FactKey"
             )
+        seen_expected_identities: set[bytes] = set()
         for fk in self.expected_fact_keys:
             if not isinstance(fk, FactKey):
                 raise ClosedValidationError(
                     "completeness_evaluation.expected_fact_keys: every element must be FactKey"
                 )
+            fk_identity = canonicalize_jcs(fk.set_identity_array())
+            if fk_identity in seen_expected_identities:
+                raise ClosedValidationError(
+                    "completeness_evaluation.expected_fact_keys: duplicate 8-field "
+                    "fact identity I(f) in expected_fact_keys"
+                )
+            seen_expected_identities.add(fk_identity)
 
         if self.status == "complete":
             if len(checked_reasons) != 0:
                 raise ClosedValidationError(
                     "completeness_evaluation: complete status requires empty reasons tuple"
+                )
+            if len(self.expected_fact_keys) == 0:
+                raise ClosedValidationError(
+                    "completeness_evaluation: complete status requires non-empty expected_fact_keys"
                 )
             if (
                 self.normalized_fact_set is None
@@ -101,6 +113,20 @@ class CompletenessEvaluation:
                     "completeness_evaluation: normalized_fact_set must be canonically "
                     "sorted and match normalized_fact_set_digest"
                 )
+            if (
+                len(fact_tuple) != len(self.expected_fact_keys)
+                or {f.fact_key for f in fact_tuple} != self.expected_fact_keys
+            ):
+                raise ClosedValidationError(
+                    "completeness_evaluation: complete status requires exact 1-to-1 "
+                    "equality between normalized_fact_set keys and expected_fact_keys"
+                )
+            for f in fact_tuple:
+                if f.presence_status not in _COMPLETE_PERMITTED_PRESENCE_STATUSES:
+                    raise ClosedValidationError(
+                        "completeness_evaluation: complete status forbids "
+                        f"presence_status {f.presence_status!r}"
+                    )
             object.__setattr__(self, "normalized_fact_set", fact_tuple)
         else:
             if len(checked_reasons) == 0:
@@ -234,10 +260,9 @@ def recompute_collection_completeness(
         failed_reasons.append("media_or_encoding_invalid")
     if transport_outcome.jsonrpc_error:
         failed_reasons.append("jsonrpc_error")
-    if (
-        transport_outcome.http_status is not None
-        and transport_outcome.http_status != 200
-    ):
+    if transport_outcome.http_status is None:
+        failed_reasons.append("http_status_missing")
+    elif transport_outcome.http_status != 200:
         failed_reasons.append(f"http_status_{transport_outcome.http_status}")
 
     expected_set: frozenset[FactKey] = frozenset()

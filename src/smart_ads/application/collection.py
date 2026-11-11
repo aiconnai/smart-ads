@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from smart_ads.application.admission import (
+    AdmissionError,
     AdmittedCollectionBundle,
     admit_collection,
 )
@@ -17,6 +18,7 @@ from smart_ads.contracts.jcs import (
     ArtifactLocator,
     canonicalize_jcs,
 )
+from smart_ads.contracts.numerics import PHASE1_BASE_METRICS
 from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import (
     AdmittedCollection,
@@ -29,6 +31,7 @@ from smart_ads.contracts.schemas import (
     TransportOutcome,
     project_collection_fact_to_landing_row,
 )
+from smart_ads.domain.registry import ExpectedResourceInventory
 from smart_ads.ports.cell_runtime import (
     CellRuntimePorts,
     EnvelopeSignerPort,
@@ -169,14 +172,25 @@ def _reduce_batch_to_candidates_and_completeness(
             f"batch: expected ProviderObservationBatch, got {type(batch).__name__}"
         )
     admitted = bundle.admitted
-    inventory = inventory_port.resolve_expected_inventory(
-        registry_snapshot_locator=admitted.registry_snapshot_locator,
-        tenant_ref=admitted.tenant_ref,
-        binding_ref=admitted.binding_ref,
-        account_ref=admitted.account_ref,
-        resource_scope_ref=admitted.resource_scope_ref,
-        date_range=admitted.computed_date_range,
-    )
+    if not isinstance(inventory_port, ExpectedInventoryPort):
+        inventory: ExpectedResourceInventory | None = None
+    else:
+        try:
+            resolved_inv = inventory_port.resolve_expected_inventory(
+                registry_snapshot_locator=admitted.registry_snapshot_locator,
+                tenant_ref=admitted.tenant_ref,
+                binding_ref=admitted.binding_ref,
+                account_ref=admitted.account_ref,
+                resource_scope_ref=admitted.resource_scope_ref,
+                date_range=admitted.computed_date_range,
+            )
+        except ClosedValidationError:
+            resolved_inv = None
+        inventory = (
+            resolved_inv
+            if isinstance(resolved_inv, ExpectedResourceInventory)
+            else None
+        )
     if inventory is not None and (
         inventory.registry_snapshot_locator != admitted.registry_snapshot_locator
         or inventory.tenant_ref != admitted.tenant_ref
@@ -189,6 +203,7 @@ def _reduce_batch_to_candidates_and_completeness(
 
     admitted_day = admitted.computed_date_range.start_date
     date_mismatch_detected = False
+    unmapped_metric_detected = False
     candidate_facts: list[NormalizedCollectionFact] = []
     candidate_rows: list[AnalyticsLandingRow] = []
 
@@ -199,11 +214,12 @@ def _reduce_batch_to_candidates_and_completeness(
             source_metric_ref = bundle.driver_contract.metric_source_mappings.get(
                 metric_obs.metric_semantic_ref
             )
-            if source_metric_ref is None:
-                raise ClosedValidationError(
-                    f"provider observation metric {metric_obs.metric_semantic_ref!r} "
-                    "is absent from pinned driver contract metric_source_mappings"
-                )
+            if (
+                source_metric_ref is None
+                or metric_obs.metric_semantic_ref not in PHASE1_BASE_METRICS
+            ):
+                unmapped_metric_detected = True
+                continue
             fact_key = FactKey(
                 binding_ref=admitted.binding_ref,
                 account_ref=admitted.account_ref,
@@ -231,12 +247,21 @@ def _reduce_batch_to_candidates_and_completeness(
             candidate_facts.append(fact)
             candidate_rows.append(row)
 
-    effective_transport = (
-        replace(batch.transport_outcome, response_date_mismatch=True)
-        if date_mismatch_detected
-        and not batch.transport_outcome.response_date_mismatch
-        else batch.transport_outcome
-    )
+    effective_transport = batch.transport_outcome
+    if (
+        date_mismatch_detected
+        and not effective_transport.response_date_mismatch
+    ):
+        effective_transport = replace(
+            effective_transport, response_date_mismatch=True
+        )
+    if (
+        unmapped_metric_detected
+        and not effective_transport.reducer_order_or_count_mismatch
+    ):
+        effective_transport = replace(
+            effective_transport, reducer_order_or_count_mismatch=True
+        )
 
     sorted_candidates = tuple(
         sorted(candidate_rows, key=lambda r: r.candidate_sort_key_jcs())
@@ -298,6 +323,20 @@ def execute_admitted_call(
             "execute_admitted_call.reservation_locator: expected ArtifactLocator "
             f"for {_RESERVATION_RECORD_SCHEMA!r}"
         )
+    if not isinstance(provider_port, ProviderPort):
+        raise ClosedValidationError(
+            f"execute_admitted_call.provider_port: expected ProviderPort, got {type(provider_port).__name__}"
+        )
+    if not isinstance(inventory_port, ExpectedInventoryPort):
+        raise ClosedValidationError(
+            f"execute_admitted_call.inventory_port: expected ExpectedInventoryPort, got {type(inventory_port).__name__}"
+        )
+    if signer_port is not None and not isinstance(
+        signer_port, EnvelopeSignerPort
+    ):
+        raise ClosedValidationError(
+            f"execute_admitted_call.signer_port: expected EnvelopeSignerPort or None, got {type(signer_port).__name__}"
+        )
 
     admitted = bundle.admitted
     provider_call = AdmittedProviderCall(
@@ -335,11 +374,23 @@ def execute_admitted_call(
     )
 
     if signer_port is not None:
+        unsigned_result = result
         domain_prefix = ADR_P1_DOMAIN_PREFIXES[CollectionResult.SCHEMA]
-        signed_dict, result_locator = signer_port.sign_and_store(
-            result.to_dict(), domain_prefix=domain_prefix
+        sign_out = signer_port.sign_and_store(
+            unsigned_result.to_dict(), domain_prefix=domain_prefix
         )
+        if not isinstance(sign_out, tuple) or len(sign_out) != 2:
+            raise ClosedValidationError(
+                "execute_admitted_call: signer_port.sign_and_store must return "
+                "a 2-tuple of (signed_dict, ArtifactLocator)"
+            )
+        signed_dict, result_locator = sign_out
         result = CollectionResult.from_dict(signed_dict, require_signed=True)
+        if replace(result, integrity=None) != unsigned_result:
+            raise ClosedValidationError(
+                "execute_admitted_call: signer_port mutated CollectionResult "
+                "payload fields outside integrity"
+            )
         expected_loc = ArtifactLocator.for_canonical_bytes(
             CollectionResult.SCHEMA,
             canonicalize_jcs(result.to_dict()),
@@ -386,7 +437,11 @@ def evaluate_fixture_collection(
     regression_fixture_locator = (
         bundle.admitted.purpose_prerequisite_locators.regression_fixture_locator
     )
-    assert regression_fixture_locator is not None
+    if regression_fixture_locator is None:
+        raise ClosedValidationError(
+            "evaluate_fixture_collection: admitted fixture_7a collection is "
+            "missing regression_fixture_locator"
+        )
 
     fixture_call = AdmittedFixtureCall(
         admitted_collection_locator=bundle.locator,
@@ -433,20 +488,52 @@ def collect(
 ) -> CollectionResult:
     """Admit, reserve, and execute an `operational_read` collection (ADR-0001 §4.2 L388)."""
     if not isinstance(request, CollectionRequest):
-        raise ClosedValidationError(
-            f"request: expected CollectionRequest, got {type(request).__name__}"
+        raise AdmissionError(
+            "invalid_request",
+            f"expected CollectionRequest, got {type(request).__name__}",
+            counters=ExternalIOCounters.zero(),
         )
     if request.collection_purpose != "operational_read":
         raise PurposeEntrypointMismatchError(
             f"collect requires collection_purpose == 'operational_read', "
             f"got {request.collection_purpose!r}"
         )
+    if (
+        not isinstance(reservation_port, ReservationPort)
+        or not isinstance(provider_port, ProviderPort)
+        or not isinstance(inventory_port, ExpectedInventoryPort)
+    ):
+        raise AdmissionError(
+            "invalid_collection_ports",
+            "collect requires valid ReservationPort, ProviderPort, and ExpectedInventoryPort",
+            counters=ExternalIOCounters.zero(),
+        )
 
     bundle = admit_collection(request, cell_ports, admission_id=admission_id)
-    reservation_locator = reservation_port.reserve_admitted_call(
-        admitted_collection_locator=bundle.locator,
-        call_side="operational",
-    )
+    try:
+        reservation_locator = reservation_port.reserve_admitted_call(
+            admitted_collection_locator=bundle.locator,
+            call_side="operational",
+        )
+    except AdmissionError:
+        raise
+    except ClosedValidationError as exc:
+        raise AdmissionError(
+            "reservation_failed",
+            str(exc),
+            counters=ExternalIOCounters.zero(),
+        ) from exc
+
+    if (
+        not isinstance(reservation_locator, ArtifactLocator)
+        or reservation_locator.artifact_type != _RESERVATION_RECORD_SCHEMA
+    ):
+        raise AdmissionError(
+            "invalid_reservation_locator",
+            f"expected ArtifactLocator for {_RESERVATION_RECORD_SCHEMA!r}",
+            counters=ExternalIOCounters.zero(),
+        )
+
     outcome = execute_admitted_call(
         bundle=bundle,
         call_side="operational",

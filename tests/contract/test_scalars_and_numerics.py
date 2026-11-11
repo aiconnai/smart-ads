@@ -521,3 +521,102 @@ def test_base_metric_definition_and_phase1_base_metrics(tmp_path: Path) -> None:
         base_kwargs.update(kwargs)
         with pytest.raises(ClosedValidationError):
             BaseMetricDefinition(**base_kwargs)  # type: ignore[arg-type]
+
+
+def test_overlong_digit_strings_raise_closed_validation_error_not_raw_value_error() -> None:
+    overlong_int = "1" + ("0" * 5000)
+    overlong_brl = overlong_int + ".00"
+
+    # Valid boundaries continue to pass
+    assert (
+        validate_numeric_state(
+            metric_origin="provider_observation",
+            presence_status="observed",
+            calculation_status="not_applicable",
+            unknown_reason=None,
+            value_type="int64_count",
+            raw_numeric_value="0",
+            unit="count",
+            currency=None,
+            query_currency="BRL",
+        ).raw_numeric_value
+        == "0"
+    )
+    assert (
+        validate_numeric_state(
+            metric_origin="provider_observation",
+            presence_status="observed",
+            calculation_status="not_applicable",
+            unknown_reason=None,
+            value_type="int64_count",
+            raw_numeric_value="9223372036854775807",
+            unit="count",
+            currency=None,
+            query_currency="BRL",
+        ).raw_numeric_value
+        == "9223372036854775807"
+    )
+    assert (
+        validate_numeric_state(
+            metric_origin="provider_observation",
+            presence_status="observed",
+            calculation_status="not_applicable",
+            unknown_reason=None,
+            value_type="int64_minor_currency",
+            raw_numeric_value="9223372036854775807",
+            unit="minor_currency",
+            currency="BRL",
+            query_currency="BRL",
+        ).raw_numeric_value
+        == "9223372036854775807"
+    )
+    assert parse_brl_decimal_to_minor_units("0") == "0"
+    assert (
+        parse_brl_decimal_to_minor_units("92233720368547758.07")
+        == "9223372036854775807"
+    )
+
+    # 5001-digit strings must raise ClosedValidationError (not CPython int_max_str_digits ValueError)
+    for origin, presence, calc in (
+        ("provider_observation", "observed", "not_applicable"),
+        ("derived_formula", "not_applicable", "computed"),
+    ):
+        with pytest.raises(ClosedValidationError):
+            validate_numeric_state(
+                metric_origin=origin,
+                presence_status=presence,
+                calculation_status=calc,
+                unknown_reason=None,
+                value_type="int64_count",
+                raw_numeric_value=overlong_int,
+                unit="count",
+                currency=None,
+                query_currency="BRL",
+            )
+        with pytest.raises(ClosedValidationError):
+            validate_numeric_state(
+                metric_origin=origin,
+                presence_status=presence,
+                calculation_status=calc,
+                unknown_reason=None,
+                value_type="int64_minor_currency",
+                raw_numeric_value=overlong_int,
+                unit="minor_currency",
+                currency="BRL",
+                query_currency="BRL",
+            )
+        with pytest.raises(ClosedValidationError):
+            NumericStateRow(
+                metric_origin=origin,  # type: ignore[arg-type]
+                presence_status=presence,  # type: ignore[arg-type]
+                calculation_status=calc,  # type: ignore[arg-type]
+                unknown_reason=None,
+                value_type="int64_count",
+                raw_numeric_value=overlong_int,
+                unit="count",
+                currency=None,
+            )
+
+    for bad_overlong_brl in (overlong_int, overlong_brl):
+        with pytest.raises(ClosedValidationError):
+            parse_brl_decimal_to_minor_units(bad_overlong_brl)
