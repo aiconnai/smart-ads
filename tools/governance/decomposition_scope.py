@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 from tools.governance.locator import json_digest, source_path
@@ -59,13 +61,32 @@ class SourceSnapshot:
                 'explicit_exclusions': [], 'path_universe_digest': json_digest(self.paths)}
 
 
+_DEFAULT_GIT_DIRS = ('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin')
+
+
+def _resolve_git_env() -> tuple[str, dict[str, str]]:
+    raw_dirs = os.environ.get('PATH', '').split(os.pathsep)
+    abs_dirs = [d for d in (*raw_dirs, *_DEFAULT_GIT_DIRS) if d and os.path.isabs(d)]
+    git_bin = shutil.which('git', path=os.pathsep.join(dict.fromkeys(abs_dirs)))
+    if git_bin is None:
+        raise ValueError('source: offline Git unavailable or timed out')
+    clean_path = os.pathsep.join(dict.fromkeys([str(Path(git_bin).parent), *_DEFAULT_GIT_DIRS]))
+    env = {
+        'PATH': clean_path,
+        'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_CONFIG_GLOBAL': '/dev/null',
+        'GIT_NO_REPLACE_OBJECTS': '1',
+        'GIT_NO_LAZY_FETCH': '1',
+        'GIT_OPTIONAL_LOCKS': '0',
+    }
+    return git_bin, env
+
+
 def run_git_offline(
     repo: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[bytes]:
-    env = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
-           'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_NO_REPLACE_OBJECTS': '1',
-           'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'}
-    command = ['git', '-c', 'protocol.allow=never', '-c', 'credential.helper=',
+    git_bin, env = _resolve_git_env()
+    command = [git_bin, '-c', 'protocol.allow=never', '-c', 'credential.helper=',
                '-C', str(repo), *args]
     try:
         result = subprocess.run(command, env=env, capture_output=True, timeout=30)
@@ -83,8 +104,9 @@ def _git(repo: Path, *args: str) -> bytes:
     return run_git_offline(repo, *args).stdout
 
 
-def resolve_scope(repo: Path, baseline: str = BASELINE) -> SourceSnapshot:
-    if baseline != BASELINE:
+def resolve_scope(repo: Path, baseline: str | None = None) -> SourceSnapshot:
+    resolved_baseline = BASELINE if baseline is None else baseline
+    if resolved_baseline != BASELINE:
         raise ValueError('source: baseline must equal the pinned d26c73d commit')
     if _git(repo, 'rev-parse', '--verify', BASELINE + '^{commit}').decode().strip() != BASELINE:
         raise ValueError('source: canonical commit mismatch')

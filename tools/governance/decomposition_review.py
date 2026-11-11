@@ -345,12 +345,13 @@ def validate_unit_review(value: dict, source: SourceSnapshot, inventory: dict, p
 
 
 def build_review_bundle(
-    source: SourceSnapshot, root: Path = REPO_ROOT
+    source: SourceSnapshot, root: Path | None = None
 ) -> tuple[dict, dict]:
     """Assemble the non-authorizing review bundle and return `(inventory, bundle)`."""
+    resolved_root = REPO_ROOT if root is None else root
     inventory = dec.resolve_inventory(source)
     path_proposals = loads_strict(
-        (root / 'docs/governance/decomposition/path-dispositions.proposed.json').read_text(encoding='utf-8')
+        (resolved_root / 'docs/governance/decomposition/path-dispositions.proposed.json').read_text(encoding='utf-8')
     )
     if not isinstance(path_proposals, dict):
         raise ValueError('decomposition: input must be an object')
@@ -359,8 +360,8 @@ def build_review_bundle(
         'authority': 'none',
         'signable': False,
         'admission_proposal': build_admission_proposal(
-            (root / 'docs/adr/ADR-0001-smart-ads-read-gateway.md').read_bytes(),
-            (root / 'docs/governance/trust-anchor/cell_trust_anchor_config.json').read_bytes(),
+            (resolved_root / 'docs/adr/ADR-0001-smart-ads-read-gateway.md').read_bytes(),
+            (resolved_root / 'docs/governance/trust-anchor/cell_trust_anchor_config.json').read_bytes(),
         ),
         'unit_review': build_unit_review(source, inventory, path_proposals),
     }

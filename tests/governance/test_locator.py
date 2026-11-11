@@ -79,6 +79,20 @@ def test_validate_locator_rejects_trailing_newline_in_hex() -> None:
         validate_locator(loc)
 
 
+@pytest.mark.parametrize("non_dict", [None, [], "smart_ads/artifact_locator/v1", 123, True])
+def test_validate_locator_rejects_non_dict_input(non_dict: object) -> None:
+    with pytest.raises(ValueError, match="JSON object"):
+        validate_locator(non_dict)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("bad_digest", [None, 123, ["sha256:" + "a" * 64], {"sha256": "a" * 64}])
+def test_validate_locator_rejects_non_str_content_digest(bad_digest: object) -> None:
+    loc = make_locator("smart_ads/gate2_authority_policy/v1", b"payload")
+    loc["content_digest"] = bad_digest
+    with pytest.raises(ValueError, match="content_digest"):
+        validate_locator(loc)
+
+
 def test_validate_locator_enforces_expected_type() -> None:
     loc = make_locator("smart_ads/gate2_authority_policy/v1", b"payload")
     validate_locator(loc, "smart_ads/gate2_authority_policy/v1")

@@ -520,21 +520,168 @@ def test_build_delivery_mode_rejects_wrong_run_context_locator_type(
     assert "artifact_type" in r.stderr
 
 
-def test_cli_rejects_extra_fields_in_params(tmp_path: Path, anchor_key: Path) -> None:
-    anchor_raw32_b64 = _raw32_b64(anchor_key)
-    ta_params = tmp_path / "ta_params_extra.json"
-    ta_params.write_text(json.dumps({
-        "anchor_id": "trust-anchor:governance-root",
-        "anchor_public_key_base64": anchor_raw32_b64,
-        "valid_from_utc": "2026-01-01T00:00:00Z",
-        "valid_until_utc": "2027-01-01T00:00:00Z",
-        "allowed_registry_artifact_types": ["smart_ads/key_authorization_registry/v1"],
-        "unexpected_extra_field": True,
-    }))
-    out = tmp_path / "trust_anchor.json"
+@pytest.mark.parametrize(
+    "subcommand,base_params,extra_args",
+    [
+        (
+            "build-trust-anchor",
+            {
+                "anchor_id": "trust-anchor:governance-root",
+                "anchor_public_key_base64": None,  # filled in test
+                "valid_from_utc": "2026-01-01T00:00:00Z",
+                "valid_until_utc": "2027-01-01T00:00:00Z",
+                "allowed_registry_artifact_types": ["smart_ads/key_authorization_registry/v1"],
+            },
+            [],
+        ),
+        (
+            "build-registry",
+            {
+                "trust_anchor_id": "trust-anchor:governance-root",
+                "epoch": 1,
+                "issued_at_utc": "2026-09-01T00:00:00Z",
+                "entries": [],
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-policy",
+            {
+                "repository": "aiconnai/smart-ads",
+                "protected_ref": "refs/heads/main",
+                "adr_path": "docs/adr/ADR-0001-smart-ads-read-gateway.md",
+                "ci_review_policy_digest": "sha256:" + "a" * 64,
+                "designated_principals": ["principal:ronaldo"],
+                "registry_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-merge-evidence",
+            {
+                "repository": "aiconnai/smart-ads",
+                "protected_branch": "main",
+                "pr_number": 1,
+                "reviewed_head_sha": "a" * 40,
+                "protected_merge_sha": "b" * 40,
+                "adr_git_identity": {},
+                "required_ci_results": [],
+                "exact_head_review_evidence": [],
+                "branch_protection_policy": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+                "registry_locator": {},
+            },
+            [],
+        ),
+        (
+            "build-receipt",
+            {
+                "approved_adr_git_identity": {},
+                "legacy_source_identity": {},
+                "protected_merge_evidence_locator": {},
+                "protected_merge_sha": "a" * 40,
+                "gate2_authority_policy_locator": {},
+                "approver_principal_ref": "principal:ronaldo",
+                "approved_at_utc": "2026-09-03T00:00:00Z",
+                "key_registry_snapshot_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-run-context",
+            {
+                "gate2_receipt_locator": {},
+                "approved_adr_git_identity": {},
+                "legacy_source_identity": {},
+                "tenant_ref": "tenant:aiconnai",
+                "cell_ref": "cell:smart-ads",
+                "run_id": "run:" + "0" * 32,
+                "created_at_utc": "2026-09-04T00:00:00Z",
+                "key_registry_snapshot_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-delivery-mode",
+            {
+                "gate2_receipt_locator": {},
+                "approved_adr_git_identity": {},
+                "run_context_locator": {},
+                "decided_by_principal_ref": "principal:ronaldo",
+                "decided_at_utc": "2026-09-04T14:05:00Z",
+                "key_registry_snapshot_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-legacy-step2-evidence",
+            {
+                "facts": {},
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+        (
+            "build-legacy-step2-evidence",
+            {
+                "facts_path": "unused.json",
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": {},
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            },
+            [],
+        ),
+    ],
+)
+def test_cli_rejects_extra_fields_in_params(
+    tmp_path: Path, anchor_key: Path, subcommand: str, base_params: dict, extra_args: list[str]
+) -> None:
+    payload = dict(base_params)
+    if payload.get("anchor_public_key_base64") is None and "anchor_public_key_base64" in payload:
+        payload["anchor_public_key_base64"] = _raw32_b64(anchor_key)
+    payload["unexpected_extra_field"] = True
+
+    params_file = tmp_path / f"{subcommand}_extra.json"
+    params_file.write_text(json.dumps(payload), encoding="utf-8")
+    out = tmp_path / f"{subcommand}_out.json"
     proc = run_cli(
-        "build-trust-anchor", "--params", str(ta_params), "--out", str(out), cwd=REPO_ROOT
+        subcommand, "--params", str(params_file), "--out", str(out), *extra_args, cwd=REPO_ROOT
     )
     assert proc.returncode == 1
     assert "expected exactly" in proc.stderr
     assert not out.exists()
+
+
+def test_write_json_file_allow_overwrite_replaces_existing_and_sets_0644(
+    tmp_path: Path,
+) -> None:
+    import stat
+    from tools.governance import cli
+    from tools.governance.jcs import canonicalize
+
+    target = tmp_path / "nested" / "artifact.json"
+    first_meta = cli._write_json_file(str(target), {"step": 1}, allow_overwrite=True)
+    assert set(first_meta.keys()) == {"path", "size", "sha256"}
+    assert "signable" not in first_meta
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    # Tighten mode to 0o600 first to prove overwrite resets target mode to 0o644 via temp file.
+    target.chmod(0o600)
+    second_payload = {"step": 2, "replaced": True}
+    second_meta = cli._write_json_file(str(target), second_payload, allow_overwrite=True)
+    expected_bytes = canonicalize(second_payload)
+    assert target.read_bytes() == expected_bytes
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    assert second_meta == {
+        "path": str(target),
+        "size": len(expected_bytes),
+        "sha256": hashlib.sha256(expected_bytes).hexdigest(),
+    }
+    assert list(target.parent.glob(".decomposition-*")) == []

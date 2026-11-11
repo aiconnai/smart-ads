@@ -183,3 +183,27 @@ def test_unified_routing_table_agrees_across_all_122_ratified_units():
         dec.validate_entry(entry, item)
         group = review._group(item['source_path'])
         assert group is not None
+
+
+@pytest.mark.parametrize(
+    'synthetic_path,expected_group',
+    [
+        ('scripts/google_ads/pinna5109/funnel_google_canary_service_account.py', 'pinna-write-plane'),
+        ('scripts/autonomy/funnel_google_canary_service_account.py', 'ledger-controller'),
+        ('tests/autonomy/google_canary_funnel.py', 'ledger-controller'),
+        ('docs/harness/bin/service_account_funnel_google_canary.sh', 'disablement-governance'),
+        ('docs/harness/bin/funnel_google_canary_gate.sh', 'codex-tooling'),
+        ('scripts/operator/google_canary_funnel_helper.py', 'google-canary'),
+        ('scripts/analytics/funnel_helper.py', 'funnel'),
+    ],
+)
+def test_path_routing_precedence_on_overlapping_synthetic_paths(
+    synthetic_path: str, expected_group: str
+) -> None:
+    from tools.governance import decomposition as dec
+
+    assert dec.path_routing_group(synthetic_path) == expected_group
+    assert review._group(synthetic_path) == expected_group
+    assert dec.path_routing_group('scripts/unclassified_unknown.py') is None
+    with pytest.raises(ValueError, match='no explicit analyst disposition'):
+        review._group('scripts/unclassified_unknown.py')

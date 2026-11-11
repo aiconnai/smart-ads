@@ -880,3 +880,112 @@ def test_cli_build_legacy_step2_evidence_requires_facts_or_facts_path(
     )
     assert r.returncode != 0
     assert "facts" in r.stderr
+
+
+def test_cli_build_legacy_step2_evidence_supports_inline_facts_and_rejects_both(
+    tmp_path: Path,
+) -> None:
+    inline_params = tmp_path / "inline_params.json"
+    inline_params.write_text(
+        json.dumps(
+            {
+                "facts": _valid_facts(),
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": REGISTRY_LOCATOR,
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            }
+        )
+    )
+    inline_out = tmp_path / "inline_evidence.json"
+    r = _run_cli(
+        "build-legacy-step2-evidence",
+        "--params", str(inline_params),
+        "--out", str(inline_out),
+        cwd=REPO_ROOT,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(inline_out.read_text())["$schema"] == (
+        "smart_ads/legacy_step2_implementation_evidence/v1"
+    )
+
+    facts_file = tmp_path / "facts_only.json"
+    facts_file.write_text(json.dumps(_valid_facts()))
+    both_params = tmp_path / "both_params.json"
+    both_params.write_text(
+        json.dumps(
+            {
+                "facts": _valid_facts(),
+                "facts_path": str(facts_file),
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": REGISTRY_LOCATOR,
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            }
+        )
+    )
+    both_out = tmp_path / "both_evidence.json"
+    r_both = _run_cli(
+        "build-legacy-step2-evidence",
+        "--params", str(both_params),
+        "--out", str(both_out),
+        cwd=REPO_ROOT,
+    )
+    assert r_both.returncode == 1
+    assert "either 'facts' or 'facts_path'" in r_both.stderr
+    assert not both_out.exists()
+
+
+def test_resolve_legacy_step2_honors_custom_absolute_path_and_isolates_git_env(
+    tmp_path: Path, legacy_repo: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import shutil
+    from tools.governance import decomposition_scope
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    custom_bin = tmp_path / "custom-git-bin"
+    custom_bin.mkdir()
+    marker = tmp_path / "wrapper-env.json"
+    wrapper = custom_bin / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f'if [ ! -f "{marker}" ]; then\n'
+        f'  printf \'{{"nosystem":"%s","global":"%s","git_dir":"%s","arg1":"%s","arg2":"%s"}}\''
+        ' "$GIT_CONFIG_NOSYSTEM" "$GIT_CONFIG_GLOBAL" "$GIT_DIR" "$1" "$2"'
+        f' > "{marker}"\n'
+        "fi\n"
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    monkeypatch.setattr(
+        decomposition_scope, "_DEFAULT_GIT_DIRS", ("/nonexistent-smart-ads-git-bin",)
+    )
+    monkeypatch.setenv("PATH", str(custom_bin))
+    monkeypatch.setenv("GIT_DIR", "/tmp/poisoned-ambient-git-dir")
+
+    facts = legacy_step2.resolve_legacy_step2_facts(
+        legacy_repo["root"],
+        legacy_repo["baseline_sha"],
+        w1_gate_sha=legacy_repo["w1_gate_sha"],
+        wave1_merges={
+            "W1A": legacy_repo["w1a_sha"],
+            "W1B-G": legacy_repo["w1bg_sha"],
+            "W1B-P": legacy_repo["w1bp_sha"],
+        },
+    )
+    assert facts["readiness_evidence"]["state_present"] is True
+    captured = json.loads(marker.read_text(encoding="utf-8"))
+    assert captured == {
+        "nosystem": "1",
+        "global": "/dev/null",
+        "git_dir": "",
+        "arg1": "-c",
+        "arg2": "protocol.allow=never",
+    }
+
+    # Relative PATH entries ('.' or empty segment) must never resolve git from cwd.
+    monkeypatch.setenv("PATH", f".{os.pathsep}")
+    with pytest.raises(ValueError, match="offline Git unavailable"):
+        decomposition_scope.run_git_offline(legacy_repo["root"], "rev-parse", "HEAD")
