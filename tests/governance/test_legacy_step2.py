@@ -945,25 +945,24 @@ def test_resolve_legacy_step2_honors_custom_absolute_path_and_isolates_git_env(
     assert real_git is not None
     custom_bin = tmp_path / "custom-git-bin"
     custom_bin.mkdir()
-    marker = tmp_path / "wrapper-env.json"
-    wrapper = custom_bin / "git"
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        f'if [ ! -f "{marker}" ]; then\n'
-        f'  printf \'{{"nosystem":"%s","global":"%s","git_dir":"%s","arg1":"%s","arg2":"%s"}}\''
-        ' "$GIT_CONFIG_NOSYSTEM" "$GIT_CONFIG_GLOBAL" "$GIT_DIR" "$1" "$2"'
-        f' > "{marker}"\n'
-        "fi\n"
-        f'exec "{real_git}" "$@"\n',
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
+    # Use a symlink to real_git so execution succeeds even when /tmp is mounted noexec.
+    git_link = custom_bin / "git"
+    git_link.symlink_to(real_git)
 
     monkeypatch.setattr(
         decomposition_scope, "_DEFAULT_GIT_DIRS", ("/nonexistent-smart-ads-git-bin",)
     )
     monkeypatch.setenv("PATH", str(custom_bin))
     monkeypatch.setenv("GIT_DIR", "/tmp/poisoned-ambient-git-dir")
+
+    recorded_calls: list[tuple[list[str], dict[str, str]]] = []
+    real_subprocess_run = decomposition_scope.subprocess.run
+
+    def spy_run(command, *args, **kwargs):
+        recorded_calls.append((list(command), dict(kwargs.get("env") or {})))
+        return real_subprocess_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(decomposition_scope.subprocess, "run", spy_run)
 
     facts = legacy_step2.resolve_legacy_step2_facts(
         legacy_repo["root"],
@@ -976,14 +975,18 @@ def test_resolve_legacy_step2_honors_custom_absolute_path_and_isolates_git_env(
         },
     )
     assert facts["readiness_evidence"]["state_present"] is True
-    captured = json.loads(marker.read_text(encoding="utf-8"))
-    assert captured == {
-        "nosystem": "1",
-        "global": "/dev/null",
-        "git_dir": "",
-        "arg1": "-c",
-        "arg2": "protocol.allow=never",
-    }
+    assert recorded_calls, "expected run_git_offline to invoke subprocess.run"
+    first_cmd, first_env = recorded_calls[0]
+    assert first_cmd[:5] == [
+        str(git_link),
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "credential.helper=",
+    ]
+    assert first_env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert first_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert "GIT_DIR" not in first_env
 
     # Relative PATH entries ('.' or empty segment) must never resolve git from cwd.
     monkeypatch.setenv("PATH", f".{os.pathsep}")
