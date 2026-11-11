@@ -17,7 +17,7 @@ import pytest
 
 from tools.governance import decomposition_governance as governance
 from tools.governance import p1
-from tools.governance.decomposition_authority import HEAD, REGISTRY
+from tools.governance.decomposition_runtime import HEAD, REGISTRY
 
 from tests.governance.test_decomposition_runtime import World, advance, synthetic_keys  # noqa: F401
 

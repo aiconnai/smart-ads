@@ -8,10 +8,10 @@ import pytest
 
 from tools.governance import decomposition_admission as admission
 from tools.governance import decomposition_review as review
-from tools.governance.decomposition_common import digest
-from tools.governance.decomposition_review_rules import SECURITY_GROUPS
-from tools.governance.decomposition_scope import SourceSnapshot, BASELINE, REPOSITORY
-from tools.governance.decomposition_selectors import SECURITY_PATH, resolve_inventory
+from tools.governance.decomposition import SECURITY_PATH, resolve_inventory
+from tools.governance.decomposition_review import SECURITY_GROUPS
+from tools.governance.decomposition_scope import BASELINE, REPOSITORY, SourceSnapshot
+from tools.governance.locator import digest
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -168,3 +168,42 @@ def test_approval_cannot_be_added_to_a_recomputed_review():
     result = review.build_unit_review(source, inv, paths)
     result['entries'][0]['human_decision'] = 'approved'
     with pytest.raises(ValueError): review.validate_unit_review(result, source, inv, paths)
+
+
+def test_unified_routing_table_agrees_across_all_122_ratified_units():
+    import json
+    from tools.governance import decomposition as dec
+    ratified = json.loads(
+        (ROOT / 'docs/governance/decomposition/ratification/dispositions.ratified.json').read_text(encoding='utf-8')
+    )
+    items = {i['inventory_id']: i for i in ratified['inventory']['items']}
+    assert len(items) == 122
+    for entry in ratified['entries']:
+        item = items[entry['inventory_id']]
+        dec.validate_entry(entry, item)
+        group = review._group(item['source_path'])
+        assert group is not None
+
+
+@pytest.mark.parametrize(
+    'synthetic_path,expected_group',
+    [
+        ('scripts/google_ads/pinna5109/funnel_google_canary_service_account.py', 'pinna-write-plane'),
+        ('scripts/autonomy/funnel_google_canary_service_account.py', 'ledger-controller'),
+        ('tests/autonomy/google_canary_funnel.py', 'ledger-controller'),
+        ('docs/harness/bin/service_account_funnel_google_canary.sh', 'disablement-governance'),
+        ('docs/harness/bin/funnel_google_canary_gate.sh', 'codex-tooling'),
+        ('scripts/operator/google_canary_funnel_helper.py', 'google-canary'),
+        ('scripts/analytics/funnel_helper.py', 'funnel'),
+    ],
+)
+def test_path_routing_precedence_on_overlapping_synthetic_paths(
+    synthetic_path: str, expected_group: str
+) -> None:
+    from tools.governance import decomposition as dec
+
+    assert dec.path_routing_group(synthetic_path) == expected_group
+    assert review._group(synthetic_path) == expected_group
+    assert dec.path_routing_group('scripts/unclassified_unknown.py') is None
+    with pytest.raises(ValueError, match='no explicit analyst disposition'):
+        review._group('scripts/unclassified_unknown.py')

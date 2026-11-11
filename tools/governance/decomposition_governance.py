@@ -9,10 +9,9 @@ import base64
 from pathlib import Path
 
 from tools.governance import p1
-from tools.governance.decomposition_common import digest, timestamp
-from tools.governance.decomposition_scope import BASELINE, REPOSITORY
+from tools.governance.decomposition_scope import LEGACY_SOURCE_IDENTITY
 from tools.governance.jcs import canonicalize, loads_strict
-from tools.governance.locator import Store, make_locator
+from tools.governance.locator import Store, digest, make_locator, timestamp
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ANCHOR_PUBLIC = '/BR0HdhylfJYte950hx1m/QNGCpfX/368Eyy5PiYbEI='
@@ -32,9 +31,7 @@ def _load(path: Path) -> dict:
 
 
 def _registry(store: Store, locator: dict, anchor_public: bytes | None = None) -> dict:
-    value = store.get(locator)
-    if value.get('$schema') != 'smart_ads/key_authorization_registry/v1':
-        raise ValueError('governance: incorrect registry schema')
+    value = store.get(locator, expected_type='smart_ads/key_authorization_registry/v1')
     p1.verify_envelope(value, p1.DOMAIN_PREFIXES['key_authorization_registry/v1'],
                        anchor_public if anchor_public is not None else base64.b64decode(ANCHOR_PUBLIC))
     return value
@@ -130,22 +127,16 @@ def observed_registry_chain(store: Store, references: list[dict], anchor_public:
 
 
 def _signed(store: Store, locator: dict, schema: str, action: str, time_field: str) -> dict:
-    value = store.get(locator)
-    if value.get('$schema') != 'smart_ads/' + schema:
-        raise ValueError('governance: predecessor schema mismatch')
+    value = store.get(locator, expected_type='smart_ads/' + schema)
     registry = _registry(store, value['integrity']['key_registry_snapshot_locator'])
-    matches = [e for e in registry['entries'] if _key_id(e) == value['integrity']['key_id']]
-    if len(matches) != 1:
-        raise ValueError('governance: signer must match exactly one registry entry')
-    entry = matches[0]
-    if (entry['lifecycle_state'] != 'active'
-            or {'schema': value['$schema'], 'action': action} not in entry['allowed_actions']):
-        raise ValueError('governance: predecessor signer lacks exact action')
-    when = timestamp(value[time_field])
-    if not timestamp(entry['validity']['from']) <= when < timestamp(entry['validity']['until']):
-        raise ValueError('governance: signer outside historical validity')
-    p1.verify_envelope(value, p1.DOMAIN_PREFIXES[schema],
-                       base64.b64decode(entry['public_key_base64'], validate=True))
+    p1.verify_historical_signer(
+        value,
+        registry,
+        p1.DOMAIN_PREFIXES[schema],
+        action,
+        value[time_field],
+        label='governance',
+    )
     return value
 
 
@@ -183,7 +174,7 @@ def historical_prerequisites(root: Path = REPO_ROOT) -> dict:
             or identity['file_content_sha256'] != ADR_DIGEST
             or digest((root / identity['path']).read_bytes()) != ADR_DIGEST):
         raise ValueError('governance: approved ADR bytes changed; draft patch must stay separate')
-    if run['legacy_source_identity'] != {'repository': REPOSITORY, 'commit_sha': BASELINE}:
+    if run['legacy_source_identity'] != LEGACY_SOURCE_IDENTITY:
         raise ValueError('governance: source identity mismatch')
     reg_loc = _load(gov / 'legacy-step2/params/registry_epoch3_store_put.out')
     registry = _registry(store, reg_loc)

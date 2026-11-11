@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
-from tools.governance.decomposition_common import json_digest, source_path
+from tools.governance.locator import json_digest, source_path
 
 REPOSITORY = 'mbras-tech/mbras-campaigns'
 BASELINE = 'd26c73d8508c7c3d43161fe36a80c44a46bf0f2d'
+LEGACY_SOURCE_IDENTITY = {'repository': REPOSITORY, 'commit_sha': BASELINE}
 TREE = '68ff6d6dbd6d7ecaafa3bca7d5de85a54d705798'
 PATH_DIGEST = 'sha256:a0f50b3c10c145902851dec67c8e5a45e91ed5f9bffb463039a9d2cc7cdef32d'
 ROOTS = (
@@ -58,23 +61,52 @@ class SourceSnapshot:
                 'explicit_exclusions': [], 'path_universe_digest': json_digest(self.paths)}
 
 
-def _git(repo: Path, *args: str) -> bytes:
-    env = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
-           'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_NO_REPLACE_OBJECTS': '1',
-           'GIT_NO_LAZY_FETCH': '1', 'GIT_OPTIONAL_LOCKS': '0'}
-    command = ['git', '-c', 'protocol.allow=never', '-c', 'credential.helper=',
+_DEFAULT_GIT_DIRS = ('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin')
+
+
+def _resolve_git_env() -> tuple[str, dict[str, str]]:
+    raw_dirs = os.environ.get('PATH', '').split(os.pathsep)
+    abs_dirs = [d for d in (*raw_dirs, *_DEFAULT_GIT_DIRS) if d and os.path.isabs(d)]
+    git_bin = shutil.which('git', path=os.pathsep.join(dict.fromkeys(abs_dirs)))
+    if git_bin is None:
+        raise ValueError('source: offline Git unavailable or timed out')
+    clean_path = os.pathsep.join(dict.fromkeys([str(Path(git_bin).parent), *_DEFAULT_GIT_DIRS]))
+    env = {
+        'PATH': clean_path,
+        'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_CONFIG_GLOBAL': '/dev/null',
+        'GIT_NO_REPLACE_OBJECTS': '1',
+        'GIT_NO_LAZY_FETCH': '1',
+        'GIT_OPTIONAL_LOCKS': '0',
+    }
+    return git_bin, env
+
+
+def run_git_offline(
+    repo: Path, *args: str, check: bool = True
+) -> subprocess.CompletedProcess[bytes]:
+    git_bin, env = _resolve_git_env()
+    command = [git_bin, '-c', 'protocol.allow=never', '-c', 'credential.helper=',
                '-C', str(repo), *args]
     try:
         result = subprocess.run(command, env=env, capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError('source: offline Git unavailable or timed out') from exc
-    if result.returncode:
-        raise ValueError('source: missing or unreadable pinned Git object')
-    return result.stdout
+    if check and result.returncode:
+        err = result.stderr.decode('utf-8', errors='replace').strip()
+        raise ValueError(
+            f"source: missing or unreadable pinned Git object ('git {' '.join(args)}'): {err}"
+        )
+    return result
 
 
-def resolve_scope(repo: Path, baseline: str = BASELINE) -> SourceSnapshot:
-    if baseline != BASELINE:
+def _git(repo: Path, *args: str) -> bytes:
+    return run_git_offline(repo, *args).stdout
+
+
+def resolve_scope(repo: Path, baseline: str | None = None) -> SourceSnapshot:
+    resolved_baseline = BASELINE if baseline is None else baseline
+    if resolved_baseline != BASELINE:
         raise ValueError('source: baseline must equal the pinned d26c73d commit')
     if _git(repo, 'rev-parse', '--verify', BASELINE + '^{commit}').decode().strip() != BASELINE:
         raise ValueError('source: canonical commit mismatch')

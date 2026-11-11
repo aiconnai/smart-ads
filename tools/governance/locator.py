@@ -17,6 +17,7 @@ are required and independent.
 """
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import re
 from pathlib import Path
@@ -33,6 +34,60 @@ _LOCATOR_MEMBERS = {
     "object_ref",
 }
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def digest(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def json_digest(value: object) -> str:
+    return digest(canonicalize(value))
+
+
+def exact_fields(value: object, fields: set[str], label: str) -> None:
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError(f"{label}: expected exactly {sorted(fields)}")
+
+
+def nonempty(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"{label}: expected non-empty string")
+    return value
+
+
+def string_list(value: object, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{label}: expected list")
+    for x in value:
+        nonempty(x, label)
+    if len(value) != len(set(value)):
+        raise ValueError(f"{label}: duplicate values")
+    return value
+
+
+def source_path(value: object) -> str:
+    name = nonempty(value, "path")
+    if (
+        name.startswith("/")
+        or "\\" in name
+        or ":" in name
+        or "%" in name
+        or any(ord(c) < 32 for c in name)
+        or any(p in ("", ".", "..") for p in name.split("/"))
+    ):
+        raise ValueError(f"path: not normalized repository-relative: {name!r}")
+    return name
+
+
+def timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value
+    ):
+        raise ValueError("timestamp: require whole-second UTC YYYY-MM-DDTHH:MM:SSZ")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("timestamp: invalid calendar value") from exc
 
 
 def make_locator(artifact_type: str, canonical_bytes: bytes) -> dict[str, Any]:
@@ -52,16 +107,20 @@ def _digest_hex_from_prefixed(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value.startswith("sha256:"):
         raise ValueError(f"locator.validate_locator: {field} must be 'sha256:<hex>'")
     hex_part = value[len("sha256:"):]
-    if not _HEX64.match(hex_part):
+    if not _HEX64.fullmatch(hex_part):
         raise ValueError(
             f"locator.validate_locator: {field} hex must be 64 lowercase hex chars"
         )
     return hex_part
 
 
-def validate_locator(loc: dict[str, Any]) -> None:
+def validate_locator(
+    loc: dict[str, Any], expected_type: str | None = None
+) -> None:
     """Raise ValueError unless `loc` has exactly the six required members with
-    consistent, well-formed values."""
+    consistent, well-formed values (and matches `expected_type` when given)."""
+    if not isinstance(loc, dict):
+        raise ValueError("locator.validate_locator: locator must be a JSON object")
     actual_members = set(loc.keys())
     if actual_members != _LOCATOR_MEMBERS:
         missing = _LOCATOR_MEMBERS - actual_members
@@ -74,6 +133,11 @@ def validate_locator(loc: dict[str, Any]) -> None:
         raise ValueError("locator.validate_locator: $schema must be smart_ads/artifact_locator/v1")
     if not isinstance(loc["artifact_type"], str) or not loc["artifact_type"]:
         raise ValueError("locator.validate_locator: artifact_type must be a non-empty string")
+    if expected_type is not None and loc["artifact_type"] != expected_type:
+        raise ValueError(
+            f"locator.validate_locator: locator artifact_type must be {expected_type!r}, "
+            f"got {loc['artifact_type']!r}"
+        )
     if loc["serialization"] != "rfc8785-json":
         raise ValueError("locator.validate_locator: serialization must be rfc8785-json")
     if loc["store_kind"] != "cell_immutable_object":
@@ -119,7 +183,9 @@ class Store:
             raise ValueError(f"locator.Store.put: write verification failed for {path}")
         return make_locator(envelope["$schema"], canonical)
 
-    def get(self, locator: dict[str, Any]) -> dict[str, Any]:
+    def get(
+        self, locator: dict[str, Any], expected_type: str | None = None
+    ) -> dict[str, Any]:
         """Resolve `locator` and return the parsed envelope.
 
         Per ADR-0001 (locator validity, around L2833-2834), a locator is
@@ -128,7 +194,7 @@ class Store:
         recomputes to `content_digest`. All three checks are conjunctive and
         enforced here.
         """
-        validate_locator(locator)
+        validate_locator(locator, expected_type=expected_type)
         digest_hex = locator["content_digest"][len("sha256:"):]
         path = self._path_for(digest_hex)
         if not path.exists():

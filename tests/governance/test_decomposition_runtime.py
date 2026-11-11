@@ -10,18 +10,23 @@ import subprocess
 import pytest
 
 from tools.governance import decomposition as dec, p1
+from tools.governance.decomposition import decision_template, resolve_inventory
 from tools.governance.decomposition_admission import profile_proposals
-from tools.governance.decomposition_authority import (
-    CHECKPOINT, HEAD, INVENTORY, MANIFEST, REGISTRY, STATE,
-    ClockInterval, Floor, InstallationPins,
+from tools.governance.decomposition_runtime import (
+    CHECKPOINT,
+    HEAD,
+    INVENTORY,
+    MANIFEST,
+    REGISTRY,
+    STATE,
+    AdmissionVerifier,
+    ClockInterval,
+    Floor,
+    InstallationPins,
 )
-from tools.governance.decomposition_common import digest
-from tools.governance.decomposition_decisions import decision_template
-from tools.governance.decomposition_runtime import AdmissionVerifier
 from tools.governance.decomposition_scope import SourceSnapshot
-from tools.governance.decomposition_selectors import resolve_inventory
 from tools.governance.jcs import canonicalize
-from tools.governance.locator import Store
+from tools.governance.locator import Store, digest
 
 ROOT = Path(__file__).resolve().parents[2]
 WHEN = '2026-09-07T10:00:00Z'

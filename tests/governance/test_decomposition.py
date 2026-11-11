@@ -13,13 +13,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools.governance import cli
 from tools.governance import decomposition as dec
-from tools.governance import decomposition_decisions as decisions
-from tools.governance import decomposition_scope as scope
-from tools.governance import decomposition_selectors as selectors
-from tools.governance import decomposition_cli as dcli
 from tools.governance import decomposition_governance as governance
-from tools.governance.decomposition_common import digest, source_path
+from tools.governance import decomposition_scope as scope
+from tools.governance.locator import digest, source_path
+
+decisions = dec
+selectors = dec
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -112,6 +113,69 @@ def test_pinna_never_enters_core_even_with_approved_status():
     with pytest.raises(ValueError, match='Pinna'):
         decisions.validate_entry(entry(item, migration_mode='reimplement_clean',
                                        target_layer='core_engine', target_path='src/smart_ads/x.py'), item)
+
+
+@pytest.mark.parametrize(
+    'source_path_val,bad_updates,expected_match',
+    [
+        (
+            'scripts/google_ads/pinna5109/mutate.py',
+            {'migration_mode': 'reimplement_clean', 'target_layer': 'core_engine', 'target_path': 'src/smart_ads/m.py'},
+            'Pinna',
+        ),
+        (
+            'scripts/autonomy/controller.py',
+            {'migration_mode': 'reimplement_clean', 'target_layer': 'core_engine', 'target_path': 'src/smart_ads/c.py'},
+            'contradicts the ADR system disposition',
+        ),
+        (
+            'DOCUMENTATION/IBVI_ADS_SERVICE_ACCOUNT_KEY_DISABLEMENT_PACKET.md',
+            {'migration_mode': 'reference_only', 'target_layer': None, 'target_path': None, 'required_tests': [], 'preserved_invariants': []},
+            'contradicts the ADR system disposition',
+        ),
+        (
+            'docs/harness/bin/codex-gate.sh',
+            {'migration_mode': 'reimplement_clean', 'target_layer': 'core_engine', 'target_path': 'src/smart_ads/g.py'},
+            'contradicts the ADR system disposition',
+        ),
+        (
+            'scripts/operator/google_canary.py',
+            {'migration_mode': 'reimplement_clean', 'target_layer': 'core_engine', 'target_path': 'src/smart_ads/gc.py'},
+            'contradicts the ADR system disposition',
+        ),
+        (
+            'scripts/analytics/validate_funnel_contract.py',
+            {'migration_mode': 'reimplement_clean', 'target_layer': 'core_engine', 'target_path': 'src/smart_ads/f.py'},
+            'contradicts the ADR system disposition',
+        ),
+        (
+            'scripts/autonomy/ledger.py',
+            {
+                'migration_mode': 'legacy_governance_only',
+                'target_repository': 'aiconnai/smart-ads',
+                'target_layer': 'repository_tooling',
+                'target_path': 'tooling/governance/ledger.py',
+            },
+            'legacy governance cannot migrate to a different repository',
+        ),
+        (
+            'tests/test_service_account_disablement_packet.py',
+            {
+                'migration_mode': 'legacy_governance_only',
+                'target_repository': 'aiconnai/smart-ads',
+                'target_layer': 'repository_tooling',
+                'target_path': 'tests/test_service_account_disablement_packet.py',
+            },
+            'legacy governance cannot migrate to a different repository',
+        ),
+    ],
+)
+def test_validate_entry_enforces_all_six_group_modes_and_legacy_repo_lock(
+    source_path_val: str, bad_updates: dict, expected_match: str
+) -> None:
+    item = selectors.resolve_inventory(snapshot(path=source_path_val))['items'][0]
+    with pytest.raises(ValueError, match=expected_match):
+        decisions.validate_entry(entry(item, **bad_updates), item)
 
 
 def test_manifest_digest_does_not_depend_on_signature_results():
@@ -276,22 +340,23 @@ def test_governance_rejects_corrupted_stored_registry(tmp_path):
 
 def test_draft_write_is_atomic_and_refuses_existing_target(tmp_path):
     path = tmp_path/'output.json'
-    dcli._write(str(path), {'draft': True})
+    cli._write_json_file(str(path), {'draft': True}, allow_overwrite=False)
     before = path.read_bytes()
-    with pytest.raises(ValueError, match='exists'): dcli._write(str(path), {'draft': False})
+    with pytest.raises(ValueError, match='exists'):
+        cli._write_json_file(str(path), {'draft': False}, allow_overwrite=False)
     assert path.read_bytes() == before
     assert list(tmp_path.glob('.decomposition-*')) == []
 
 
 def test_cli_does_not_write_after_invalid_assignment(tmp_path, monkeypatch):
     source = snapshot();inv = selectors.resolve_inventory(source)
-    monkeypatch.setattr(dcli, 'resolve_scope', lambda _: source)
+    monkeypatch.setattr(cli, 'resolve_scope', lambda _: source)
     p = tmp_path/'params.json';out = tmp_path/'result.json'
     p.write_text(json.dumps({'artifact_kind': 'decomposition_inputs_draft',
                             'draft_contract': dec.CONTRACT, 'inventory': inv, 'entries': []}))
     args = SimpleNamespace(command='build-decomposition-manifest', legacy_repo='unused',
                            params=str(p), out=str(out), generated_at='2026-09-07T00:00:00Z')
-    with pytest.raises(ValueError, match='unassigned'): dcli.run(args)
+    with pytest.raises(ValueError, match='unassigned'): cli.run_decomposition(args)
     assert not out.exists()
 
 
@@ -360,3 +425,109 @@ def test_git_resolver_rejects_extra_path_in_anchored_directory(git_source, monke
     monkeypatch.setattr(scope, 'BASELINE', head)
     monkeypatch.setattr(scope, 'TREE', _git(repo, 'rev-parse', 'HEAD^{tree}'))
     with pytest.raises(ValueError, match='44 paths'): scope.resolve_scope(repo, head)
+
+
+def test_cli_main_all_five_decomposition_subcommands_end_to_end(tmp_path, monkeypatch, capsys):
+    from tools.governance import decomposition_review as review
+
+    repo = tmp_path / 'legacy_source'
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.name', 'fixture')
+    _git(repo, 'config', 'user.email', 'fixture@example.invalid')
+    _git(repo, 'config', 'commit.gpgsign', 'false')
+
+    sec_parts = ['import pytest\n']
+    for name in review.SECURITY_GROUPS:
+        if name == 'test_sensitive_writers_reject_symlink_file_targets':
+            sec_parts.append('@pytest.mark.parametrize("writer", [_write_test_csv, _write_test_json])\n')
+        body = '_write_test_csv(None)' if name == 'test_sensitive_writers_enforce_private_modes_under_permissive_umask' else 'pass'
+        sec_parts.append(f'def {name}():\n    {body}\n\n')
+    sec_bytes = ''.join(sec_parts).encode('utf-8')
+
+    paths = json.loads((ROOT / 'tests/governance/fixtures/decomposition_scope_paths.json').read_text(encoding='utf-8'))
+    raw_by_path: dict[str, bytes] = {}
+    for p in paths:
+        content = sec_bytes if p == dec.SECURITY_PATH else (b'def stub():\n    return 1\n' if p.endswith('.py') else b'fixture\n')
+        target = repo / p
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+        raw_by_path[p] = content
+    _git(repo, 'add', '.')
+    _git(repo, 'commit', '-qm', 'fixture baseline')
+    head = _git(repo, 'rev-parse', 'HEAD')
+    tree = _git(repo, 'rev-parse', 'HEAD^{tree}')
+    monkeypatch.setattr(scope, 'BASELINE', head)
+    monkeypatch.setattr(scope, 'TREE', tree)
+    monkeypatch.setattr(review, 'BASELINE', head)
+
+    fixture_root = tmp_path / 'gov_root'
+    (fixture_root / 'docs/adr').mkdir(parents=True)
+    (fixture_root / 'docs/governance/trust-anchor').mkdir(parents=True)
+    (fixture_root / 'docs/governance/decomposition').mkdir(parents=True)
+    (fixture_root / 'docs/adr/ADR-0001-smart-ads-read-gateway.md').write_bytes(
+        (ROOT / 'docs/adr/ADR-0001-smart-ads-read-gateway.md').read_bytes()
+    )
+    (fixture_root / 'docs/governance/trust-anchor/cell_trust_anchor_config.json').write_bytes(
+        (ROOT / 'docs/governance/trust-anchor/cell_trust_anchor_config.json').read_bytes()
+    )
+    proposals = json.loads(
+        (ROOT / 'docs/governance/decomposition/path-dispositions.proposed.json').read_text(encoding='utf-8')
+    )
+    proposals['source']['commit_sha'] = head
+    proposals['source']['source_tree_oid'] = tree
+    for row in proposals['paths']:
+        row['source_file_digest'] = digest(raw_by_path[row['source_path']])
+    (fixture_root / 'docs/governance/decomposition/path-dispositions.proposed.json').write_text(
+        json.dumps(proposals), encoding='utf-8'
+    )
+    monkeypatch.setattr(review, 'REPO_ROOT', fixture_root)
+
+    # 1. resolve-decomposition-inventory
+    inv_out = tmp_path / 'inventory.json'
+    assert cli.main(['resolve-decomposition-inventory', '--legacy-repo', str(repo), '--out', str(inv_out)]) == 0
+    inv_meta = json.loads(capsys.readouterr().out)
+    assert inv_meta['signable'] is False
+    inv_payload = json.loads(inv_out.read_text(encoding='utf-8'))
+    assert inv_payload['artifact_kind'] == 'decomposition_inputs_draft'
+
+    # 2. prepare-decomposition-review (exercises build_review_bundle end-to-end)
+    rev_out = tmp_path / 'review_bundle.json'
+    assert cli.main(['prepare-decomposition-review', '--legacy-repo', str(repo), '--out', str(rev_out)]) == 0
+    rev_meta = json.loads(capsys.readouterr().out)
+    assert rev_meta['signable'] is False
+    rev_payload = json.loads(rev_out.read_text(encoding='utf-8'))
+    assert rev_payload['artifact_kind'] == 'decomposition_review_bundle'
+    assert rev_payload['signable'] is False
+
+    # 3. prepare-decomposition-dispositions
+    disp_out = tmp_path / 'dispositions_draft.json'
+    assert cli.main(['prepare-decomposition-dispositions', '--legacy-repo', str(repo), '--out', str(disp_out)]) == 0
+    disp_meta = json.loads(capsys.readouterr().out)
+    assert disp_meta['signable'] is False
+    disp_payload = json.loads(disp_out.read_text(encoding='utf-8'))
+    assert disp_payload['artifact_kind'] == 'decomposition_inputs_draft'
+
+    # 4. build-decomposition-manifest
+    cand_out = tmp_path / 'candidate_manifest.json'
+    assert cli.main([
+        'build-decomposition-manifest',
+        '--legacy-repo', str(repo),
+        '--params', str(inv_out),
+        '--generated-at', '2026-09-07T00:00:00Z',
+        '--out', str(cand_out),
+    ]) == 0
+    cand_meta = json.loads(capsys.readouterr().out)
+    assert cand_meta['validation_status'] == 'INCOMPLETE'
+    assert cand_meta['signable'] is False
+
+    # 5. verify-decomposition-manifest (must return exit code 5 and signable=False)
+    assert cli.main([
+        'verify-decomposition-manifest',
+        '--legacy-repo', str(repo),
+        '--in', str(cand_out),
+    ]) == 5
+    ver_meta = json.loads(capsys.readouterr().out)
+    assert ver_meta['candidate_matches_recomputation'] is True
+    assert ver_meta['validation_status'] == 'INCOMPLETE'
+    assert ver_meta['signable'] is False

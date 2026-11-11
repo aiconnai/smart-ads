@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.governance.jcs import canonicalize
+from tools.governance.locator import exact_fields, timestamp
 
 DOMAIN_PREFIXES: dict[str, str] = {
     "key_authorization_registry/v1": "SMART-ADS:KEY-REGISTRY:V1\n",
@@ -201,3 +202,79 @@ def verify_envelope(
     msg = message(envelope, domain_prefix)
     if not _openssl_verify(public_key_raw32, msg, sig):
         raise ValueError("p1.verify_envelope: Ed25519 signature verification failed")
+
+
+def decode_public_key_entry(value: dict[str, Any], label: str = "p1") -> bytes:
+    """Validate and decode a canonical 32-byte Ed25519 public key object with sha256 pin."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label}: public key entry must be a JSON object")
+    pub_b64 = value.get("public_key_base64")
+    if not isinstance(pub_b64, str):
+        raise ValueError(f"{label}: invalid public key encoding")
+    raw = _strict_base64_decode(pub_b64)
+    if len(raw) != 32:
+        raise ValueError(f"{label}: public key must be canonical 32-byte Ed25519")
+    expected_sha = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if value.get("public_key_sha256") != expected_sha:
+        raise ValueError(f"{label}: public key hash mismatch")
+    return raw
+
+
+def verify_historical_signer(
+    envelope: dict[str, Any],
+    registry: dict[str, Any],
+    domain_prefix: str,
+    action: str,
+    issued_at_utc: str,
+    *,
+    required_role: str | None = None,
+    label: str = "governance",
+) -> dict[str, Any]:
+    """Verify `envelope` against its historical `registry` snapshot at `issued_at_utc`."""
+    if not isinstance(envelope, dict) or not isinstance(registry, dict):
+        raise ValueError(f"{label}: envelope and registry must be JSON objects")
+    schema = envelope.get("$schema")
+    if not isinstance(schema, str) or not schema:
+        raise ValueError(f"{label}: envelope missing string $schema")
+    integrity = envelope.get("integrity")
+    if not isinstance(integrity, dict):
+        raise ValueError(f"{label}: envelope missing integrity object")
+    signer_key_id = integrity.get("key_id")
+    if not isinstance(signer_key_id, str) or not signer_key_id:
+        raise ValueError(f"{label}: envelope missing string signer key_id")
+    if not isinstance(domain_prefix, str) or not domain_prefix:
+        raise ValueError(f"{label}: domain_prefix must be a non-empty string")
+    if not isinstance(action, str) or not action:
+        raise ValueError(f"{label}: action must be a non-empty string")
+    when = timestamp(issued_at_utc)
+    if timestamp(registry.get("issued_at_utc")) > when:
+        raise ValueError(f"{label}: registry issued after artifact")
+    entries = registry.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError(f"{label}: registry entries must be a list")
+    matches: list[dict[str, Any]] = []
+    for candidate in entries:
+        if (
+            not isinstance(candidate, dict)
+            or not isinstance(candidate.get("key_id"), str)
+            or not candidate["key_id"]
+        ):
+            raise ValueError(f"{label}: registry entry is missing key_id")
+        if candidate["key_id"] == signer_key_id:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise ValueError(f"{label}: signer must match exactly one historical registry entry")
+    entry = matches[0]
+    if entry.get("lifecycle_state") != "active":
+        raise ValueError(f"{label}: historical signer lifecycle mismatch")
+    if required_role is not None and entry.get("role") != required_role:
+        raise ValueError(f"{label}: historical signer role mismatch")
+    allowed_actions = entry.get("allowed_actions")
+    if not isinstance(allowed_actions, list) or {"schema": schema, "action": action} not in allowed_actions:
+        raise ValueError(f"{label}: signer lacks exact action")
+    validity = entry.get("validity")
+    exact_fields(validity, {"from", "until"}, "validity")
+    if not timestamp(validity["from"]) <= when < timestamp(validity["until"]):
+        raise ValueError(f"{label}: signer outside historical validity interval")
+    verify_envelope(envelope, domain_prefix, decode_public_key_entry(entry, label))
+    return entry

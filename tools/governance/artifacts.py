@@ -22,15 +22,13 @@ import re
 import subprocess
 from typing import Any
 
+from tools.governance.decomposition_scope import LEGACY_SOURCE_IDENTITY
 from tools.governance.locator import validate_locator
 
 _SHA256_PREFIXED = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _LIFECYCLE_STATES = {"active", "revoked", "expired"}
-_LEGACY_SOURCE_IDENTITY = {
-    "repository": "mbras-tech/mbras-campaigns",
-    "commit_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
-}
+_LEGACY_SOURCE_IDENTITY = LEGACY_SOURCE_IDENTITY
 _ADR_PATH = "docs/adr/ADR-0001-smart-ads-read-gateway.md"
 
 
@@ -161,7 +159,9 @@ def build_gate2_authority_policy(
     registry_locator: dict[str, Any],
     signer_key_id: str,
 ) -> dict[str, Any]:
-    if not _SHA256_PREFIXED.match(ci_review_policy_digest):
+    if not isinstance(ci_review_policy_digest, str) or not _SHA256_PREFIXED.fullmatch(
+        ci_review_policy_digest
+    ):
         raise ValueError(
             "build_gate2_authority_policy: ci_review_policy_digest must match "
             "^sha256:[0-9a-f]{64}$"
@@ -174,7 +174,7 @@ def build_gate2_authority_policy(
         )
     cleaned = sorted({p.strip() for p in designated_principals})
 
-    validate_locator(registry_locator)
+    validate_locator(registry_locator, "smart_ads/key_authorization_registry/v1")
 
     return {
         "$schema": "smart_ads/gate2_authority_policy/v1",
@@ -229,19 +229,23 @@ def _validate_merge_evidence_inputs(
             "produce evidence unless the caller explicitly proves the branch is protected "
             "(branch_protection_verified=True); main is unprotected today"
         )
-    if not _HEX40.match(reviewed_head_sha):
+    if not isinstance(reviewed_head_sha, str) or not _HEX40.fullmatch(reviewed_head_sha):
         raise ValueError("build_protected_merge_evidence: reviewed_head_sha must be 40 lowercase hex")
-    if not _HEX40.match(protected_merge_sha):
+    if not isinstance(protected_merge_sha, str) or not _HEX40.fullmatch(protected_merge_sha):
         raise ValueError("build_protected_merge_evidence: protected_merge_sha must be 40 lowercase hex")
     _validate_adr_git_identity(adr_git_identity)
     if not required_ci_results:
         raise ValueError("build_protected_merge_evidence: required_ci_results must be non-empty")
     if not exact_head_review_evidence:
         raise ValueError("build_protected_merge_evidence: exact_head_review_evidence must be non-empty")
-    validate_locator(branch_protection_policy["locator"])
-    if not _SHA256_PREFIXED.match(branch_protection_policy["digest"]):
+    validate_locator(
+        branch_protection_policy["locator"], "smart_ads/gate2_authority_policy/v1"
+    )
+    if not isinstance(branch_protection_policy["digest"], str) or not _SHA256_PREFIXED.fullmatch(
+        branch_protection_policy["digest"]
+    ):
         raise ValueError("build_protected_merge_evidence: branch_protection_policy.digest malformed")
-    validate_locator(registry_locator)
+    validate_locator(registry_locator, "smart_ads/key_authorization_registry/v1")
 
 
 def build_protected_merge_evidence(
@@ -298,11 +302,13 @@ def _validate_adr_git_identity(identity: dict[str, Any]) -> None:
     missing = required - set(identity.keys())
     if missing:
         raise ValueError(f"adr_git_identity missing members {sorted(missing)}")
-    if not _HEX40.match(identity["commit_sha"]):
+    if not isinstance(identity["commit_sha"], str) or not _HEX40.fullmatch(identity["commit_sha"]):
         raise ValueError("adr_git_identity.commit_sha must be 40 lowercase hex")
-    if not _HEX40.match(identity["git_blob_oid"]):
+    if not isinstance(identity["git_blob_oid"], str) or not _HEX40.fullmatch(identity["git_blob_oid"]):
         raise ValueError("adr_git_identity.git_blob_oid must be 40 lowercase hex")
-    if not _SHA256_PREFIXED.match(identity["file_content_sha256"]):
+    if not isinstance(identity["file_content_sha256"], str) or not _SHA256_PREFIXED.fullmatch(
+        identity["file_content_sha256"]
+    ):
         raise ValueError("adr_git_identity.file_content_sha256 must be 'sha256:<64 hex>'")
     if identity["path"] != _ADR_PATH:
         raise ValueError(f"adr_git_identity.path must be exactly {_ADR_PATH!r}")
@@ -326,16 +332,22 @@ def build_gate2_receipt(
             f"build_gate2_receipt: legacy_source_identity must equal exactly "
             f"{_LEGACY_SOURCE_IDENTITY!r}, got {legacy_source_identity!r}"
         )
-    if not _HEX40.match(protected_merge_sha):
+    if not isinstance(protected_merge_sha, str) or not _HEX40.fullmatch(protected_merge_sha):
         raise ValueError("build_gate2_receipt: protected_merge_sha must be 40 lowercase hex")
     if protected_merge_sha != approved_adr_git_identity["commit_sha"]:
         raise ValueError(
             "build_gate2_receipt: protected_merge_sha must equal "
             "approved_adr_git_identity.commit_sha"
         )
-    validate_locator(protected_merge_evidence_locator)
-    validate_locator(gate2_authority_policy_locator)
-    validate_locator(key_registry_snapshot_locator)
+    validate_locator(
+        protected_merge_evidence_locator, "smart_ads/protected_merge_evidence/v1"
+    )
+    validate_locator(
+        gate2_authority_policy_locator, "smart_ads/gate2_authority_policy/v1"
+    )
+    validate_locator(
+        key_registry_snapshot_locator, "smart_ads/key_authorization_registry/v1"
+    )
     if not approver_principal_ref:
         raise ValueError("build_gate2_receipt: approver_principal_ref must be non-empty")
 
@@ -359,23 +371,6 @@ def build_gate2_receipt(
 # ---------------------------------------------------------------------------
 # migration_run_context/v1 — P1 domain SMART-ADS:RUN-CONTEXT:V1
 # ---------------------------------------------------------------------------
-
-
-def _require_locator_type(
-    locator: dict[str, Any], expected_artifact_type: str, where: str
-) -> None:
-    """Validate `locator` shape and pin its artifact_type.
-
-    `validate_locator` checks structural well-formedness but accepts any
-    non-empty artifact_type, so a locator resolving the wrong object kind would
-    pass. Slots in these envelopes are typed, so the type is pinned here.
-    """
-    validate_locator(locator)
-    if locator["artifact_type"] != expected_artifact_type:
-        raise ValueError(
-            f"{where}: locator artifact_type must be {expected_artifact_type!r}, "
-            f"got {locator['artifact_type']!r}"
-        )
 
 
 def build_migration_run_context(
@@ -403,15 +398,9 @@ def build_migration_run_context(
             f"build_migration_run_context: legacy_source_identity must equal exactly "
             f"{_LEGACY_SOURCE_IDENTITY!r}, got {legacy_source_identity!r}"
         )
-    _require_locator_type(
-        gate2_receipt_locator,
-        "smart_ads/gate2_approval_receipt/v1",
-        "build_migration_run_context",
-    )
-    _require_locator_type(
-        key_registry_snapshot_locator,
-        "smart_ads/key_authorization_registry/v1",
-        "build_migration_run_context",
+    validate_locator(gate2_receipt_locator, "smart_ads/gate2_approval_receipt/v1")
+    validate_locator(
+        key_registry_snapshot_locator, "smart_ads/key_authorization_registry/v1"
     )
     for name, value in (
         ("tenant_ref", tenant_ref),
@@ -468,20 +457,10 @@ def build_delivery_mode_decision(
     TypeError, not a rejected value.
     """
     _validate_adr_git_identity(approved_adr_git_identity)
-    _require_locator_type(
-        gate2_receipt_locator,
-        "smart_ads/gate2_approval_receipt/v1",
-        "build_delivery_mode_decision",
-    )
-    _require_locator_type(
-        run_context_locator,
-        "smart_ads/migration_run_context/v1",
-        "build_delivery_mode_decision",
-    )
-    _require_locator_type(
-        key_registry_snapshot_locator,
-        "smart_ads/key_authorization_registry/v1",
-        "build_delivery_mode_decision",
+    validate_locator(gate2_receipt_locator, "smart_ads/gate2_approval_receipt/v1")
+    validate_locator(run_context_locator, "smart_ads/migration_run_context/v1")
+    validate_locator(
+        key_registry_snapshot_locator, "smart_ads/key_authorization_registry/v1"
     )
     for name, value in (
         ("decided_by_principal_ref", decided_by_principal_ref),

@@ -33,7 +33,7 @@ import copy
 import pytest
 
 from tools.governance import p1
-from tools.governance.decomposition_authority import CHECKPOINT, HEAD, INVENTORY, REGISTRY, STATE, Floor
+from tools.governance.decomposition_runtime import CHECKPOINT, HEAD, INVENTORY, REGISTRY, STATE, Floor
 
 from tests.governance.test_decomposition_runtime import World, synthetic_keys  # noqa: F401
 

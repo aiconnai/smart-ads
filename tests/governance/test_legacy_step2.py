@@ -880,3 +880,115 @@ def test_cli_build_legacy_step2_evidence_requires_facts_or_facts_path(
     )
     assert r.returncode != 0
     assert "facts" in r.stderr
+
+
+def test_cli_build_legacy_step2_evidence_supports_inline_facts_and_rejects_both(
+    tmp_path: Path,
+) -> None:
+    inline_params = tmp_path / "inline_params.json"
+    inline_params.write_text(
+        json.dumps(
+            {
+                "facts": _valid_facts(),
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": REGISTRY_LOCATOR,
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            }
+        )
+    )
+    inline_out = tmp_path / "inline_evidence.json"
+    r = _run_cli(
+        "build-legacy-step2-evidence",
+        "--params", str(inline_params),
+        "--out", str(inline_out),
+        cwd=REPO_ROOT,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(inline_out.read_text())["$schema"] == (
+        "smart_ads/legacy_step2_implementation_evidence/v1"
+    )
+
+    facts_file = tmp_path / "facts_only.json"
+    facts_file.write_text(json.dumps(_valid_facts()))
+    both_params = tmp_path / "both_params.json"
+    both_params.write_text(
+        json.dumps(
+            {
+                "facts": _valid_facts(),
+                "facts_path": str(facts_file),
+                "resolved_at_utc": "2026-09-07T12:00:00Z",
+                "key_registry_snapshot_locator": REGISTRY_LOCATOR,
+                "signer_key_id": "key:ed25519:" + "0" * 64,
+            }
+        )
+    )
+    both_out = tmp_path / "both_evidence.json"
+    r_both = _run_cli(
+        "build-legacy-step2-evidence",
+        "--params", str(both_params),
+        "--out", str(both_out),
+        cwd=REPO_ROOT,
+    )
+    assert r_both.returncode == 1
+    assert "either 'facts' or 'facts_path'" in r_both.stderr
+    assert not both_out.exists()
+
+
+def test_resolve_legacy_step2_honors_custom_absolute_path_and_isolates_git_env(
+    tmp_path: Path, legacy_repo: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import shutil
+    from tools.governance import decomposition_scope
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    custom_bin = tmp_path / "custom-git-bin"
+    custom_bin.mkdir()
+    # Use a symlink to real_git so execution succeeds even when /tmp is mounted noexec.
+    git_link = custom_bin / "git"
+    git_link.symlink_to(real_git)
+
+    monkeypatch.setattr(
+        decomposition_scope, "_DEFAULT_GIT_DIRS", ("/nonexistent-smart-ads-git-bin",)
+    )
+    monkeypatch.setenv("PATH", str(custom_bin))
+    monkeypatch.setenv("GIT_DIR", "/tmp/poisoned-ambient-git-dir")
+
+    recorded_calls: list[tuple[list[str], dict[str, str]]] = []
+    real_subprocess_run = decomposition_scope.subprocess.run
+
+    def spy_run(command, *args, **kwargs):
+        recorded_calls.append((list(command), dict(kwargs.get("env") or {})))
+        return real_subprocess_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(decomposition_scope.subprocess, "run", spy_run)
+
+    facts = legacy_step2.resolve_legacy_step2_facts(
+        legacy_repo["root"],
+        legacy_repo["baseline_sha"],
+        w1_gate_sha=legacy_repo["w1_gate_sha"],
+        wave1_merges={
+            "W1A": legacy_repo["w1a_sha"],
+            "W1B-G": legacy_repo["w1bg_sha"],
+            "W1B-P": legacy_repo["w1bp_sha"],
+        },
+    )
+    assert facts["readiness_evidence"]["state_present"] is True
+    assert recorded_calls, "expected run_git_offline to invoke subprocess.run"
+    first_cmd, first_env = recorded_calls[0]
+    assert first_cmd[:5] == [
+        str(git_link),
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        "credential.helper=",
+    ]
+    assert first_env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert first_env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+    assert "GIT_DIR" not in first_env
+
+    # Relative PATH entries ('.' or empty segment) must never resolve git from cwd.
+    monkeypatch.setenv("PATH", f".{os.pathsep}")
+    with pytest.raises(ValueError, match="offline Git unavailable"):
+        decomposition_scope.run_git_offline(legacy_repo["root"], "rev-parse", "HEAD")

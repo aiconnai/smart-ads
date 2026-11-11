@@ -22,11 +22,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
-from tools.governance.artifacts import _LEGACY_SOURCE_IDENTITY, _require_locator_type
+from tools.governance.decomposition_scope import LEGACY_SOURCE_IDENTITY, run_git_offline
+from tools.governance.locator import validate_locator
 
 LEGACY_STATE = "STEP2_IMPLEMENTATION_AUTHORIZED_RUNTIME_BLOCKED"
 READINESS_PATH = "DOCUMENTATION/IBVI_ADS_STEP2_READINESS_EVIDENCE.md"
@@ -46,29 +46,16 @@ _PR_NUMBER_RE = re.compile(r"\(#(\d+)\)\s*$")
 
 
 def _run_git(legacy_repo: Path, args: list[str]) -> str:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(legacy_repo),
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise ValueError(
-            f"legacy_step2._run_git: 'git {' '.join(args)}' failed: {proc.stderr.strip()}"
-        )
-    return proc.stdout
+    return run_git_offline(legacy_repo, *args).stdout.decode("utf-8")
 
 
 def _blob_at(legacy_repo: Path, ref: str, path: str) -> str | None:
-    proc = subprocess.run(
-        ["git", "rev-parse", "-q", "--verify", f"{ref}:{path}"],
-        cwd=str(legacy_repo),
-        capture_output=True,
-        text=True,
+    proc = run_git_offline(
+        legacy_repo, "rev-parse", "-q", "--verify", f"{ref}:{path}", check=False
     )
     if proc.returncode != 0:
         return None
-    return proc.stdout.strip()
+    return proc.stdout.decode("utf-8").strip()
 
 
 def _introducing_pr(subject: str) -> int | None:
@@ -83,12 +70,7 @@ def _resolve_path_evidence(
     if blob_oid is None:
         return None
 
-    content = subprocess.run(
-        ["git", "cat-file", "-p", blob_oid],
-        cwd=str(legacy_repo),
-        capture_output=True,
-        check=True,
-    ).stdout
+    content = run_git_offline(legacy_repo, "cat-file", "-p", blob_oid).stdout
 
     introduced_log = _run_git(
         legacy_repo,
@@ -134,10 +116,13 @@ def _resolve_w1_gate_presence(
 
 def _is_ancestor(legacy_repo: Path, ancestor_sha: str, descendant_sha: str) -> bool:
     return (
-        subprocess.run(
-            ["git", "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
-            cwd=str(legacy_repo),
-            capture_output=True,
+        run_git_offline(
+            legacy_repo,
+            "merge-base",
+            "--is-ancestor",
+            ancestor_sha,
+            descendant_sha,
+            check=False,
         ).returncode
         == 0
     )
@@ -320,7 +305,7 @@ def _validate_resolved_baseline(facts: dict[str, Any]) -> None:
     resolved anywhere else — e.g. a descendant of the baseline that edits the
     readiness file — would otherwise be emitted under an identity they do not
     have. Missing, malformed or divergent identities are refused."""
-    pinned = _LEGACY_SOURCE_IDENTITY["commit_sha"]
+    pinned = LEGACY_SOURCE_IDENTITY["commit_sha"]
     resolved = facts.get("resolved_baseline")
     if not isinstance(resolved, dict):
         raise ValueError(
@@ -425,10 +410,9 @@ def _validate_w1_gate_and_wave1(w1_gate: dict, wave1: dict) -> None:
 def _validate_evidence_scalars(
     key_registry_snapshot_locator: dict[str, Any], signer_key_id: str, resolved_at_utc: str
 ) -> None:
-    _require_locator_type(
+    validate_locator(
         key_registry_snapshot_locator,
         "smart_ads/key_authorization_registry/v1",
-        "build_legacy_step2_evidence",
     )
     if not isinstance(signer_key_id, str) or not signer_key_id:
         raise ValueError("build_legacy_step2_evidence: signer_key_id must be a non-empty string")
@@ -490,7 +474,7 @@ def build_legacy_step2_evidence(
 
     envelope = {
         "$schema": "smart_ads/legacy_step2_implementation_evidence/v1",
-        "legacy_source_identity": copy.deepcopy(_LEGACY_SOURCE_IDENTITY),
+        "legacy_source_identity": copy.deepcopy(LEGACY_SOURCE_IDENTITY),
         "required_state": LEGACY_STATE,
         "readiness_evidence": _shape_path_evidence_output(readiness, "state_present"),
         "authorization_record": _shape_path_evidence_output(

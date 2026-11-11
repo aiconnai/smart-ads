@@ -1,9 +1,9 @@
 """Prepare a reproducible D4 contract proposal, never bootstrap authority."""
 from __future__ import annotations
 
-from tools.governance.decomposition_common import digest, json_digest
 from tools.governance.decomposition_governance import ADR_DIGEST
 from tools.governance.jcs import canonicalize, loads_strict
+from tools.governance.locator import digest, json_digest
 
 TRUST_DIGEST = 'sha256:bda7f38dfe36fc083f11bfa8502bc0d0e458319026c87c893fa86210b901a8ad'
 POLICIES = {
@@ -22,13 +22,13 @@ STEPS = (
 )
 
 
-def profile_proposals(adr: bytes) -> list[dict]:
-    """Expand all 116 pinned table rows; semantic IDs remain proposed bindings."""
+def _parse_profile_rows(adr: bytes) -> tuple[list[dict], list[dict]]:
     if digest(adr) != ADR_DIGEST:
         raise ValueError('admission: ADR must equal the approved bytes')
     section = adr.decode('utf-8').split('### 12.7 Schema-Specific Verification Profiles\n', 1)[1]
     section = section.split('\n## 13.', 1)[0]
     profiles = []
+    bindings = []
     for line in section.splitlines():
         if not line.startswith('| `') or ' | P1 | ' not in line:
             continue
@@ -38,6 +38,7 @@ def profile_proposals(adr: bytes) -> list[dict]:
         schema, preimage, role, policy_time, domain, predicate, slot = cells
         schema = schema.strip('`')
         policy, time = policy_time.split(' / ', 1)
+        semantic_id = 'adr0001_v19:' + schema
         profiles.append({
             'schema': 'smart_ads/' + schema,
             'digest_json_pointer': '/integrity/content_digest',
@@ -47,16 +48,26 @@ def profile_proposals(adr: bytes) -> list[dict]:
             'current_revocation_policy': POLICIES[policy],
             'time_policy': {'code': policy, 'interval_semantics': time},
             'domain_prefix': domain.strip('`').replace('\\n', '\n'),
-            'semantic_predicate_id': 'adr0001_v19:' + schema,
+            'semantic_predicate_id': semantic_id,
             'dag_slot': slot,
+        })
+        bindings.append({
+            'semantic_predicate_id': semantic_id,
+            'normative_requirement': predicate,
+            'executable_binding': None,
         })
     if len(profiles) != 116 or len({p['schema'] for p in profiles}) != 116:
         raise ValueError('admission: require the complete 116 unique profile rows')
-    return sorted(profiles, key=lambda p: p['schema'].encode('utf-8'))
+    return sorted(profiles, key=lambda p: p['schema'].encode('utf-8')), bindings
+
+
+def profile_proposals(adr: bytes) -> list[dict]:
+    """Expand all 116 pinned table rows; semantic IDs remain proposed bindings."""
+    return _parse_profile_rows(adr)[0]
 
 
 def build_admission_proposal(adr: bytes, trust_config: bytes) -> dict:
-    profiles = profile_proposals(adr)
+    profiles, bindings = _parse_profile_rows(adr)
     if digest(trust_config) != TRUST_DIGEST:
         raise ValueError('admission: historical trust configuration identity changed')
     trust = loads_strict(trust_config.decode('utf-8'))
@@ -69,13 +80,7 @@ def build_admission_proposal(adr: bytes, trust_config: bytes) -> dict:
         'authority': 'none', 'signable': False, 'human_ratification': None,
         'approved_adr_sha256': ADR_DIGEST, 'historical_trust_config_sha256': TRUST_DIGEST,
         'profile_count': len(profiles), 'profiles_proposed': profiles,
-        'predicate_bindings_proposed': [
-            {'semantic_predicate_id': 'adr0001_v19:' + cells[0].strip('`'),
-             'normative_requirement': cells[5], 'executable_binding': None}
-            for line in adr.decode('utf-8').split('### 12.7 Schema-Specific Verification Profiles\n', 1)[1].split('\n## 13.', 1)[0].splitlines()
-            if line.startswith('| `') and ' | P1 | ' in line
-            for cells in [[s.strip() for s in line.strip('|').split('|')]]
-        ],
+        'predicate_bindings_proposed': bindings,
         'protected_config_amendment_proposed': {
             'preserve_existing_fields': trust,
             'add_allowed_artifact_types': [inventory_schema],
