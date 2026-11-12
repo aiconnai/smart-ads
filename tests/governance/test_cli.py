@@ -685,3 +685,491 @@ def test_write_json_file_allow_overwrite_replaces_existing_and_sets_0644(
         "sha256": hashlib.sha256(expected_bytes).hexdigest(),
     }
     assert list(target.parent.glob(".decomposition-*")) == []
+
+
+# ---------------------------------------------------------------------------
+# GOV 1 Subcommands End-to-End Pipeline & Quarantine Guards
+# ---------------------------------------------------------------------------
+
+
+def test_gov1_cli_full_candidate_pipeline_quarantine_and_envelope_modes(
+    tmp_path: Path, anchor_key: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tools.governance import cli, gov1_sandbox
+    from tools.governance.jcs import canonicalize
+
+    run_ctx_loc = _locator_for("smart_ads/migration_run_context/v1", b'{"run":"cli-gov1"}')
+    reg_loc = _locator_for("smart_ads/key_authorization_registry/v1", b'{"reg":"cli-gov1"}')
+    reg_loc_path = tmp_path / "reg_loc.json"
+    reg_loc_path.write_bytes(canonicalize(reg_loc))
+
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    seccomp_path = tmp_path / "seccomp_7a.json"
+    seccomp_path.write_bytes(canonicalize(seccomp))
+
+    # 1. build-sealed-sandbox-profile (default candidate mode) + verify
+    sbx_params_path = tmp_path / "sbx_params.json"
+    sbx_params_path.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "oci_image_digest": "sha256:" + ("1" * 64),
+                "runner_binary_digest": "sha256:" + ("2" * 64),
+                "issued_at_utc": "2026-11-12T12:00:00Z",
+                "valid_from_utc": "2026-11-01T00:00:00Z",
+                "valid_until_utc": "2027-11-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    sbx_cand_path = tmp_path / "sandbox_candidate.json"
+    assert (
+        cli.main(
+            [
+                "build-sealed-sandbox-profile",
+                "--params",
+                str(sbx_params_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--out",
+                str(sbx_cand_path),
+            ]
+        )
+        == 0
+    )
+    sbx_meta = json.loads(capsys.readouterr().out)
+    assert sbx_meta["signable"] is False
+    assert sbx_cand_path.stat().st_size > 0
+
+    # Candidate refuses overwriting existing --out
+    sbx_original_bytes = sbx_cand_path.read_bytes()
+    assert (
+        cli.main(
+            [
+                "build-sealed-sandbox-profile",
+                "--params",
+                str(sbx_params_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--out",
+                str(sbx_cand_path),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+    assert sbx_cand_path.read_bytes() == sbx_original_bytes
+
+    # Candidate refuses cli.main(["sign", ...]) and cli.main(["store-put", ...])
+    forged_signed = tmp_path / "forged_signed.json"
+    assert (
+        cli.main(
+            [
+                "sign",
+                "--schema",
+                "sealed_sandbox_profile/v1",
+                "--key",
+                str(anchor_key),
+                "--in",
+                str(sbx_cand_path),
+                "--out",
+                str(forged_signed),
+            ]
+        )
+        == 2
+    )
+    capsys.readouterr()
+    assert (
+        cli.main(
+            [
+                "sign",
+                "--schema",
+                "migration_run_context/v1",
+                "--key",
+                str(anchor_key),
+                "--in",
+                str(sbx_cand_path),
+                "--out",
+                str(forged_signed),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+    assert not forged_signed.exists()
+    assert (
+        cli.main(
+            [
+                "store-put",
+                "--root",
+                str(tmp_path / "forbidden_store"),
+                "--in",
+                str(sbx_cand_path),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    assert (
+        cli.main(
+            [
+                "verify-sealed-sandbox-profile",
+                "--in",
+                str(sbx_cand_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+            ]
+        )
+        == 0
+    )
+    sbx_ver_out = json.loads(capsys.readouterr().out)
+    assert sbx_ver_out["status"] == "PASS"
+    assert sbx_ver_out["mode"] == "candidate"
+
+    # 2. build-wheel-provenance + verify-wheel-provenance
+    prov_params_path = tmp_path / "prov_params.json"
+    prov_params_path.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "build_run_id": "cli-build-run-001",
+                "built_at_utc": "2026-11-12T12:01:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    built_wheel_path = tmp_path / "dist" / "smart_ads-0.1.0-py3-none-any.whl"
+    prov_cand_path = tmp_path / "wheel_provenance_candidate.json"
+    assert (
+        cli.main(
+            [
+                "build-wheel-provenance",
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel-out",
+                str(built_wheel_path),
+                "--params",
+                str(prov_params_path),
+                "--out",
+                str(prov_cand_path),
+            ]
+        )
+        == 0
+    )
+    prov_meta = json.loads(capsys.readouterr().out)
+    assert prov_meta["signable"] is False
+    assert built_wheel_path.is_file() and built_wheel_path.stat().st_size > 0
+    prov_cand = json.loads(prov_cand_path.read_text(encoding="utf-8"))
+
+    assert (
+        cli.main(
+            [
+                "verify-wheel-provenance",
+                "--in",
+                str(prov_cand_path),
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel",
+                str(built_wheel_path),
+            ]
+        )
+        == 0
+    )
+    prov_ver_out = json.loads(capsys.readouterr().out)
+    assert prov_ver_out["status"] == "PASS"
+
+    # 3. build-wheel-boundary-report + verify-wheel-boundary-report
+    bound_params_path = tmp_path / "bound_params.json"
+    bound_params_path.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "build_run_id": "cli-build-run-001",
+                "verified_at_utc": "2026-11-12T12:02:00Z",
+                "source_commit_sha": prov_cand["payload"]["source_commit_sha"],
+                "build_backend_digest": prov_cand["payload"]["build_backend_digest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bound_cand_path = tmp_path / "wheel_boundary_candidate.json"
+    assert (
+        cli.main(
+            [
+                "build-wheel-boundary-report",
+                "--wheel",
+                str(built_wheel_path),
+                "--provenance",
+                str(prov_cand_path),
+                "--params",
+                str(bound_params_path),
+                "--out",
+                str(bound_cand_path),
+            ]
+        )
+        == 0
+    )
+    bound_meta = json.loads(capsys.readouterr().out)
+    assert bound_meta["signable"] is False
+
+    assert (
+        cli.main(
+            [
+                "verify-wheel-boundary-report",
+                "--in",
+                str(bound_cand_path),
+                "--wheel",
+                str(built_wheel_path),
+            ]
+        )
+        == 0
+    )
+    bound_ver_out = json.loads(capsys.readouterr().out)
+    assert bound_ver_out["status"] == "PASS"
+
+    # 4. build-mcp-rejection-report + verify-mcp-rejection-report
+    mcp_params_path = tmp_path / "mcp_params.json"
+    mcp_params_path.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "build_run_id": "cli-build-run-001",
+                "executed_at_utc": "2026-11-12T12:03:00Z",
+                "source_commit_sha": prov_cand["payload"]["source_commit_sha"],
+                "build_backend_digest": prov_cand["payload"]["build_backend_digest"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    mcp_cand_path = tmp_path / "mcp_rejection_candidate.json"
+    assert (
+        cli.main(
+            [
+                "build-mcp-rejection-report",
+                "--wheel",
+                str(built_wheel_path),
+                "--sandbox-profile",
+                str(sbx_cand_path),
+                "--params",
+                str(mcp_params_path),
+                "--out",
+                str(mcp_cand_path),
+            ]
+        )
+        == 0
+    )
+    mcp_meta = json.loads(capsys.readouterr().out)
+    assert mcp_meta["signable"] is False
+
+    assert (
+        cli.main(
+            [
+                "verify-mcp-rejection-report",
+                "--in",
+                str(mcp_cand_path),
+                "--wheel",
+                str(built_wheel_path),
+            ]
+        )
+        == 0
+    )
+    mcp_ver_out = json.loads(capsys.readouterr().out)
+    assert mcp_ver_out["status"] == "PASS"
+
+    # 5. verify-pr1-gov1-convergence with atomic --out write & verified re-read
+    gate_out_path = tmp_path / "convergence_gate_receipt.json"
+    assert (
+        cli.main(
+            [
+                "verify-pr1-gov1-convergence",
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel",
+                str(built_wheel_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--sandbox-profile",
+                str(sbx_cand_path),
+                "--wheel-provenance",
+                str(prov_cand_path),
+                "--wheel-boundary-report",
+                str(bound_cand_path),
+                "--mcp-rejection-report",
+                str(mcp_cand_path),
+                "--out",
+                str(gate_out_path),
+            ]
+        )
+        == 0
+    )
+    gate_meta = json.loads(capsys.readouterr().out)
+    assert gate_meta["gate_status"] == "PASS"
+    assert gate_meta["signable"] is False
+    gate_receipt = json.loads(gate_out_path.read_text(encoding="utf-8"))
+    assert gate_receipt["artifact_kind"] == "pr1_gov1_pre_pr2_convergence_gate"
+    assert gate_receipt["gate_status"] == "PASS"
+    assert gate_receipt["final_gov1_convergence_emitted"] is False
+    assert gate_receipt["signable"] is False
+    assert gate_out_path.read_bytes() == canonicalize(gate_receipt)
+
+    # Gate receipt also refuses overwriting existing --out
+    assert (
+        cli.main(
+            [
+                "verify-pr1-gov1-convergence",
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel",
+                str(built_wheel_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--sandbox-profile",
+                str(sbx_cand_path),
+                "--wheel-provenance",
+                str(prov_cand_path),
+                "--wheel-boundary-report",
+                str(bound_cand_path),
+                "--mcp-rejection-report",
+                str(mcp_cand_path),
+                "--out",
+                str(gate_out_path),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    # 6. Explicit --mode envelope with --signer-key-id and --registry-locator allows overwrite
+    anchor_kid = _key_id(_raw32_b64(anchor_key))
+    sbx_env_path = tmp_path / "sandbox_envelope.json"
+    sbx_env_path.write_text('{"placeholder": true}', encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "build-sealed-sandbox-profile",
+                "--mode",
+                "envelope",
+                "--signer-key-id",
+                anchor_kid,
+                "--registry-locator",
+                str(reg_loc_path),
+                "--params",
+                str(sbx_params_path),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--out",
+                str(sbx_env_path),
+            ]
+        )
+        == 0
+    )
+    sbx_env_meta = json.loads(capsys.readouterr().out)
+    assert "signable" not in sbx_env_meta
+    sbx_env = json.loads(sbx_env_path.read_text(encoding="utf-8"))
+    assert sbx_env["$schema"] == "smart_ads/sealed_sandbox_profile/v1"
+    assert sbx_env["integrity"]["key_id"] == anchor_kid
+
+
+def test_gov1_cli_rejects_extra_fields_missing_files_and_envelope_mode_mixing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tools.governance import cli, gov1_sandbox
+    from tools.governance.jcs import canonicalize
+
+    seccomp_path = tmp_path / "seccomp.json"
+    seccomp_path.write_bytes(
+        canonicalize(gov1_sandbox.build_default_7a_seccomp_profile())
+    )
+    dummy_wheel = tmp_path / "dummy.whl"
+    dummy_wheel.write_bytes(b"not-a-wheel")
+
+    cases: list[tuple[list[str], dict[str, object]]] = [
+        (
+            [
+                "build-sealed-sandbox-profile",
+                "--seccomp-profile",
+                str(seccomp_path),
+            ],
+            {
+                "migration_run_context_locator": {},
+                "oci_image_digest": "sha256:" + ("1" * 64),
+                "runner_binary_digest": "sha256:" + ("2" * 64),
+                "issued_at_utc": "2026-11-12T12:00:00Z",
+                "valid_from_utc": "2026-11-01T00:00:00Z",
+                "valid_until_utc": "2027-11-01T00:00:00Z",
+                "unexpected_extra": True,
+            },
+        ),
+        (
+            [
+                "build-wheel-provenance",
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel-out",
+                str(tmp_path / "w.whl"),
+            ],
+            {
+                "migration_run_context_locator": {},
+                "build_run_id": "run-1",
+                "built_at_utc": "2026-11-12T12:00:00Z",
+                "unexpected_extra": True,
+            },
+        ),
+        (
+            [
+                "build-wheel-boundary-report",
+                "--wheel",
+                str(dummy_wheel),
+            ],
+            {
+                "migration_run_context_locator": {},
+                "build_run_id": "run-1",
+                "verified_at_utc": "2026-11-12T12:00:00Z",
+                "source_commit_sha": "a" * 40,
+                "build_backend_digest": "sha256:" + ("3" * 64),
+                "unexpected_extra": True,
+            },
+        ),
+        (
+            [
+                "build-mcp-rejection-report",
+                "--wheel",
+                str(dummy_wheel),
+            ],
+            {
+                "migration_run_context_locator": {},
+                "build_run_id": "run-1",
+                "executed_at_utc": "2026-11-12T12:00:00Z",
+                "source_commit_sha": "a" * 40,
+                "build_backend_digest": "sha256:" + ("3" * 64),
+                "unexpected_extra": True,
+            },
+        ),
+    ]
+
+    for idx, (prefix_args, bad_params) in enumerate(cases):
+        p_file = tmp_path / f"bad_params_{idx}.json"
+        p_file.write_text(json.dumps(bad_params), encoding="utf-8")
+        out_file = tmp_path / f"bad_out_{idx}.json"
+        rc = cli.main([*prefix_args, "--params", str(p_file), "--out", str(out_file)])
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "expected exactly" in captured.err
+        assert not out_file.exists()
+
+    # Missing file path wraps OSError into ValueError -> exit code 1 cleanly
+    rc_missing = cli.main(
+        [
+            "verify-sealed-sandbox-profile",
+            "--in",
+            str(tmp_path / "does_not_exist.json"),
+            "--seccomp-profile",
+            str(seccomp_path),
+        ]
+    )
+    err_missing = capsys.readouterr().err
+    assert rc_missing == 1
+    assert "FileNotFoundError" in err_missing
+
+
