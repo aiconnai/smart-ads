@@ -913,3 +913,131 @@ def test_pep427_record_zip_ast_and_candidate_ref_boundary_rejections_f02(
         tampered[field] = bad_val
         with pytest.raises(ValueError):
             gov1_wheel.verify_wheel_boundary_report(tampered, wheel_path=wheel_path)
+
+
+def test_staging_isolation_and_hatch_override_and_hook_rejections(
+    tmp_path: Path,
+) -> None:
+    uv_lock_bytes = UV_LOCK_PATH.read_bytes()
+    base_pyproject_text = PYPROJECT_PATH.read_text(encoding="utf-8")
+
+    # 1. Closed hook-free pyproject.toml validation in compute_build_backend_digest
+    forbidden_pyproject_mutations = [
+        # build-system.backend-path
+        base_pyproject_text.replace(
+            'build-backend = "hatchling.build"',
+            'build-backend = "hatchling.build"\nbackend-path = ["tools"]',
+        ),
+        # project.dynamic
+        base_pyproject_text.replace(
+            'license-files = []',
+            'license-files = []\ndynamic = ["classifiers"]',
+        ),
+        # [tool.hatch.metadata]
+        base_pyproject_text + "\n[tool.hatch.metadata]\nallow-direct-references = true\n",
+        # [tool.hatch.version]
+        base_pyproject_text + '\n[tool.hatch.version]\npath = "src/smart_ads/__init__.py"\n',
+        # [tool.hatch.build.hooks.custom]
+        base_pyproject_text + '\n[tool.hatch.build.hooks.custom]\npath = "tools/hook.py"\n',
+        # [tool.hatch.build.targets.wheel.hooks.custom]
+        base_pyproject_text + '\n[tool.hatch.build.targets.wheel.hooks.custom]\npath = "tools/hook.py"\n',
+        # [tool.hatch.build.targets.sdist.hooks.custom]
+        base_pyproject_text + '\n[tool.hatch.build.targets.sdist.hooks.custom]\npath = "tools/hook.py"\n',
+        # [tool.hatch.build.targets.custom]
+        base_pyproject_text + '\n[tool.hatch.build.targets.custom]\nonly-include = ["src/smart_ads"]\n',
+        # ignore-vcs non-bool (e.g. integer 1)
+        base_pyproject_text.replace("ignore-vcs = true", "ignore-vcs = 1"),
+    ]
+    for mutated_toml in forbidden_pyproject_mutations:
+        with pytest.raises(ValueError):
+            gov1_wheel.compute_build_backend_digest(
+                mutated_toml.encode("utf-8"), uv_lock_bytes
+            )
+
+    # 2. Snapshot materializes EXCLUSIVELY pyproject.toml, uv.lock, and src/smart_ads/**
+    repo = _init_temp_git_repo(tmp_path / "hatch_guard_repo")
+    clean_whl, clean_snap = gov1_wheel.build_reproducible_wheel(
+        repo, tmp_path / "clean_out"
+    )
+    clean_insp = gov1_wheel.inspect_wheel_boundary(clean_whl)
+    assert "README.md" not in clean_snap.files
+    assert "tools/decoy.py" not in clean_snap.files
+    assert all(
+        p in {"pyproject.toml", "uv.lock"} or p.startswith("src/smart_ads/")
+        for p in clean_snap.files
+    )
+
+    # 3. Commits introducing hatch.toml, .hatch.toml, or hatch_build.py (root or nested)
+    #    fail closed BEFORE any PEP 517 build or hook execution (including in verify_wheel_build_provenance!)
+    marker_file = tmp_path / "hook_executed_marker.txt"
+    hook_payload = (
+        "from hatchling.builders.hooks.plugin.interface import BuildHookInterface\n"
+        "from pathlib import Path\n"
+        "class CustomBuildHook(BuildHookInterface):\n"
+        "    def initialize(self, version, build_data):\n"
+        f"        Path({str(marker_file)!r}).write_text('pwned', encoding='utf-8')\n"
+    )
+    (repo / "tools" / "evil_hook.py").write_text(hook_payload, encoding="utf-8")
+    (repo / "hatch.toml").write_text(
+        '[build.hooks.custom]\npath = "tools/evil_hook.py"\n',
+        encoding="utf-8",
+    )
+    run_git_offline(repo, "add", "tools/evil_hook.py", "hatch.toml")
+    run_git_offline(repo, "commit", "-q", "-m", "add hatch.toml custom hook")
+
+    evil_commit_sha = (
+        run_git_offline(repo, "rev-parse", "--verify", "HEAD^{commit}")
+        .stdout.decode("ascii")
+        .strip()
+    )
+    evil_tree_oid = (
+        run_git_offline(repo, "rev-parse", "--verify", f"{evil_commit_sha}^{{tree}}")
+        .stdout.decode("ascii")
+        .strip()
+    )
+
+    with pytest.raises(ValueError):
+        gov1_wheel.materialize_git_build_snapshot(repo, commit_ref=evil_commit_sha)
+    with pytest.raises(ValueError):
+        gov1_wheel.build_reproducible_wheel(
+            repo, tmp_path / "evil_out", commit_ref=evil_commit_sha
+        )
+
+    # Forged provenance pointing to evil_commit_sha while reusing clean_whl bytes (which match src/smart_ads/**/*.py!)
+    valid_cand = gov1_wheel.build_wheel_build_provenance_candidate(
+        migration_run_context_locator=RUN_CONTEXT_LOCATOR,
+        build_run_id=BUILD_RUN_ID,
+        built_at_utc=BUILT_AT_UTC,
+        snapshot=clean_snap,
+        source_date_epoch=1_700_000_000,
+        schema_bundle_digest=clean_insp["schema_bundle_digest"],
+        wheel_bytes=clean_whl.read_bytes(),
+    )
+    forged_payload = copy.deepcopy(valid_cand["payload"])
+    forged_payload["source_commit_sha"] = evil_commit_sha
+    forged_payload["source_tree_oid"] = evil_tree_oid
+    forged_cand = gov1_sandbox.wrap_local_candidate(
+        gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, forged_payload
+    )
+    with pytest.raises(ValueError):
+        gov1_wheel.verify_wheel_build_provenance(
+            forged_cand, repo_root=repo, wheel_path=clean_whl
+        )
+    assert not marker_file.exists(), "Custom Hatch hook must NEVER execute!"
+
+    # Also test .hatch.toml, hatch_build.py, and nested paths
+    for forbidden_rel in (
+        ".hatch.toml",
+        "hatch_build.py",
+        "tools/hatch.toml",
+        "src/smart_ads/hatch_build.py",
+    ):
+        run_git_offline(repo, "checkout", "-q", clean_snap.commit_sha)
+        target_f = repo / forbidden_rel
+        target_f.parent.mkdir(parents=True, exist_ok=True)
+        target_f.write_text("# forbidden\n", encoding="utf-8")
+        run_git_offline(repo, "add", forbidden_rel)
+        run_git_offline(repo, "commit", "-q", "-m", f"add {forbidden_rel}")
+        with pytest.raises(ValueError):
+            gov1_wheel.materialize_git_build_snapshot(repo, commit_ref="HEAD")
+

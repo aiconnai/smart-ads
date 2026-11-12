@@ -176,6 +176,9 @@ _INSTALLER_DIST_INFO_SKIP: Final[frozenset[str]] = frozenset(
 _WINDOWS_ONLY_MARKERS: Final[frozenset[str]] = frozenset(
     {"os_name == 'nt'", "sys_platform == 'win32'"}
 )
+_FORBIDDEN_HATCH_FILENAMES: Final[frozenset[str]] = frozenset(
+    {"hatch.toml", ".hatch.toml", "hatch_build.py"}
+)
 
 _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS: Final[frozenset[str]] = frozenset(
     {"tools", "tooling", "importlib", "runpy", "builtins", "ctypes"}
@@ -494,6 +497,12 @@ def isolated_hook_runner(cmd, cwd=None, extra_environ=None):
             f"isolated PEP 517 hook {cmd[2]!r} failed (rc={proc.returncode}): {proc.stderr.strip()}"
         )
 
+stage_top_names = {p.name for p in stage_dir.iterdir()}
+if stage_top_names != {"pyproject.toml", "uv.lock", "src"}:
+    raise RuntimeError(
+        f"unexpected top-level entries in PEP 517 stage_dir: {sorted(stage_top_names)!r}"
+    )
+
 caller = BuildBackendHookCaller(
     source_dir=str(stage_dir),
     build_backend="hatchling.build",
@@ -642,6 +651,20 @@ def _clean_system_path() -> str:
     return os.pathsep.join(dict.fromkeys(candidates))
 
 
+def _reject_forbidden_hatch_filename(rel_path: str, *, label: str) -> None:
+    leaf = rel_path.rsplit("/", 1)[-1].lower()
+    if leaf in _FORBIDDEN_HATCH_FILENAMES:
+        raise ValueError(
+            f"{label}: forbidden Hatch override or hook file {rel_path!r}"
+        )
+
+
+def _is_allowed_snapshot_stage_path(rel_path: str) -> bool:
+    return rel_path in {"pyproject.toml", "uv.lock"} or rel_path.startswith(
+        "src/smart_ads/"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GitBuildSnapshot:
     """Immutable in-memory Git commit snapshot bound to executed PEP 517 backend."""
@@ -670,6 +693,12 @@ class GitBuildSnapshot:
             )
         for rel_path, raw in self.files.items():
             source_path(rel_path)
+            _reject_forbidden_hatch_filename(rel_path, label="GitBuildSnapshot.files")
+            if not _is_allowed_snapshot_stage_path(rel_path):
+                raise ValueError(
+                    f"GitBuildSnapshot.files[{rel_path!r}]: path outside staging allowlist "
+                    "({'pyproject.toml', 'uv.lock', 'src/smart_ads/**'})"
+                )
             if type(raw) is not bytes:
                 raise ValueError(
                     f"GitBuildSnapshot.files[{rel_path!r}]: expected bytes"
@@ -678,9 +707,14 @@ class GitBuildSnapshot:
                 raise ValueError(
                     f"GitBuildSnapshot.modes[{rel_path!r}]: forbidden Git mode {self.modes[rel_path]!r}"
                 )
-        if "pyproject.toml" not in self.files or "uv.lock" not in self.files:
+        if (
+            "pyproject.toml" not in self.files
+            or "uv.lock" not in self.files
+            or "src/smart_ads/__init__.py" not in self.files
+        ):
             raise ValueError(
-                "GitBuildSnapshot: commit must contain 'pyproject.toml' and 'uv.lock'"
+                "GitBuildSnapshot: commit must contain 'pyproject.toml', 'uv.lock', "
+                "and 'src/smart_ads/__init__.py'"
             )
         _require_sha256_digest(
             self.pyproject_sha256, "GitBuildSnapshot.pyproject_sha256"
@@ -1268,8 +1302,14 @@ def compute_build_backend_digest(
         raise ValueError(f"pyproject.toml: invalid UTF-8 or TOML: {exc}") from exc
 
     build_sys = pyproject_data.get("build-system")
-    if not isinstance(build_sys, dict):
-        raise ValueError("pyproject.toml: missing [build-system] table")
+    if not isinstance(build_sys, dict) or set(build_sys.keys()) != {
+        "requires",
+        "build-backend",
+    }:
+        raise ValueError(
+            "pyproject.toml: [build-system] must contain exclusively "
+            "{'requires', 'build-backend'} (backend-path forbidden)"
+        )
     build_backend = _require_exact_str(
         build_sys.get("build-backend"),
         EXPECTED_BUILD_BACKEND,
@@ -1283,9 +1323,12 @@ def compute_build_backend_digest(
         )
 
     project_tbl = pyproject_data.get("project")
+    if not isinstance(project_tbl, dict) or "dynamic" in project_tbl:
+        raise ValueError(
+            "pyproject.toml: [project] must be a table and forbid 'dynamic'"
+        )
     if (
-        not isinstance(project_tbl, dict)
-        or project_tbl.get("name") != "smart-ads"
+        project_tbl.get("name") != "smart-ads"
         or project_tbl.get("version") != "0.1.0"
         or project_tbl.get("dependencies") != []
     ):
@@ -1293,23 +1336,55 @@ def compute_build_backend_digest(
             "pyproject.toml: [project] must pin name='smart-ads', version='0.1.0', dependencies=[]"
         )
 
-    hatch_build = (
-        pyproject_data.get("tool", {}).get("hatch", {}).get("build", {})
-    )
-    wheel_target = (
-        hatch_build.get("targets", {}).get("wheel", {})
-        if isinstance(hatch_build, dict)
-        else {}
-    )
+    tool_tbl = pyproject_data.get("tool")
+    if not isinstance(tool_tbl, dict):
+        raise ValueError("pyproject.toml: missing [tool] table")
+    tool_hatch = tool_tbl.get("hatch")
+    if not isinstance(tool_hatch, dict) or set(tool_hatch.keys()) != {"build"}:
+        raise ValueError(
+            "pyproject.toml: [tool.hatch] must contain exclusively {'build'}"
+        )
+    hatch_build = tool_hatch["build"]
     if (
         not isinstance(hatch_build, dict)
-        or hatch_build.get("ignore-vcs") is not True
-        or not isinstance(wheel_target, dict)
-        or wheel_target.get("only-include") != ["src/smart_ads"]
-        or wheel_target.get("sources") != ["src"]
+        or set(hatch_build.keys()) != {"ignore-vcs", "targets"}
+        or type(hatch_build.get("ignore-vcs")) is not bool
+        or hatch_build["ignore-vcs"] is not True
     ):
         raise ValueError(
-            "pyproject.toml: [tool.hatch.build] must enforce ignore-vcs=true and only-include=['src/smart_ads']"
+            "pyproject.toml: [tool.hatch.build] must contain exclusively "
+            "{'ignore-vcs': true, 'targets': ...} (hooks forbidden)"
+        )
+    targets = hatch_build["targets"]
+    if (
+        not isinstance(targets, dict)
+        or "wheel" not in targets
+        or not set(targets.keys()).issubset({"wheel", "sdist"})
+    ):
+        raise ValueError(
+            "pyproject.toml: [tool.hatch.build.targets] must contain 'wheel' and "
+            "allow at most {'wheel', 'sdist'}"
+        )
+    if "sdist" in targets:
+        sdist_target = targets["sdist"]
+        if (
+            not isinstance(sdist_target, dict)
+            or "hooks" in sdist_target
+            or not set(sdist_target.keys()).issubset({"only-include", "sources"})
+        ):
+            raise ValueError(
+                "pyproject.toml: [tool.hatch.build.targets.sdist] must be hook-free"
+            )
+    wheel_target = targets["wheel"]
+    if (
+        not isinstance(wheel_target, dict)
+        or set(wheel_target.keys()) != {"only-include", "sources"}
+        or wheel_target["only-include"] != ["src/smart_ads"]
+        or wheel_target["sources"] != ["src"]
+    ):
+        raise ValueError(
+            "pyproject.toml: [tool.hatch.build.targets.wheel] must contain exclusively "
+            "only-include=['src/smart_ads'] and sources=['src'] (hooks forbidden)"
         )
 
     _, closure_tree_digests = verify_build_runtime_environment(
@@ -1395,7 +1470,8 @@ def materialize_git_build_snapshot(
     _require_git_oid(tree_oid, "tree_oid")
 
     ls_tree_raw = run_git_offline(repo_path, "ls-tree", "-r", "-z", commit_sha).stdout
-    records: dict[str, tuple[str, str]] = {}
+    seen_tree_paths: set[str] = set()
+    staged_records: dict[str, tuple[str, str]] = {}
     for entry in ls_tree_raw.split(b"\0"):
         if not entry:
             continue
@@ -1412,33 +1488,40 @@ def materialize_git_build_snapshot(
             raise ValueError("git ls-tree: non-UTF-8 path forbidden") from exc
         source_path(rel_path)
         _require_git_oid(oid, f"git.ls_tree[{rel_path!r}].oid")
-        if rel_path in records:
+        if rel_path in seen_tree_paths:
             raise ValueError(f"git ls-tree: duplicate path {rel_path!r}")
+        seen_tree_paths.add(rel_path)
         if kind != "blob" or mode not in {"100644", "100755"}:
             raise ValueError(
                 f"git ls-tree: forbidden object kind={kind!r} mode={mode!r} at {rel_path!r}"
             )
-        records[rel_path] = (mode, oid)
+        _reject_forbidden_hatch_filename(rel_path, label="git ls-tree")
+        if _is_allowed_snapshot_stage_path(rel_path):
+            staged_records[rel_path] = (mode, oid)
 
-    if not records:
+    if not seen_tree_paths:
         raise ValueError("git ls-tree: empty commit tree")
+    if (
+        "pyproject.toml" not in staged_records
+        or "uv.lock" not in staged_records
+        or "src/smart_ads/__init__.py" not in staged_records
+    ):
+        raise ValueError(
+            "materialize_git_build_snapshot: commit must include 'pyproject.toml', "
+            "'uv.lock', and 'src/smart_ads/__init__.py'"
+        )
 
     blob_cache: dict[str, bytes] = {}
     files: dict[str, bytes] = {}
     modes: dict[str, str] = {}
-    for rel_path in sorted(records.keys(), key=lambda s: s.encode("utf-8")):
-        mode, oid = records[rel_path]
+    for rel_path in sorted(staged_records.keys(), key=lambda s: s.encode("utf-8")):
+        mode, oid = staged_records[rel_path]
         if oid not in blob_cache:
             blob_cache[oid] = run_git_offline(
                 repo_path, "cat-file", "blob", oid
             ).stdout
         files[rel_path] = blob_cache[oid]
         modes[rel_path] = mode
-
-    if "pyproject.toml" not in files or "uv.lock" not in files:
-        raise ValueError(
-            "materialize_git_build_snapshot: commit must include 'pyproject.toml' and 'uv.lock'"
-        )
 
     pyproject_bytes = files["pyproject.toml"]
     uv_lock_bytes = files["uv.lock"]
@@ -1468,6 +1551,11 @@ def _stage_git_snapshot_tree(stage_dir: Path, snapshot: GitBuildSnapshot) -> Non
     resolved_stage = stage_dir.resolve()
     for rel_path in sorted(snapshot.files.keys(), key=lambda s: s.encode("utf-8")):
         source_path(rel_path)
+        _reject_forbidden_hatch_filename(rel_path, label="_stage_git_snapshot_tree")
+        if not _is_allowed_snapshot_stage_path(rel_path):
+            raise ValueError(
+                f"_stage_git_snapshot_tree: forbidden path outside build inputs: {rel_path!r}"
+            )
         dest = (resolved_stage / rel_path).resolve()
         if not dest.is_relative_to(resolved_stage):
             raise ValueError(f"staging path escaped root: {rel_path!r}")
