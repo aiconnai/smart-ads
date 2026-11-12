@@ -1301,6 +1301,20 @@ def compute_build_backend_digest(
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"pyproject.toml: invalid UTF-8 or TOML: {exc}") from exc
 
+    allowed_top_keys = {"build-system", "project", "dependency-groups", "tool"}
+    required_top_keys = {"build-system", "project", "tool"}
+    if not required_top_keys.issubset(pyproject_data.keys()) or not set(
+        pyproject_data.keys()
+    ).issubset(allowed_top_keys):
+        raise ValueError(
+            "pyproject.toml: top-level tables must contain {'build-system', 'project', 'tool'} "
+            "and allow at most {'build-system', 'project', 'dependency-groups', 'tool'}"
+        )
+    if "dependency-groups" in pyproject_data and not isinstance(
+        pyproject_data["dependency-groups"], dict
+    ):
+        raise ValueError("pyproject.toml: [dependency-groups] must be a table")
+
     build_sys = pyproject_data.get("build-system")
     if not isinstance(build_sys, dict) or set(build_sys.keys()) != {
         "requires",
@@ -1322,23 +1336,64 @@ def compute_build_backend_digest(
             "pyproject.toml: build-system.requires must equal ['hatchling==1.33.0']"
         )
 
+    expected_project_keys = {
+        "name",
+        "version",
+        "description",
+        "requires-python",
+        "dependencies",
+        "license-files",
+    }
     project_tbl = pyproject_data.get("project")
-    if not isinstance(project_tbl, dict) or "dynamic" in project_tbl:
-        raise ValueError(
-            "pyproject.toml: [project] must be a table and forbid 'dynamic'"
-        )
     if (
-        project_tbl.get("name") != "smart-ads"
-        or project_tbl.get("version") != "0.1.0"
-        or project_tbl.get("dependencies") != []
+        not isinstance(project_tbl, dict)
+        or "dynamic" in project_tbl
+        or set(project_tbl.keys()) != expected_project_keys
     ):
         raise ValueError(
-            "pyproject.toml: [project] must pin name='smart-ads', version='0.1.0', dependencies=[]"
+            "pyproject.toml: [project] must contain exclusively "
+            "{'name', 'version', 'description', 'requires-python', 'dependencies', 'license-files'}"
+        )
+    _require_exact_str(
+        project_tbl.get("name"), "smart-ads", "pyproject.project.name"
+    )
+    _require_exact_str(
+        project_tbl.get("version"), "0.1.0", "pyproject.project.version"
+    )
+    proj_desc = project_tbl.get("description")
+    proj_req_py = project_tbl.get("requires-python")
+    if (
+        type(proj_desc) is not str
+        or not proj_desc.strip()
+        or "\x00" in proj_desc
+        or type(proj_req_py) is not str
+        or not proj_req_py.strip()
+        or "\x00" in proj_req_py
+    ):
+        raise ValueError(
+            "pyproject.toml: [project].description and [project].requires-python must be non-empty strings"
+        )
+    if (
+        type(project_tbl.get("dependencies")) is not list
+        or len(project_tbl["dependencies"]) != 0
+        or type(project_tbl.get("license-files")) is not list
+        or len(project_tbl["license-files"]) != 0
+    ):
+        raise ValueError(
+            "pyproject.toml: [project] must pin dependencies=[] and license-files=[]"
         )
 
     tool_tbl = pyproject_data.get("tool")
-    if not isinstance(tool_tbl, dict):
-        raise ValueError("pyproject.toml: missing [tool] table")
+    if (
+        not isinstance(tool_tbl, dict)
+        or "hatch" not in tool_tbl
+        or not set(tool_tbl.keys()).issubset({"hatch", "pytest"})
+    ):
+        raise ValueError(
+            "pyproject.toml: [tool] must contain 'hatch' and allow at most {'hatch', 'pytest'}"
+        )
+    if "pytest" in tool_tbl and not isinstance(tool_tbl["pytest"], dict):
+        raise ValueError("pyproject.toml: [tool.pytest] must be a table")
     tool_hatch = tool_tbl.get("hatch")
     if not isinstance(tool_hatch, dict) or set(tool_hatch.keys()) != {"build"}:
         raise ValueError(
@@ -1371,9 +1426,15 @@ def compute_build_backend_digest(
             not isinstance(sdist_target, dict)
             or "hooks" in sdist_target
             or not set(sdist_target.keys()).issubset({"only-include", "sources"})
+            or sdist_target.get("only-include") != ["src/smart_ads"]
+            or (
+                "sources" in sdist_target
+                and sdist_target["sources"] != ["src"]
+            )
         ):
             raise ValueError(
-                "pyproject.toml: [tool.hatch.build.targets.sdist] must be hook-free"
+                "pyproject.toml: [tool.hatch.build.targets.sdist] must be hook-free and "
+                "pin only-include=['src/smart_ads'] (and optional sources=['src'])"
             )
     wheel_target = targets["wheel"]
     if (

@@ -1041,3 +1041,82 @@ def test_staging_isolation_and_hatch_override_and_hook_rejections(
         with pytest.raises(ValueError):
             gov1_wheel.materialize_git_build_snapshot(repo, commit_ref="HEAD")
 
+
+def test_closed_pyproject_project_tool_and_toplevel_tables_rejections(
+    tmp_path: Path,
+) -> None:
+    uv_lock_bytes = UV_LOCK_PATH.read_bytes()
+    base_pyproject_text = PYPROJECT_PATH.read_text(encoding="utf-8")
+
+    # Baseline repo pyproject.toml (with and without optional [dependency-groups] / [tool.pytest]) passes
+    assert gov1_wheel.compute_build_backend_digest(
+        base_pyproject_text.encode("utf-8"), uv_lock_bytes
+    )[0] == "hatchling.build"
+
+    closed_table_mutations = [
+        # 1. Host-file read via [project.license] file = "/etc/hosts"
+        base_pyproject_text + '\n[project.license]\nfile = "/etc/hosts"\n',
+        # 2. Host-file read via [project.readme] file = "/etc/hosts"
+        base_pyproject_text + '\n[project.readme]\nfile = "/etc/hosts"\n',
+        # 3. Traversal glob in license-files = ["../*"]
+        base_pyproject_text.replace(
+            "license-files = []", 'license-files = ["../*"]'
+        ),
+        # 4. Omitted license-files (re-enabling Hatchling default globs)
+        base_pyproject_text.replace("license-files = []\n", ""),
+        # 5. Hatchling context formatting in [project.optional-dependencies]
+        base_pyproject_text
+        + '\n[project.optional-dependencies]\nextra = ["pkg @ file://{root:real}"]\n',
+        # 6. [project.scripts], [project.gui-scripts], [project.entry-points]
+        base_pyproject_text + '\n[project.scripts]\nsmart-ads = "smart_ads:main"\n',
+        base_pyproject_text + '\n[project.gui-scripts]\nsmart-ads = "smart_ads:main"\n',
+        base_pyproject_text
+        + '\n[project.entry-points."console_scripts"]\nsmart-ads = "smart_ads:main"\n',
+        # 7. Unknown key in [project] + blank/non-string description / requires-python
+        base_pyproject_text.replace(
+            "license-files = []", 'license-files = []\nkeywords = ["ads"]'
+        ),
+        base_pyproject_text.replace(
+            'description = "Smart Ads Read Gateway core contracts, registry domain, and zero-I/O ProviderPort (ADR-0001)."',
+            'description = "   "',
+        ),
+        base_pyproject_text.replace(
+            'requires-python = ">=3.12"', 'requires-python = ""'
+        ),
+        # 8. Unknown top-level table [extra]
+        base_pyproject_text + "\n[extra]\nflag = true\n",
+        # 9. Unknown [tool.other] table
+        base_pyproject_text + "\n[tool.other]\nflag = true\n",
+        # 10. Modified or omitted targets.sdist.only-include / invalid targets.sdist.sources
+        base_pyproject_text.replace(
+            '[tool.hatch.build.targets.sdist]\nonly-include = ["src/smart_ads"]',
+            '[tool.hatch.build.targets.sdist]\nonly-include = ["src"]',
+        ),
+        base_pyproject_text.replace(
+            '[tool.hatch.build.targets.sdist]\nonly-include = ["src/smart_ads"]',
+            "[tool.hatch.build.targets.sdist]\n",
+        ),
+        base_pyproject_text.replace(
+            '[tool.hatch.build.targets.sdist]\nonly-include = ["src/smart_ads"]',
+            '[tool.hatch.build.targets.sdist]\nonly-include = ["src/smart_ads"]\nsources = ["other"]',
+        ),
+    ]
+    for idx, mutated_toml in enumerate(closed_table_mutations):
+        with pytest.raises(ValueError, match=r".+"):
+            gov1_wheel.compute_build_backend_digest(
+                mutated_toml.encode("utf-8"),
+                uv_lock_bytes,
+            )
+
+    # Also prove a commit attempting [project.license] file = "/etc/hosts" is rejected before PEP 517 runs
+    repo = _init_temp_git_repo(tmp_path / "closed_pyproject_repo")
+    (repo / "pyproject.toml").write_text(
+        base_pyproject_text + '\n[project.license]\nfile = "/etc/hosts"\n',
+        encoding="utf-8",
+    )
+    run_git_offline(repo, "add", "pyproject.toml")
+    run_git_offline(repo, "commit", "-q", "-m", "attempt host file read via project.license")
+    with pytest.raises(ValueError):
+        gov1_wheel.build_reproducible_wheel(repo, tmp_path / "blocked_out")
+
+
