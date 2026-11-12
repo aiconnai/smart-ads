@@ -23,9 +23,10 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 UV_LOCK_PATH = REPO_ROOT / "uv.lock"
 PYTEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pytest.yml"
 
-EXPECTED_PR1_SUBPACKAGES = frozenset(
-    {"contracts", "domain", "ports", "application"}
+EXPECTED_PACKAGED_SUBPACKAGES = frozenset(
+    {"contracts", "domain", "ports", "application", "transports"}
 )
+EXPECTED_PR1_SUBPACKAGES = EXPECTED_PACKAGED_SUBPACKAGES
 EXPECTED_PACKAGED_MODULES = frozenset(
     {
         "smart_ads",
@@ -46,6 +47,9 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.application.admission",
         "smart_ads.application.collection",
         "smart_ads.application.completeness",
+        "smart_ads.transports",
+        "smart_ads.transports.mcp",
+        "smart_ads.transports.mcp.protocol",
     }
 )
 
@@ -64,7 +68,7 @@ WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES = frozenset(
     {"__import__", "builtins", "eval", "exec", "compile"}
 )
 
-# Tier 2 (pure layers: contracts, domain, ports, application, analytics, reconciliation + root __init__.py)
+# Tier 2 (pure layers: contracts, domain, ports, application, analytics, reconciliation, transports + root __init__.py)
 PURE_LAYER_SUBPACKAGES = frozenset(
     {
         "contracts",
@@ -73,6 +77,7 @@ PURE_LAYER_SUBPACKAGES = frozenset(
         "application",
         "analytics",
         "reconciliation",
+        "transports",
     }
 )
 PURE_LAYER_ALLOWED_TOP_IMPORTS = frozenset(
@@ -179,6 +184,10 @@ def scan_wheel_wide_ast_violations(
                     violations.append(
                         f"{filename}:{node.lineno}: forbidden dynamic attribute {node.attr!r}"
                     )
+        elif isinstance(node, ast.Assert):
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden assert statement in wheel source"
+            )
     return violations
 
 
@@ -540,6 +549,7 @@ def test_ast_zero_io_and_zero_tooling_imports_in_src() -> None:
         "import tools.governance.jcs\n",
         "from tooling import helper\n",
         "from builtins import eval as ev\n",
+        "assert x == 1\n",
     ],
 )
 def test_ast_boundary_scanner_rejects_violating_snippets(bad_snippet: str) -> None:
@@ -547,6 +557,9 @@ def test_ast_boundary_scanner_rejects_violating_snippets(bad_snippet: str) -> No
         bad_snippet, filename="<synthetic>"
     )
     assert violations, f"Expected AST scanner to reject snippet:\n{bad_snippet}"
+    assert scan_wheel_wide_ast_violations(
+        "assert x == 1\n", filename="<synthetic>"
+    )
     assert not scan_pure_layer_ast_violations(
         "import re\nPAT = re.compile(r'^a+$')\n", filename="<ok>"
     )
