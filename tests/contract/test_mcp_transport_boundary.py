@@ -1,7 +1,10 @@
-"""Contract tests for zero-recursion MCP JSON-RPC 2.0 wire parser (ADR-0001 §3.3)."""
+"""Contract tests for zero-recursion MCP JSON-RPC 2.0 wire parser and deny-before-I/O gateway (ADR-0001 §3.3)."""
 from __future__ import annotations
 
 import ast
+import base64
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,48 +13,101 @@ import pytest
 from smart_ads.contracts import (
     MAX_JCS_SAFE_INT,
     MIN_JCS_SAFE_INT,
+    ArtifactLocator,
     ClosedValidationError,
+    canonicalize_jcs,
+    loads_strict_json,
+    validate_resource_ref,
 )
 import smart_ads.transports.mcp as mcp_pkg
 from smart_ads.transports.mcp import (
+    ALLOWED_FINDING_TYPES,
+    ALLOWED_MCP_METHODS,
     MAX_MCP_BODY_BYTES,
     MAX_MCP_NESTING_DEPTH,
+    AdmittedMcpRequest,
+    IntelligenceFindingsQueryParams,
+    McpDelegationContext,
+    McpMethodParams,
     McpProtocolRejection,
+    McpReadHandlerPort,
+    McpRuntimeContext,
+    McpWireOutcome,
     ParsedJsonRpcEnvelope,
+    PerformanceQueryParams,
+    RecurrentSummaryReportParams,
+    handle_mcp_request_bytes,
     parse_mcp_wire_bytes,
     serialize_jsonrpc_result,
     validate_jsonrpc_request_envelope,
+    validate_mcp_method_params,
+    verify_mcp_delegation_context,
 )
 from smart_ads.transports.mcp.protocol import _NonExactJsonNumber
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PROTOCOL_PATH = (
-    REPO_ROOT / "src" / "smart_ads" / "transports" / "mcp" / "protocol.py"
-)
+MCP_PKG_DIR = REPO_ROOT / "src" / "smart_ads" / "transports" / "mcp"
+PROTOCOL_PATH = MCP_PKG_DIR / "protocol.py"
 
 
 def test_mcp_package_constants_exports_and_no_json_loads() -> None:
     assert MAX_MCP_BODY_BYTES == 65_536
     assert MAX_MCP_NESTING_DEPTH == 8
     expected_exports = {
+        "ALLOWED_FINDING_TYPES",
+        "ALLOWED_MCP_METHODS",
+        "AdmittedMcpRequest",
+        "IntelligenceFindingsQueryParams",
         "JsonRpcRequestId",
         "MAX_MCP_BODY_BYTES",
         "MAX_MCP_NESTING_DEPTH",
+        "McpDelegationContext",
+        "McpMethodParams",
         "McpProtocolRejection",
+        "McpReadHandlerPort",
         "McpRejectionCaseId",
+        "McpRuntimeContext",
+        "McpWireOutcome",
         "ParsedJsonRpcEnvelope",
+        "PerformanceQueryParams",
+        "RecurrentSummaryReportParams",
+        "handle_mcp_request_bytes",
         "parse_mcp_wire_bytes",
         "serialize_jsonrpc_result",
         "validate_jsonrpc_request_envelope",
+        "validate_mcp_method_params",
+        "verify_mcp_delegation_context",
     }
     assert set(mcp_pkg.__all__) == expected_exports
+    assert ALLOWED_MCP_METHODS == (
+        "smart_ads.queries.get_ad_performance_v1",
+        "smart_ads.queries.get_adset_performance_v1",
+        "smart_ads.queries.get_campaign_performance_v1",
+        "smart_ads.queries.get_intelligence_findings_v1",
+        "smart_ads.reports.generate_recurrent_summary_v1",
+    )
+    assert tuple(
+        sorted(ALLOWED_MCP_METHODS, key=lambda s: s.encode("utf-8"))
+    ) == ALLOWED_MCP_METHODS
+    assert ALLOWED_FINDING_TYPES == frozenset(
+        {"restatement", "saturation", "stalled_delivery", "waste"}
+    )
 
-    source = PROTOCOL_PATH.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(PROTOCOL_PATH))
-    for node in ast.walk(tree):
-        assert not isinstance(node, ast.Assert)
-        if isinstance(node, ast.Attribute):
-            assert node.attr != "loads"
+    mcp_py_files = sorted(MCP_PKG_DIR.glob("*.py"))
+    assert [p.name for p in mcp_py_files] == [
+        "__init__.py",
+        "delegation.py",
+        "gateway.py",
+        "protocol.py",
+        "schemas.py",
+    ]
+    for py_path in mcp_py_files:
+        source = py_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(py_path))
+        for node in ast.walk(tree):
+            assert not isinstance(node, ast.Assert), f"assert found in {py_path}"
+            if isinstance(node, ast.Attribute):
+                assert node.attr != "loads", f".loads found in {py_path}"
 
 
 @pytest.mark.parametrize(
@@ -462,3 +518,409 @@ def test_wire_serialization_and_contract_guards() -> None:
         serialize_jsonrpc_result(True, {"ok": True})  # type: ignore[arg-type]
     with pytest.raises(ClosedValidationError):
         serialize_jsonrpc_result("req-1", [1, 2])  # type: ignore[arg-type]
+
+
+@dataclass
+class _AdapterSpy:
+    name: str
+    calls: int = 0
+
+    def touch(self) -> None:
+        self.calls += 1
+
+
+class _SixAdapterIOSpyRig:
+    """Spy harness tracking all 6 ADR-0001 §3.3 external I/O adapter surfaces."""
+
+    def __init__(self) -> None:
+        self.registry = _AdapterSpy("registry")
+        self.audit = _AdapterSpy("audit")
+        self.filesystem = _AdapterSpy("filesystem")
+        self.credential = _AdapterSpy("credential")
+        self.provider = _AdapterSpy("provider")
+        self.network = _AdapterSpy("network")
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "audit_calls": self.audit.calls,
+            "credential_calls": self.credential.calls,
+            "filesystem_calls": self.filesystem.calls,
+            "network_calls": self.network.calls,
+            "provider_calls": self.provider.calls,
+            "registry_calls": self.registry.calls,
+        }
+
+
+class _SpyMcpReadHandler:
+    """Post-admission MCP read handler wired to the 6 external I/O spies."""
+
+    def __init__(self, rig: _SixAdapterIOSpyRig) -> None:
+        self._rig = rig
+        self.admitted_requests: list[AdmittedMcpRequest] = []
+
+    def handle(self, request: AdmittedMcpRequest) -> Mapping[str, Any]:
+        self.admitted_requests.append(request)
+        self._rig.registry.touch()
+        self._rig.audit.touch()
+        self._rig.filesystem.touch()
+        self._rig.credential.touch()
+        self._rig.provider.touch()
+        self._rig.network.touch()
+        return {"rows": [], "method": request.method}
+
+
+def _make_valid_runtime_context(
+    *,
+    allowed_method: str = "smart_ads.queries.get_campaign_performance_v1",
+    route: str = "/ibvi-ads",
+    tenant_ref: str = "tenant:ibvi",
+    binding_ref: str = "binding:meta-1",
+    resource_scope_ref: str = "scope:ibvi-1",
+    clock_lower_utc: str = "2026-11-12T12:01:00Z",
+    clock_upper_utc: str = "2026-11-12T12:01:02Z",
+) -> McpRuntimeContext:
+    locator = ArtifactLocator.from_digest(
+        "smart_ads/ibvi_ads_delegation_context/v1",
+        "sha256:" + ("a" * 64),
+    )
+    delegation = McpDelegationContext(
+        schema="smart_ads/ibvi_ads_delegation_context/v1",
+        route=route,
+        host_conductor_ref="conductor:hermes-prod",
+        front_ref="front:pinna",
+        profile_ref="profile:pinna-ops",
+        tenant_ref=tenant_ref,
+        binding_ref=binding_ref,
+        resource_scope_ref=resource_scope_ref,
+        allowed_method=allowed_method,
+        policy_digest="sha256:" + ("b" * 64),
+        issued_at_utc="2026-11-12T12:00:00Z",
+        valid_until_utc="2026-11-12T12:15:00Z",
+        nonce="nonce-gov1-001",
+        locator=locator,
+    )
+    return McpRuntimeContext(
+        clock_lower_utc=clock_lower_utc,
+        clock_upper_utc=clock_upper_utc,
+        delegation_context=delegation,
+    )
+
+
+def _canonical_resource_ref_for_index(idx: int) -> str:
+    raw_32 = idx.to_bytes(32, "big")
+    encoded = base64.b32encode(raw_32).decode("ascii").rstrip("=").lower()
+    ref = f"resource:{encoded}"
+    return validate_resource_ref(ref)
+
+
+def test_adr0001_section_3_3_eleven_case_rejection_matrix_zero_io() -> None:
+    zero_counters = {
+        "audit_calls": 0,
+        "credential_calls": 0,
+        "filesystem_calls": 0,
+        "network_calls": 0,
+        "provider_calls": 0,
+        "registry_calls": 0,
+    }
+    valid_rt = _make_valid_runtime_context()
+
+    over_64k_prefix = (
+        b'{"jsonrpc":"2.0","id":"req-must-not-echo","method":'
+        b'"smart_ads.queries.get_campaign_performance_v1","params":{"pad":"'
+    )
+    over_64k_suffix = b'"}}'
+    over_64k_body = (
+        over_64k_prefix
+        + (b"x" * (MAX_MCP_BODY_BYTES + 1 - len(over_64k_prefix) - len(over_64k_suffix)))
+        + over_64k_suffix
+    )
+    assert len(over_64k_body) == 65_537
+
+    # Exact 11 normative rows in ADR-0001 §3.3 L235-245:
+    matrix_cases: list[
+        tuple[
+            str,
+            bytes,
+            McpRuntimeContext | None,
+            int,
+            str,
+            str | int | None,
+        ]
+    ] = [
+        (
+            "body_over_64k",
+            over_64k_body,
+            valid_rt,
+            -32600,
+            "Invalid Request",
+            None,
+        ),
+        (
+            "invalid_utf8",
+            b'{"jsonrpc":"2.0","id":"req-utf8","bad":"\xff\xfe"}',
+            valid_rt,
+            -32700,
+            "Parse error",
+            None,
+        ),
+        (
+            "malformed_json",
+            b'{"jsonrpc":"2.0","id":"req-trunc","method":',
+            valid_rt,
+            -32700,
+            "Parse error",
+            None,
+        ),
+        (
+            "duplicate_json_key",
+            b'{"jsonrpc":"2.0","id":"req-dup","id":"req-dup-2","method":"smart_ads.queries.get_campaign_performance_v1"}',
+            valid_rt,
+            -32600,
+            "Invalid Request",
+            None,
+        ),
+        (
+            "nesting_depth_over_8",
+            b'{"jsonrpc":"2.0","id":"req-deep","method":"smart_ads.queries.get_campaign_performance_v1","params":{"l3":{"l4":{"l5":{"l6":{"l7":{"l8":{"l9":{"leaf":1}}}}}}}}}',
+            valid_rt,
+            -32600,
+            "Invalid Request",
+            None,
+        ),
+        (
+            "batch_array",
+            b'[{"jsonrpc":"2.0","id":"req-batch-1","method":"smart_ads.queries.get_campaign_performance_v1"}]',
+            valid_rt,
+            -32600,
+            "Invalid Request",
+            None,
+        ),
+        (
+            "non_object_request",
+            b'"scalar-secret-do-not-echo"',
+            valid_rt,
+            -32600,
+            "Invalid Request",
+            None,
+        ),
+        (
+            "unsupported_method",
+            canonicalize_jcs(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-unsupported-8",
+                    "method": "smart_ads.mutations.update_budget_v1",
+                    "params": {},
+                }
+            ),
+            valid_rt,
+            -32601,
+            "Method not found",
+            "req-unsupported-8",
+        ),
+        (
+            "invalid_params",
+            canonicalize_jcs(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 909,
+                    "method": "smart_ads.queries.get_campaign_performance_v1",
+                    "params": {
+                        "tenant_ref": "raw-secret-account-12345",
+                        "binding_ref": "binding:meta-1",
+                        "resource_scope_ref": "scope:ibvi-1",
+                        "date_range": {
+                            "start_date": "2026-11-10",
+                            "end_date": "2026-11-01",
+                        },
+                    },
+                }
+            ),
+            valid_rt,
+            -32602,
+            "Invalid params",
+            909,
+        ),
+        (
+            "additional_property",
+            canonicalize_jcs(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-addprop-10",
+                    "method": "smart_ads.queries.get_campaign_performance_v1",
+                    "params": {
+                        "tenant_ref": "tenant:ibvi",
+                        "binding_ref": "binding:meta-1",
+                        "resource_scope_ref": "scope:ibvi-1",
+                        "date_range": {
+                            "start_date": "2026-11-01",
+                            "end_date": "2026-11-10",
+                        },
+                        "file_path": "/etc/passwd",
+                    },
+                }
+            ),
+            valid_rt,
+            -32602,
+            "Invalid params",
+            "req-addprop-10",
+        ),
+        (
+            "missing_or_invalid_ibvi_ads_delegation",
+            canonicalize_jcs(
+                {
+                    "jsonrpc": "2.0",
+                    "id": "req-deleg-11",
+                    "method": "smart_ads.queries.get_campaign_performance_v1",
+                    "params": {
+                        "tenant_ref": "tenant:ibvi",
+                        "binding_ref": "binding:meta-1",
+                        "resource_scope_ref": "scope:ibvi-1",
+                        "date_range": {
+                            "start_date": "2026-11-01",
+                            "end_date": "2026-11-10",
+                        },
+                    },
+                }
+            ),
+            _make_valid_runtime_context(route="/ads"),
+            -32600,
+            "Invalid Request",
+            "req-deleg-11",
+        ),
+    ]
+
+    observed_case_ids: list[str] = []
+    for (
+        expected_case_id,
+        raw_body,
+        rt_ctx,
+        expected_code,
+        expected_message,
+        expected_id,
+    ) in matrix_cases:
+        rig = _SixAdapterIOSpyRig()
+        spy_handler = _SpyMcpReadHandler(rig)
+        assert isinstance(spy_handler, McpReadHandlerPort)
+
+        outcome = handle_mcp_request_bytes(
+            raw_body, rt_ctx, handler=spy_handler
+        )
+        assert isinstance(outcome, McpWireOutcome)
+        assert outcome.admitted_request is None
+        assert outcome.rejection is not None
+        assert outcome.rejection.case_id == expected_case_id
+        assert outcome.rejection.code == expected_code
+        assert outcome.rejection.message == expected_message
+        assert outcome.rejection.request_id == expected_id
+        assert spy_handler.admitted_requests == []
+        assert rig.counters() == zero_counters
+
+        decoded_wire = loads_strict_json(outcome.wire_bytes)
+        assert set(decoded_wire.keys()) == {"jsonrpc", "id", "error"}
+        assert decoded_wire["jsonrpc"] == "2.0"
+        assert decoded_wire["id"] == expected_id
+        assert set(decoded_wire["error"].keys()) == {"code", "message"}
+        assert decoded_wire["error"] == {
+            "code": expected_code,
+            "message": expected_message,
+        }
+        assert outcome.wire_bytes == canonicalize_jcs(decoded_wire)
+        assert b"/etc/passwd" not in outcome.wire_bytes
+        assert b"scalar-secret" not in outcome.wire_bytes
+        assert b"raw-secret" not in outcome.wire_bytes
+        observed_case_ids.append(outcome.rejection.case_id)
+
+    assert sorted(observed_case_ids, key=lambda s: s.encode("utf-8")) == [
+        "additional_property",
+        "batch_array",
+        "body_over_64k",
+        "duplicate_json_key",
+        "invalid_params",
+        "invalid_utf8",
+        "malformed_json",
+        "missing_or_invalid_ibvi_ads_delegation",
+        "nesting_depth_over_8",
+        "non_object_request",
+        "unsupported_method",
+    ]
+    assert len(set(observed_case_ids)) == 11
+
+
+def test_gateway_accepts_exact_65536_bytes_and_dispatches_to_handler() -> None:
+    resource_refs = sorted(
+        (_canonical_resource_ref_for_index(i) for i in range(1, 1019)),
+        key=lambda s: s.encode("utf-8"),
+    )
+    base_envelope: dict[str, Any] = {
+        "jsonrpc": "2.0",
+        "id": "req-",
+        "method": "smart_ads.queries.get_campaign_performance_v1",
+        "params": {
+            "tenant_ref": "tenant:ibvi",
+            "binding_ref": "binding:meta-1",
+            "resource_scope_ref": "scope:ibvi-1",
+            "date_range": {
+                "start_date": "2026-11-01",
+                "end_date": "2026-11-10",
+            },
+            "resource_refs": resource_refs,
+        },
+    }
+    base_len = len(canonicalize_jcs(base_envelope))
+    delta = MAX_MCP_BODY_BYTES - base_len
+    assert 1 <= delta <= 250
+    exact_id = "req-" + ("z" * delta)
+    base_envelope["id"] = exact_id
+
+    exact_64k_body = canonicalize_jcs(base_envelope)
+    assert len(exact_64k_body) == 65_536
+
+    rig = _SixAdapterIOSpyRig()
+    spy_handler = _SpyMcpReadHandler(rig)
+    valid_rt = _make_valid_runtime_context()
+
+    outcome_ok = handle_mcp_request_bytes(
+        exact_64k_body, valid_rt, handler=spy_handler
+    )
+    assert outcome_ok.rejection is None
+    assert outcome_ok.admitted_request is not None
+    assert outcome_ok.admitted_request.request_id == exact_id
+    assert isinstance(outcome_ok.admitted_request.params, PerformanceQueryParams)
+    assert outcome_ok.admitted_request.params.resource_refs == tuple(resource_refs)
+    assert len(spy_handler.admitted_requests) == 1
+    assert loads_strict_json(outcome_ok.wire_bytes) == {
+        "jsonrpc": "2.0",
+        "id": exact_id,
+        "result": {
+            "rows": [],
+            "method": "smart_ads.queries.get_campaign_performance_v1",
+        },
+    }
+
+    # Adding 1 byte -> 65,537 bytes -> rejected before any I/O or handler invocation
+    base_envelope["id"] = exact_id + "x"
+    over_64k_body = canonicalize_jcs(base_envelope)
+    assert len(over_64k_body) == 65_537
+
+    rig_over = _SixAdapterIOSpyRig()
+    spy_over = _SpyMcpReadHandler(rig_over)
+    outcome_over = handle_mcp_request_bytes(
+        over_64k_body, valid_rt, handler=spy_over
+    )
+    assert outcome_over.admitted_request is None
+    assert outcome_over.rejection == McpProtocolRejection(
+        code=-32600,
+        message="Invalid Request",
+        request_id=None,
+        case_id="body_over_64k",
+    )
+    assert spy_over.admitted_requests == []
+    assert rig_over.counters() == {
+        "audit_calls": 0,
+        "credential_calls": 0,
+        "filesystem_calls": 0,
+        "network_calls": 0,
+        "provider_calls": 0,
+        "registry_calls": 0,
+    }
