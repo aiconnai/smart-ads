@@ -1,12 +1,32 @@
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
 [project]
-name = "smart-ads-governance"
+name = "smart-ads"
 version = "0.1.0"
-description = "Dependency-free governance toolkit for Smart Ads Gate 2 artifacts (RFC 8785 JCS, P1 Ed25519 envelopes, content-addressed locators)."
-requires-python = ">=3.11"
+description = "Smart Ads Read Gateway core contracts, registry domain, and zero-I/O ProviderPort (ADR-0001)."
+requires-python = ">=3.12"
+dependencies = []
+license-files = []
+
+[dependency-groups]
+dev = [
+  "build==1.6.1",
+  "hatchling==1.33.0",
+  "pytest==9.2.0",
+]
+
+[tool.hatch.build]
+ignore-vcs = true
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src/smart_ads"]
+sources = ["src"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/smart_ads"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+pythonpath = [".", "src"]

@@ -1,0 +1,76 @@
+"""Pure registry domain, canonical HMAC resource_ref, capability lifecycle, and Pipeboard contract (ADR-0001)."""
+from __future__ import annotations
+
+from smart_ads.domain.capabilities import (
+    ALLOWED_CAPABILITY_TRANSITIONS,
+    IO_DENIED_CAPABILITY_STATES,
+    CapabilityInvalidationTransition,
+    CapabilityRevalidationTransition,
+    TransitionKind,
+    is_io_denied_state,
+    validate_capability_transition,
+)
+from smart_ads.domain.pipeboard_contract import (
+    FORBIDDEN_PIPEBOARD_ARGUMENTS,
+    PINNED_LEGACY_COMMIT,
+    PINNED_LEGACY_REPO,
+    PINNED_PIPEBOARD_D26_SPECS,
+    PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS,
+    LegacySourcePacket,
+    PinnedGitArtifactMember,
+    PinnedUpstreamReference,
+    PipeboardPhase1Contract,
+    PipeboardTransportLimits,
+)
+from smart_ads.domain.registry import (
+    AuthorizedScopeRelation,
+    CapabilityState,
+    DriverCapabilityEntry,
+    ExpectedResourceInventory,
+    ExpectedResourceKey,
+    PrivateRegistrySnapshot,
+    RegistryBinding,
+    compute_resource_mapping_contract_digest,
+)
+from smart_ads.domain.resource_ref import (
+    CANONICAL_RESOURCE_REF_RE,
+    BidirectionalResourceDirectory,
+    TenantResourceKeyHandle,
+    derive_resource_ref,
+    validate_resource_ref,
+    verify_resource_ref,
+)
+
+__all__ = [
+    "ALLOWED_CAPABILITY_TRANSITIONS",
+    "AuthorizedScopeRelation",
+    "BidirectionalResourceDirectory",
+    "CANONICAL_RESOURCE_REF_RE",
+    "CapabilityInvalidationTransition",
+    "CapabilityRevalidationTransition",
+    "CapabilityState",
+    "DriverCapabilityEntry",
+    "ExpectedResourceInventory",
+    "ExpectedResourceKey",
+    "FORBIDDEN_PIPEBOARD_ARGUMENTS",
+    "IO_DENIED_CAPABILITY_STATES",
+    "LegacySourcePacket",
+    "PINNED_LEGACY_COMMIT",
+    "PINNED_LEGACY_REPO",
+    "PINNED_PIPEBOARD_D26_SPECS",
+    "PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS",
+    "PinnedGitArtifactMember",
+    "PinnedUpstreamReference",
+    "PipeboardPhase1Contract",
+    "PipeboardTransportLimits",
+    "PrivateRegistrySnapshot",
+    "RegistryBinding",
+    "TenantResourceKeyHandle",
+    "TransitionKind",
+    "compute_resource_mapping_contract_digest",
+    "derive_resource_ref",
+    "is_io_denied_state",
+    "validate_capability_transition",
+    "validate_resource_ref",
+    "verify_resource_ref",
+]

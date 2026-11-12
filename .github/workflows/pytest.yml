@@ -19,7 +19,67 @@ jobs:
         with:
           # Decomposition AST identity is pinned to the actual CPython 3.12 ABI.
           python-version: '3.12'
-      - name: Install pytest
-        run: python3 -m pip install --upgrade pip pytest
+      - name: Generate hash-pinned Linux requirements from uv.lock
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import tomllib
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+          windows_markers = {"os_name == 'nt'", "sys_platform == 'win32'"}
+
+          assert pyproject["project"]["dependencies"] == []
+          build_requires = set(pyproject["build-system"]["requires"])
+          dev_group = set(pyproject["dependency-groups"]["dev"])
+          assert build_requires and build_requires.issubset(dev_group)
+
+          packages = {pkg["name"]: pkg for pkg in lock["package"]}
+          assert len(packages) == len(lock["package"])
+          root = packages["smart-ads"]
+          assert root.get("source") == {"editable": "."}
+          locked_dev = {
+              f"{d['name']}{d['specifier']}"
+              for d in root["metadata"]["requires-dev"]["dev"]
+          }
+          assert dev_group == locked_dev
+
+          for name, pkg in packages.items():
+              if pkg.get("source") == {"editable": "."}:
+                  continue
+              wheels = pkg.get("wheels", [])
+              assert wheels, f"Missing wheels for {name}"
+              for w in wheels:
+                  assert re.fullmatch(r"sha256:[0-9a-f]{64}", w.get("hash", ""))
+
+          queue = [
+              d["name"]
+              for d in root["dev-dependencies"]["dev"]
+              if d.get("marker") not in windows_markers
+          ]
+          selected: set[str] = set()
+          while queue:
+              curr = queue.pop()
+              if curr in selected:
+                  continue
+              pkg = packages[curr]
+              if pkg.get("source") == {"editable": "."}:
+                  continue
+              selected.add(curr)
+              for dep in pkg.get("dependencies", []):
+                  if dep.get("marker") not in windows_markers:
+                      queue.append(dep["name"])
+
+          lines = []
+          for name in sorted(selected):
+              pkg = packages[name]
+              hashes = sorted({w["hash"] for w in pkg["wheels"]})
+              lines.append(f"{name}=={pkg['version']} " + " ".join(f"--hash={h}" for h in hashes))
+
+          Path("/tmp/ci-locked-dev.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+      - name: Install hash-pinned test and build dependencies
+        run: python3 -m pip install --no-deps --require-hashes -r /tmp/ci-locked-dev.txt
       - name: Run tests
-        run: python3 -m pytest -q -p no:cacheprovider
+        run: python3 -m pytest -q -W error -p no:cacheprovider
