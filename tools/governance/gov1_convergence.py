@@ -55,10 +55,16 @@ from tools.governance.gov1_sandbox import (
     verify_sealed_sandbox_profile,
 )
 from tools.governance.gov1_wheel import (
+    DEFAULT_REPOSITORY,
+    EXPECTED_BUILD_BACKEND,
+    EXPECTED_BUILD_BACKEND_VERSION,
+    EXPECTED_PYTHON_ABI_TAG,
+    MAX_JCS_SAFE_INT,
     WHEEL_BOUNDARY_REPORT_SCHEMA,
     WHEEL_BUILD_PROVENANCE_SCHEMA,
     verify_wheel_boundary_report,
     verify_wheel_build_provenance,
+    verify_wheel_object_locator,
 )
 from tools.governance.jcs import canonicalize, loads_strict
 from tools.governance.locator import (
@@ -144,6 +150,87 @@ _GOV1_CONVERGENCE_PAYLOAD_FIELDS: Final[set[str]] = {
 _GOV1_CONVERGENCE_ENVELOPE_FIELDS: Final[set[str]] = (
     {"$schema", "integrity"} | _GOV1_CONVERGENCE_PAYLOAD_FIELDS
 )
+
+_SANDBOX_SPEC_17_FIELDS: Final[set[str]] = {
+    "profile_id",
+    "runtime_kind",
+    "platform",
+    "rootfs_read_only",
+    "oci_image_digest",
+    "runner_binary_digest",
+    "exact_environment",
+    "namespaces",
+    "read_only_mounts",
+    "fresh_tmpfs_mounts",
+    "masked_empty_mounts",
+    "host_bind_mounts_forbidden",
+    "all_capabilities_dropped",
+    "no_new_privs",
+    "inherited_fds_above_2_closed",
+    "seccomp_profile_digest",
+    "resource_limits",
+}
+_SANDBOX_ENVELOPE_22_FIELDS: Final[set[str]] = (
+    {"$schema", "integrity", "migration_run_context_locator", "issued_at_utc", "validity"}
+    | _SANDBOX_SPEC_17_FIELDS
+)
+
+_PROVENANCE_ENVELOPE_18_FIELDS: Final[set[str]] = {
+    "$schema",
+    "integrity",
+    "migration_run_context_locator",
+    "build_run_id",
+    "built_at_utc",
+    "repository",
+    "source_commit_sha",
+    "source_tree_oid",
+    "source_date_epoch",
+    "python_abi_tag",
+    "build_backend",
+    "build_backend_version",
+    "build_backend_digest",
+    "pyproject_sha256",
+    "uv_lock_sha256",
+    "schema_bundle_digest",
+    "wheel",
+    "wheel_digest",
+}
+
+_BOUNDARY_ENVELOPE_16_FIELDS: Final[set[str]] = {
+    "$schema",
+    "integrity",
+    "migration_run_context_locator",
+    "wheel_build_provenance_locator",
+    "build_run_id",
+    "verified_at_utc",
+    "repository",
+    "source_commit_sha",
+    "wheel_digest",
+    "build_backend_digest",
+    "schema_bundle_digest",
+    "sorted_record_entries",
+    "sorted_record_digest",
+    "archive_allowlist_passed",
+    "ast_boundary_scan_passed",
+    "isolated_venv_import_passed",
+    "packaged_modules",
+}
+
+_MCP_ENVELOPE_13_FIELDS: Final[set[str]] = {
+    "$schema",
+    "integrity",
+    "migration_run_context_locator",
+    "sealed_sandbox_profile_locator",
+    "build_run_id",
+    "executed_at_utc",
+    "source_commit_sha",
+    "wheel_digest",
+    "build_backend_digest",
+    "schema_bundle_digest",
+    "allowed_methods",
+    "body_64k_boundary_verified",
+    "cases",
+}
 
 _UNSIGNED_INTEGRITY_FIELDS: Final[set[str]] = {
     "key_id",
@@ -356,6 +443,156 @@ def _enforce_etapa7_cross_binding_matrix(
             "convergence cross-binding: mcp_rejection_report.executed_at_utc outside "
             "[sandbox_profile.validity.from, sandbox_profile.validity.until)"
         )
+    prov_built = timestamp(provenance_payload.get("built_at_utc"))
+    bound_verified = timestamp(boundary_payload.get("verified_at_utc"))
+    if bound_verified < prov_built:
+        raise ValueError(
+            "convergence cross-binding: wheel_boundary_report.verified_at_utc precedes "
+            "wheel_provenance.built_at_utc"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Closed Envelope Structural Validators (Pre-Subscript Guarding)
+# ---------------------------------------------------------------------------
+
+
+def _validate_sandbox_envelope_structure(envelope: object) -> dict[str, Any]:
+    exact_fields(
+        envelope, _SANDBOX_ENVELOPE_22_FIELDS, "sealed_sandbox_profile_envelope"
+    )
+    env = envelope  # type: ignore[assignment]
+    _require_exact_str(
+        env["$schema"], SANDBOX_PROFILE_SCHEMA, "sealed_sandbox_profile.$schema"
+    )
+    _verify_envelope_integrity(env, label="sealed_sandbox_profile")
+    validate_locator(env["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
+    issued_dt = timestamp(env["issued_at_utc"])
+    exact_fields(env["validity"], {"from", "until"}, "sealed_sandbox_profile.validity")
+    from_dt = timestamp(env["validity"]["from"])
+    until_dt = timestamp(env["validity"]["until"])
+    if not (from_dt <= issued_dt < until_dt):
+        raise ValueError(
+            "sealed_sandbox_profile.validity: require validity.from <= issued_at_utc < validity.until"
+        )
+    spec_18 = {
+        "$schema": SANDBOX_PROFILE_SCHEMA,
+        **{k: env[k] for k in _SANDBOX_SPEC_17_FIELDS},
+    }
+    verify_sandbox_profile_spec(spec_18)
+    return env
+
+
+def _validate_provenance_envelope_structure(envelope: object) -> dict[str, Any]:
+    exact_fields(
+        envelope, _PROVENANCE_ENVELOPE_18_FIELDS, "wheel_build_provenance_envelope"
+    )
+    env = envelope  # type: ignore[assignment]
+    _require_exact_str(
+        env["$schema"],
+        WHEEL_BUILD_PROVENANCE_SCHEMA,
+        "wheel_build_provenance.$schema",
+    )
+    _verify_envelope_integrity(env, label="wheel_build_provenance")
+    validate_locator(env["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
+    _require_strict_str(env["build_run_id"], "provenance.build_run_id")
+    timestamp(env["built_at_utc"])
+    _require_exact_str(
+        env["repository"], DEFAULT_REPOSITORY, "provenance.repository"
+    )
+    _require_git_oid(env["source_commit_sha"], "provenance.source_commit_sha")
+    _require_git_oid(env["source_tree_oid"], "provenance.source_tree_oid")
+    sde = env["source_date_epoch"]
+    if type(sde) is not int or sde < 0 or sde > MAX_JCS_SAFE_INT:
+        raise ValueError("provenance.source_date_epoch: expected non-negative safe int")
+    _require_exact_str(
+        env["python_abi_tag"], EXPECTED_PYTHON_ABI_TAG, "provenance.python_abi_tag"
+    )
+    _require_exact_str(
+        env["build_backend"], EXPECTED_BUILD_BACKEND, "provenance.build_backend"
+    )
+    _require_exact_str(
+        env["build_backend_version"],
+        EXPECTED_BUILD_BACKEND_VERSION,
+        "provenance.build_backend_version",
+    )
+    _require_sha256_digest(
+        env["build_backend_digest"], "provenance.build_backend_digest"
+    )
+    _require_sha256_digest(env["pyproject_sha256"], "provenance.pyproject_sha256")
+    _require_sha256_digest(env["uv_lock_sha256"], "provenance.uv_lock_sha256")
+    _require_sha256_digest(
+        env["schema_bundle_digest"], "provenance.schema_bundle_digest"
+    )
+    declared_wheel_digest = _require_sha256_digest(
+        env["wheel_digest"], "provenance.wheel_digest"
+    )
+    if not isinstance(env["wheel"], dict):
+        raise ValueError("provenance.wheel: expected wheel_object_locator/v1 object")
+    verify_wheel_object_locator(env["wheel"])
+    if env["wheel"]["wheel_digest"] != declared_wheel_digest:
+        raise ValueError("provenance: wheel.wheel_digest != wheel_digest")
+    return env
+
+
+def _validate_boundary_envelope_structure(envelope: object) -> dict[str, Any]:
+    exact_fields(
+        envelope, _BOUNDARY_ENVELOPE_16_FIELDS, "wheel_boundary_report_envelope"
+    )
+    env = envelope  # type: ignore[assignment]
+    _require_exact_str(
+        env["$schema"],
+        WHEEL_BOUNDARY_REPORT_SCHEMA,
+        "wheel_boundary_report.$schema",
+    )
+    _verify_envelope_integrity(env, label="wheel_boundary_report")
+    validate_locator(env["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
+    validate_locator(
+        env["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA
+    )
+    _require_strict_str(env["build_run_id"], "boundary_report.build_run_id")
+    timestamp(env["verified_at_utc"])
+    _require_exact_str(
+        env["repository"], DEFAULT_REPOSITORY, "boundary_report.repository"
+    )
+    _require_git_oid(env["source_commit_sha"], "boundary_report.source_commit_sha")
+    _require_sha256_digest(env["wheel_digest"], "boundary_report.wheel_digest")
+    _require_sha256_digest(
+        env["build_backend_digest"], "boundary_report.build_backend_digest"
+    )
+    _require_sha256_digest(
+        env["schema_bundle_digest"], "boundary_report.schema_bundle_digest"
+    )
+    _require_sha256_digest(
+        env["sorted_record_digest"], "boundary_report.sorted_record_digest"
+    )
+    return env
+
+
+def _validate_mcp_envelope_structure(envelope: object) -> dict[str, Any]:
+    exact_fields(
+        envelope, _MCP_ENVELOPE_13_FIELDS, "mcp_rejection_matrix_report_envelope"
+    )
+    env = envelope  # type: ignore[assignment]
+    _require_exact_str(
+        env["$schema"],
+        MCP_REJECTION_REPORT_SCHEMA,
+        "mcp_rejection_matrix_report.$schema",
+    )
+    _verify_envelope_integrity(env, label="mcp_rejection_matrix_report")
+    validate_locator(env["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
+    validate_locator(env["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA)
+    _require_strict_str(env["build_run_id"], "mcp_report.build_run_id")
+    timestamp(env["executed_at_utc"])
+    _require_git_oid(env["source_commit_sha"], "mcp_report.source_commit_sha")
+    _require_sha256_digest(env["wheel_digest"], "mcp_report.wheel_digest")
+    _require_sha256_digest(
+        env["build_backend_digest"], "mcp_report.build_backend_digest"
+    )
+    _require_sha256_digest(
+        env["schema_bundle_digest"], "mcp_report.schema_bundle_digest"
+    )
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -410,75 +647,100 @@ def _validate_gov1_convergence_structural_fields(
     if store is not None:
         if not isinstance(store, Store):
             raise ValueError("store: expected locator.Store instance")
-        bound_obj = store.get(
-            payload["wheel_boundary_report_locator"],
-            expected_type=WHEEL_BOUNDARY_REPORT_SCHEMA,
+        bound_obj = _validate_boundary_envelope_structure(
+            store.get(
+                payload["wheel_boundary_report_locator"],
+                expected_type=WHEEL_BOUNDARY_REPORT_SCHEMA,
+            )
         )
-        sbx_obj = store.get(
-            payload["sealed_sandbox_profile_locator"],
-            expected_type=SANDBOX_PROFILE_SCHEMA,
+        sbx_obj = _validate_sandbox_envelope_structure(
+            store.get(
+                payload["sealed_sandbox_profile_locator"],
+                expected_type=SANDBOX_PROFILE_SCHEMA,
+            )
         )
-        mcp_obj = store.get(
-            payload["mcp_rejection_matrix_report_locator"],
-            expected_type=MCP_REJECTION_REPORT_SCHEMA,
+        mcp_obj = _validate_mcp_envelope_structure(
+            store.get(
+                payload["mcp_rejection_matrix_report_locator"],
+                expected_type=MCP_REJECTION_REPORT_SCHEMA,
+            )
+        )
+        prov_obj = _validate_provenance_envelope_structure(
+            store.get(
+                bound_obj["wheel_build_provenance_locator"],
+                expected_type=WHEEL_BUILD_PROVENANCE_SCHEMA,
+            )
         )
 
         run_ctx_bytes = canonicalize(payload["migration_run_context_locator"])
         for label, constituent in (
             ("sealed_sandbox_profile", sbx_obj),
+            ("wheel_build_provenance", prov_obj),
             ("wheel_boundary_report", bound_obj),
             ("mcp_rejection_matrix_report", mcp_obj),
         ):
             if (
-                canonicalize(constituent.get("migration_run_context_locator"))
+                canonicalize(constituent["migration_run_context_locator"])
                 != run_ctx_bytes
             ):
                 raise ValueError(
                     f"gov1_convergence_record: migration_run_context_locator mismatch against {label}"
                 )
 
-        if canonicalize(mcp_obj.get("sealed_sandbox_profile_locator")) != canonicalize(
+        if canonicalize(mcp_obj["sealed_sandbox_profile_locator"]) != canonicalize(
             payload["sealed_sandbox_profile_locator"]
         ):
             raise ValueError(
                 "gov1_convergence_record: mcp_rejection_matrix_report sealed_sandbox_profile_locator mismatch"
             )
 
+        if prov_obj["repository"] != bound_obj["repository"]:
+            raise ValueError(
+                "gov1_convergence_record: repository mismatch between wheel_build_provenance and wheel_boundary_report"
+            )
+
         for label, constituent in (
+            ("wheel_build_provenance", prov_obj),
             ("wheel_boundary_report", bound_obj),
             ("mcp_rejection_matrix_report", mcp_obj),
         ):
-            if constituent.get("build_run_id") != build_run_id:
+            if constituent["build_run_id"] != build_run_id:
                 raise ValueError(
                     f"gov1_convergence_record: build_run_id mismatch against {label}"
                 )
-            if constituent.get("source_commit_sha") != source_commit_sha:
+            if constituent["source_commit_sha"] != source_commit_sha:
                 raise ValueError(
                     f"gov1_convergence_record: source_commit_sha mismatch against {label}"
                 )
-            if constituent.get("wheel_digest") != wheel_digest:
+            if constituent["wheel_digest"] != wheel_digest:
                 raise ValueError(
                     f"gov1_convergence_record: wheel_digest mismatch against {label}"
                 )
-            if constituent.get("build_backend_digest") != build_backend_digest:
+            if constituent["build_backend_digest"] != build_backend_digest:
                 raise ValueError(
                     f"gov1_convergence_record: build_backend_digest mismatch against {label}"
                 )
-            if constituent.get("schema_bundle_digest") != schema_bundle_digest:
+            if constituent["schema_bundle_digest"] != schema_bundle_digest:
                 raise ValueError(
                     f"gov1_convergence_record: schema_bundle_digest mismatch against {label}"
                 )
 
-        # Anti-backdating: converged_at_utc cannot precede Etapa 7 constituent issuance/execution
+        # Sandbox validity window vs MCP execution + provenance/boundary/convergence anti-backdating
+        validity(sbx_obj["validity"], mcp_obj["executed_at_utc"])
+        if timestamp(bound_obj["verified_at_utc"]) < timestamp(
+            prov_obj["built_at_utc"]
+        ):
+            raise ValueError(
+                "gov1_convergence_record: wheel_boundary_report.verified_at_utc precedes wheel_build_provenance.built_at_utc"
+            )
+
         for ts_label, ts_val in (
-            ("sealed_sandbox_profile.issued_at_utc", sbx_obj.get("issued_at_utc")),
-            (
-                "wheel_boundary_report.verified_at_utc",
-                bound_obj.get("verified_at_utc"),
-            ),
+            ("sealed_sandbox_profile.issued_at_utc", sbx_obj["issued_at_utc"]),
+            ("wheel_build_provenance.built_at_utc", prov_obj["built_at_utc"]),
+            ("wheel_boundary_report.verified_at_utc", bound_obj["verified_at_utc"]),
             (
                 "mcp_rejection_matrix_report.executed_at_utc",
-                mcp_obj.get("executed_at_utc"),
+                mcp_obj["executed_at_utc"],
             ),
         ):
             if converged_dt < timestamp(ts_val):
@@ -507,6 +769,11 @@ def _enforce_pr3_verifier_gate(
         raise ValueError(
             "gov1_convergence_record/v1: fail-closed; pr3_verifier does not satisfy "
             "Pr3SevenAConstituentVerifier"
+        )
+    if not isinstance(store, Store):
+        raise ValueError(
+            "gov1_convergence_record/v1: fail-closed; Store is required to resolve and cross-bind "
+            "Etapa 7 constituents when pr3_verifier is provided"
         )
     pr3_outcome = pr3_verifier.verify_7a_constituents(
         negative_security_test_report_locator=copy.deepcopy(
@@ -625,6 +892,8 @@ def verify_gov1_convergence_record(
     seccomp_profile: dict[str, Any] | None = None,
     wheel_path: Path | None = None,
     repo_root: Path | None = None,
+    backend_wheel_dir: Path | None = None,
+    site_packages_dir: Path | None = None,
     pr3_verifier: Pr3SevenAConstituentVerifier | None = None,
 ) -> dict[str, Any]:
     """Verify `smart_ads/gov1_convergence_record/v1` and fail closed in Etapa 8 (`pr3_verifier=None`)."""
@@ -677,6 +946,8 @@ def verify_gov1_convergence_record(
                     prov_obj,
                     repo_root=_require_path(repo_root, "repo_root"),
                     wheel_path=whl_file,
+                    backend_wheel_dir=backend_wheel_dir,
+                    site_packages_dir=site_packages_dir,
                 )
 
     _enforce_pr3_verifier_gate(
@@ -977,10 +1248,11 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
                 isinstance(seccomp_profile, dict),
                 "seccomp_profile is required for sealed_sandbox_profile/v1 verification",
             )
+            _validate_sandbox_envelope_structure(envelope)
             signer, action = self._verify_signer_authority(
                 envelope,
                 schema=schema,
-                event_time_utc=envelope.get("issued_at_utc"),
+                event_time_utc=envelope["issued_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
@@ -996,10 +1268,11 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         elif schema == WHEEL_BUILD_PROVENANCE_SCHEMA:
             whl_file = _require_path(wheel_path, "wheel_path")
             repo_dir = _require_path(repo_root, "repo_root")
+            _validate_provenance_envelope_structure(envelope)
             signer, action = self._verify_signer_authority(
                 envelope,
                 schema=schema,
-                event_time_utc=envelope.get("built_at_utc"),
+                event_time_utc=envelope["built_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
@@ -1015,26 +1288,34 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
 
         elif schema == WHEEL_BOUNDARY_REPORT_SCHEMA:
             whl_file = _require_path(wheel_path, "wheel_path")
+            _validate_boundary_envelope_structure(envelope)
             signer, action = self._verify_signer_authority(
                 envelope,
                 schema=schema,
-                event_time_utc=envelope.get("verified_at_utc"),
+                event_time_utc=envelope["verified_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
             )
-            prov_env = load_object(
-                self.store,
-                envelope["wheel_build_provenance_locator"],
-                WHEEL_BUILD_PROVENANCE_SCHEMA,
+            prov_env = _validate_provenance_envelope_structure(
+                load_object(
+                    self.store,
+                    envelope["wheel_build_provenance_locator"],
+                    WHEEL_BUILD_PROVENANCE_SCHEMA,
+                )
             )
             prov_signer, prov_action = self._verify_signer_authority(
                 prov_env,
                 schema=WHEEL_BUILD_PROVENANCE_SCHEMA,
-                event_time_utc=prov_env.get("built_at_utc"),
+                event_time_utc=prov_env["built_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
+            )
+            require(
+                timestamp(envelope["verified_at_utc"])
+                >= timestamp(prov_env["built_at_utc"]),
+                "wheel_boundary_report verified_at_utc precedes provenance built_at_utc",
             )
             require(
                 canonicalize(envelope["migration_run_context_locator"])
@@ -1050,7 +1331,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
                 "schema_bundle_digest",
             ):
                 require(
-                    envelope.get(eq_field) == prov_env.get(eq_field),
+                    envelope[eq_field] == prov_env[eq_field],
                     f"wheel_boundary_report {eq_field} mismatch against provenance",
                 )
             if repo_root is not None:
@@ -1071,23 +1352,26 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
 
         elif schema == MCP_REJECTION_REPORT_SCHEMA:
             whl_file = _require_path(wheel_path, "wheel_path")
+            _validate_mcp_envelope_structure(envelope)
             signer, action = self._verify_signer_authority(
                 envelope,
                 schema=schema,
-                event_time_utc=envelope.get("executed_at_utc"),
+                event_time_utc=envelope["executed_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
             )
-            sbx_env = load_object(
-                self.store,
-                envelope["sealed_sandbox_profile_locator"],
-                SANDBOX_PROFILE_SCHEMA,
+            sbx_env = _validate_sandbox_envelope_structure(
+                load_object(
+                    self.store,
+                    envelope["sealed_sandbox_profile_locator"],
+                    SANDBOX_PROFILE_SCHEMA,
+                )
             )
             sbx_signer, sbx_action = self._verify_signer_authority(
                 sbx_env,
                 schema=SANDBOX_PROFILE_SCHEMA,
-                event_time_utc=sbx_env.get("issued_at_utc"),
+                event_time_utc=sbx_env["issued_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
@@ -1098,23 +1382,12 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
                 "mcp_rejection_matrix_report migration_run_context_locator mismatch against sandbox",
             )
             validity(sbx_env["validity"], envelope["executed_at_utc"])
+            validity(sbx_env["validity"], clock.lower_utc)
+            validity(sbx_env["validity"], clock.upper_utc)
             if seccomp_profile is not None:
                 verify_sealed_sandbox_profile(
                     sbx_env, seccomp_profile=seccomp_profile
                 )
-            else:
-                spec_18 = {
-                    k: v
-                    for k, v in sbx_env.items()
-                    if k
-                    not in {
-                        "integrity",
-                        "migration_run_context_locator",
-                        "issued_at_utc",
-                        "validity",
-                    }
-                }
-                verify_sandbox_profile_spec(spec_18)
             material = verify_mcp_rejection_matrix_report(
                 envelope, wheel_path=whl_file
             )
@@ -1124,25 +1397,133 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
                     (sbx_signer, SANDBOX_PROFILE_SCHEMA, sbx_action),
                 ]
             )
+            active_sbx_validities.append(sbx_env["validity"])
 
         else:
+            exact_fields(
+                envelope,
+                _GOV1_CONVERGENCE_ENVELOPE_FIELDS,
+                "gov1_convergence_record_envelope",
+            )
+            _require_exact_str(
+                envelope["$schema"],
+                GOV1_CONVERGENCE_SCHEMA,
+                "gov1_convergence_record.$schema",
+            )
+            _verify_envelope_integrity(envelope, label="gov1_convergence_record")
             signer, action = self._verify_signer_authority(
                 envelope,
                 schema=GOV1_CONVERGENCE_SCHEMA,
-                event_time_utc=envelope.get("converged_at_utc"),
+                event_time_utc=envelope["converged_at_utc"],
                 config=config,
                 reg=reg,
                 clock=clock,
             )
+            conv_payload = {
+                k: copy.deepcopy(v)
+                for k, v in envelope.items()
+                if k not in {"$schema", "integrity"}
+            }
+            _validate_gov1_convergence_structural_fields(
+                conv_payload, store=self.store
+            )
+            if self.pr3_verifier is None:
+                raise ValueError(
+                    "gov1_convergence_record/v1: fail-closed in Etapa 8; "
+                    "Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent"
+                )
+            require(
+                isinstance(seccomp_profile, dict),
+                "seccomp_profile is required for gov1_convergence_record/v1 verification",
+            )
+            whl_file = _require_path(wheel_path, "wheel_path")
+            repo_dir = _require_path(repo_root, "repo_root")
+
+            sbx_env = _validate_sandbox_envelope_structure(
+                load_object(
+                    self.store,
+                    envelope["sealed_sandbox_profile_locator"],
+                    SANDBOX_PROFILE_SCHEMA,
+                )
+            )
+            bound_env = _validate_boundary_envelope_structure(
+                load_object(
+                    self.store,
+                    envelope["wheel_boundary_report_locator"],
+                    WHEEL_BOUNDARY_REPORT_SCHEMA,
+                )
+            )
+            mcp_env = _validate_mcp_envelope_structure(
+                load_object(
+                    self.store,
+                    envelope["mcp_rejection_matrix_report_locator"],
+                    MCP_REJECTION_REPORT_SCHEMA,
+                )
+            )
+            prov_env = _validate_provenance_envelope_structure(
+                load_object(
+                    self.store,
+                    bound_env["wheel_build_provenance_locator"],
+                    WHEEL_BUILD_PROVENANCE_SCHEMA,
+                )
+            )
+
+            sbx_signer, sbx_action = self._verify_signer_authority(
+                sbx_env,
+                schema=SANDBOX_PROFILE_SCHEMA,
+                event_time_utc=sbx_env["issued_at_utc"],
+                config=config,
+                reg=reg,
+                clock=clock,
+            )
+            validity(sbx_env["validity"], clock.lower_utc)
+            validity(sbx_env["validity"], clock.upper_utc)
+
+            prov_signer, prov_action = self._verify_signer_authority(
+                prov_env,
+                schema=WHEEL_BUILD_PROVENANCE_SCHEMA,
+                event_time_utc=prov_env["built_at_utc"],
+                config=config,
+                reg=reg,
+                clock=clock,
+            )
+            bound_signer, bound_action = self._verify_signer_authority(
+                bound_env,
+                schema=WHEEL_BOUNDARY_REPORT_SCHEMA,
+                event_time_utc=bound_env["verified_at_utc"],
+                config=config,
+                reg=reg,
+                clock=clock,
+            )
+            mcp_signer, mcp_action = self._verify_signer_authority(
+                mcp_env,
+                schema=MCP_REJECTION_REPORT_SCHEMA,
+                event_time_utc=mcp_env["executed_at_utc"],
+                config=config,
+                reg=reg,
+                clock=clock,
+            )
+
             material = verify_gov1_convergence_record(
                 envelope,
                 store=self.store,
-                seccomp_profile=seccomp_profile,
-                wheel_path=wheel_path,
-                repo_root=repo_root,
+                seccomp_profile=seccomp_profile,  # type: ignore[arg-type]
+                wheel_path=whl_file,
+                repo_root=repo_dir,
+                backend_wheel_dir=backend_wheel_dir,
+                site_packages_dir=site_packages_dir,
                 pr3_verifier=self.pr3_verifier,
             )
-            signer_reqs.append((signer, GOV1_CONVERGENCE_SCHEMA, action))
+            signer_reqs.extend(
+                [
+                    (signer, GOV1_CONVERGENCE_SCHEMA, action),
+                    (sbx_signer, SANDBOX_PROFILE_SCHEMA, sbx_action),
+                    (prov_signer, WHEEL_BUILD_PROVENANCE_SCHEMA, prov_action),
+                    (bound_signer, WHEEL_BOUNDARY_REPORT_SCHEMA, bound_action),
+                    (mcp_signer, MCP_REJECTION_REPORT_SCHEMA, mcp_action),
+                ]
+            )
+            active_sbx_validities.append(sbx_env["validity"])
 
         new_floor = self._commit_cas_and_observe_final(
             clock=clock,
@@ -1215,27 +1596,33 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             anchors,
         ) = self._bootstrap_d4_authority(inv_loc)
 
-        sbx_env = load_object(
-            self.store, sandbox_profile_locator, SANDBOX_PROFILE_SCHEMA
+        sbx_env = _validate_sandbox_envelope_structure(
+            load_object(self.store, sandbox_profile_locator, SANDBOX_PROFILE_SCHEMA)
         )
-        prov_env = load_object(
-            self.store, wheel_provenance_locator, WHEEL_BUILD_PROVENANCE_SCHEMA
+        prov_env = _validate_provenance_envelope_structure(
+            load_object(
+                self.store, wheel_provenance_locator, WHEEL_BUILD_PROVENANCE_SCHEMA
+            )
         )
-        bound_env = load_object(
-            self.store,
-            wheel_boundary_report_locator,
-            WHEEL_BOUNDARY_REPORT_SCHEMA,
+        bound_env = _validate_boundary_envelope_structure(
+            load_object(
+                self.store,
+                wheel_boundary_report_locator,
+                WHEEL_BOUNDARY_REPORT_SCHEMA,
+            )
         )
-        mcp_env = load_object(
-            self.store,
-            mcp_rejection_report_locator,
-            MCP_REJECTION_REPORT_SCHEMA,
+        mcp_env = _validate_mcp_envelope_structure(
+            load_object(
+                self.store,
+                mcp_rejection_report_locator,
+                MCP_REJECTION_REPORT_SCHEMA,
+            )
         )
 
         sbx_signer, sbx_action = self._verify_signer_authority(
             sbx_env,
             schema=SANDBOX_PROFILE_SCHEMA,
-            event_time_utc=sbx_env.get("issued_at_utc"),
+            event_time_utc=sbx_env["issued_at_utc"],
             config=config,
             reg=reg,
             clock=clock,
@@ -1246,7 +1633,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         prov_signer, prov_action = self._verify_signer_authority(
             prov_env,
             schema=WHEEL_BUILD_PROVENANCE_SCHEMA,
-            event_time_utc=prov_env.get("built_at_utc"),
+            event_time_utc=prov_env["built_at_utc"],
             config=config,
             reg=reg,
             clock=clock,
@@ -1254,7 +1641,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         bound_signer, bound_action = self._verify_signer_authority(
             bound_env,
             schema=WHEEL_BOUNDARY_REPORT_SCHEMA,
-            event_time_utc=bound_env.get("verified_at_utc"),
+            event_time_utc=bound_env["verified_at_utc"],
             config=config,
             reg=reg,
             clock=clock,
@@ -1262,19 +1649,19 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         mcp_signer, mcp_action = self._verify_signer_authority(
             mcp_env,
             schema=MCP_REJECTION_REPORT_SCHEMA,
-            event_time_utc=mcp_env.get("executed_at_utc"),
+            event_time_utc=mcp_env["executed_at_utc"],
             config=config,
             reg=reg,
             clock=clock,
         )
 
         require(
-            canonicalize(bound_env.get("wheel_build_provenance_locator"))
+            canonicalize(bound_env["wheel_build_provenance_locator"])
             == canonicalize(wheel_provenance_locator),
             "wheel_boundary_report.wheel_build_provenance_locator mismatch against wheel_provenance",
         )
         require(
-            canonicalize(mcp_env.get("sealed_sandbox_profile_locator"))
+            canonicalize(mcp_env["sealed_sandbox_profile_locator"])
             == canonicalize(sandbox_profile_locator),
             "mcp_rejection_matrix_report.sealed_sandbox_profile_locator mismatch against sandbox_profile",
         )

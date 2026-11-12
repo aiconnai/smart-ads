@@ -63,6 +63,8 @@ def _write_json_file(
 ) -> dict[str, Any]:
     canonical = canonicalize(value)
     out_path = Path(path)
+    if out_path.is_symlink():
+        raise ValueError(f"cli: symlink output path forbidden: {path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not allow_overwrite and out_path.exists():
         raise ValueError("decomposition: output exists; choose a fresh output path")
@@ -624,6 +626,15 @@ def _reject_envelope_flags_in_candidate_mode(
         )
 
 
+def _guard_gov1_output_path(path: str, *, allow_overwrite: bool) -> Path:
+    out_path = Path(path)
+    if out_path.is_symlink():
+        raise ValueError(f"gov1: symlink output path forbidden: {path}")
+    if not allow_overwrite and out_path.exists():
+        raise ValueError("gov1: output exists; choose a fresh output path")
+    return out_path
+
+
 def run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     try:
         return _run_gov1(args)
@@ -638,6 +649,7 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "build-sealed-sandbox-profile":
         mode = args.mode
+        _guard_gov1_output_path(args.out, allow_overwrite=(mode == "envelope"))
         params = _read_json_file(args.params)
         req = {
             "migration_run_context_locator",
@@ -718,10 +730,17 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             )
 
         allow_overwrite = mode == "envelope"
+        _guard_gov1_output_path(args.out, allow_overwrite=allow_overwrite)
+        _guard_gov1_output_path(wheel_out_str, allow_overwrite=allow_overwrite)
+        if (
+            Path(os.path.abspath(args.out)) == Path(os.path.abspath(wheel_out_str))
+            or Path(args.out).resolve() == Path(wheel_out_str).resolve()
+        ):
+            raise ValueError(
+                "build-wheel-provenance: --out and --wheel-out must refer to distinct paths"
+            )
         if not allow_overwrite:
             _reject_envelope_flags_in_candidate_mode(args, cmd)
-            if Path(args.out).exists() or Path(wheel_out_str).exists():
-                raise ValueError("gov1: output exists; choose a fresh output path")
         else:
             signer_key_id, registry_locator = _resolve_gov1_envelope_signing_meta(
                 args, params, cmd
@@ -805,6 +824,7 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "build-wheel-boundary-report":
         mode = args.mode
+        _guard_gov1_output_path(args.out, allow_overwrite=(mode == "envelope"))
         params = _read_json_file(args.params)
         req = {
             "migration_run_context_locator",
@@ -823,8 +843,6 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 raise ValueError(
                     "build-wheel-boundary-report: --provenance-locator requires --mode envelope"
                 )
-            if Path(args.out).exists():
-                raise ValueError("gov1: output exists; choose a fresh output path")
             cli_ref = (
                 gov1_sandbox.build_local_candidate_ref(_read_json_file(args.provenance))
                 if args.provenance is not None
@@ -917,6 +935,7 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "build-mcp-rejection-report":
         mode = args.mode
+        _guard_gov1_output_path(args.out, allow_overwrite=(mode == "envelope"))
         params = _read_json_file(args.params)
         req = {
             "migration_run_context_locator",
@@ -935,8 +954,6 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 raise ValueError(
                     "build-mcp-rejection-report: --sandbox-profile-locator requires --mode envelope"
                 )
-            if Path(args.out).exists():
-                raise ValueError("gov1: output exists; choose a fresh output path")
             cli_ref = (
                 gov1_sandbox.build_local_candidate_ref(
                     _read_json_file(args.sandbox_profile)
@@ -1027,8 +1044,8 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         }, 0
 
     if cmd == "verify-pr1-gov1-convergence":
-        if args.out is not None and Path(args.out).exists():
-            raise ValueError("gov1: output exists; choose a fresh output path")
+        if args.out is not None:
+            _guard_gov1_output_path(args.out, allow_overwrite=False)
         seccomp = _read_json_file(args.seccomp_profile)
         sandbox_profile = _read_json_file(args.sandbox_profile)
         wheel_provenance = _read_json_file(args.wheel_provenance)

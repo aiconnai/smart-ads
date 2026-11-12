@@ -1173,3 +1173,120 @@ def test_gov1_cli_rejects_extra_fields_missing_files_and_envelope_mode_mixing(
     assert "FileNotFoundError" in err_missing
 
 
+def test_gov1_cli_rejects_colliding_wheel_and_json_out_and_symlink_outputs(
+    tmp_path: Path, anchor_key: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tools.governance import cli, gov1_sandbox
+    from tools.governance.jcs import canonicalize
+
+    run_ctx_loc = _locator_for("smart_ads/migration_run_context/v1", b'{"run":"cli-polish"}')
+    reg_loc = _locator_for("smart_ads/key_authorization_registry/v1", b'{"reg":"cli-polish"}')
+    reg_loc_path = tmp_path / "reg_loc.json"
+    reg_loc_path.write_bytes(canonicalize(reg_loc))
+    anchor_kid = _key_id(_raw32_b64(anchor_key))
+
+    prov_params = tmp_path / "prov_params.json"
+    prov_params.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "build_run_id": "cli-collision-test",
+                "built_at_utc": "2026-11-12T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    same_path = tmp_path / "colliding_output.json"
+    rc_same_cand = cli.main(
+        [
+            "build-wheel-provenance",
+            "--repo",
+            str(REPO_ROOT),
+            "--wheel-out",
+            str(same_path),
+            "--params",
+            str(prov_params),
+            "--out",
+            str(tmp_path / "." / "colliding_output.json"),
+        ]
+    )
+    err_same_cand = capsys.readouterr().err
+    assert rc_same_cand == 1
+    assert "distinct" in err_same_cand
+    assert not same_path.exists()
+
+    rc_same_env = cli.main(
+        [
+            "build-wheel-provenance",
+            "--mode",
+            "envelope",
+            "--signer-key-id",
+            anchor_kid,
+            "--registry-locator",
+            str(reg_loc_path),
+            "--repo",
+            str(REPO_ROOT),
+            "--wheel-out",
+            str(same_path),
+            "--params",
+            str(prov_params),
+            "--out",
+            str(same_path),
+        ]
+    )
+    err_same_env = capsys.readouterr().err
+    assert rc_same_env == 1
+    assert "distinct" in err_same_env
+    assert not same_path.exists()
+
+    # Dangling and existing symlinks must fail fast with ValueError in _write_json_file and CLI --out
+    dangling_link = tmp_path / "dangling_out.json"
+    dangling_link.symlink_to(tmp_path / "missing_target.json")
+    with pytest.raises(ValueError, match="symlink"):
+        cli._write_json_file(str(dangling_link), {"ok": True}, allow_overwrite=True)
+    with pytest.raises(ValueError, match="symlink"):
+        cli._write_json_file(str(dangling_link), {"ok": True}, allow_overwrite=False)
+
+    existing_target = tmp_path / "real_target.json"
+    existing_target.write_text('{"keep": true}', encoding="utf-8")
+    existing_link = tmp_path / "existing_link.json"
+    existing_link.symlink_to(existing_target)
+    with pytest.raises(ValueError, match="symlink"):
+        cli._write_json_file(str(existing_link), {"overwrite": True}, allow_overwrite=True)
+    assert existing_target.read_text(encoding="utf-8") == '{"keep": true}'
+
+    seccomp_path = tmp_path / "seccomp.json"
+    seccomp_path.write_bytes(
+        canonicalize(gov1_sandbox.build_default_7a_seccomp_profile())
+    )
+    sbx_params = tmp_path / "sbx_params.json"
+    sbx_params.write_text(
+        json.dumps(
+            {
+                "migration_run_context_locator": run_ctx_loc,
+                "oci_image_digest": "sha256:" + ("1" * 64),
+                "runner_binary_digest": "sha256:" + ("2" * 64),
+                "issued_at_utc": "2026-11-12T12:00:00Z",
+                "valid_from_utc": "2026-11-01T00:00:00Z",
+                "valid_until_utc": "2027-11-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    rc_dangling_cli = cli.main(
+        [
+            "build-sealed-sandbox-profile",
+            "--params",
+            str(sbx_params),
+            "--seccomp-profile",
+            str(seccomp_path),
+            "--out",
+            str(dangling_link),
+        ]
+    )
+    err_dangling_cli = capsys.readouterr().err
+    assert rc_dangling_cli == 1
+    assert "symlink" in err_dangling_cli
+
+
+

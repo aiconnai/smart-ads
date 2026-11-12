@@ -815,6 +815,56 @@ def test_verify_pr1_gov1_convergence_rejects_mode_mixing_and_interchanged_refs(
             repo_root=REPO_ROOT,
         )
 
+    # Symmetric check: P1 envelopes trying to use gov1_local_candidate_ref instead of artifact_locator/v1 fail closed
+    verifier = world.make_verifier()
+    bad_bound_env = copy.deepcopy(world.boundary_env)
+    del bad_bound_env["wheel_build_provenance_locator"]
+    bad_bound_env["wheel_build_provenance_candidate_ref"] = (
+        baseline_artifacts["prov_cand_ref"]
+    )
+    bad_bound_env = p1.sign_envelope(
+        bad_bound_env,
+        world.profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_boundary_verifier"][0],
+    )
+    world.store.put(bad_bound_env)
+    with pytest.raises(ValueError, match="wheel_build_provenance_locator"):
+        gov1_convergence.verify_pr1_gov1_convergence(
+            sandbox_profile=world.sandbox_env,
+            wheel_provenance=world.prov_env,
+            wheel_boundary_report=bad_bound_env,
+            mcp_rejection_report=world.mcp_env,
+            seccomp_profile=baseline_artifacts["seccomp_profile"],
+            wheel_path=baseline_artifacts["wheel_path"],
+            repo_root=REPO_ROOT,
+            admission_verifier=verifier,
+            store=world.store,
+        )
+
+    bad_mcp_env = copy.deepcopy(world.mcp_env)
+    del bad_mcp_env["sealed_sandbox_profile_locator"]
+    bad_mcp_env["sealed_sandbox_profile_candidate_ref"] = (
+        baseline_artifacts["sandbox_cand_ref"]
+    )
+    bad_mcp_env = p1.sign_envelope(
+        bad_mcp_env,
+        world.profiles[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_verifier"][0],
+    )
+    world.store.put(bad_mcp_env)
+    with pytest.raises(ValueError, match="sealed_sandbox_profile_locator"):
+        gov1_convergence.verify_pr1_gov1_convergence(
+            sandbox_profile=world.sandbox_env,
+            wheel_provenance=world.prov_env,
+            wheel_boundary_report=world.boundary_env,
+            mcp_rejection_report=bad_mcp_env,
+            seccomp_profile=baseline_artifacts["seccomp_profile"],
+            wheel_path=baseline_artifacts["wheel_path"],
+            repo_root=REPO_ROOT,
+            admission_verifier=verifier,
+            store=world.store,
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. Exact Cross-Binding Matrix (`F-05`)
@@ -1333,9 +1383,7 @@ def test_gov1_admission_verifier_rejects_d4_counterexamples_fail_closed(
         world.runtime.after_cas_clock = ClockInterval(
             "2026-09-07T10:00:19Z", "2026-09-07T10:00:19Z"
         )
-    elif counterexample == "sandbox_expired_at_final_observation" or (
-        counterexample == "sandbox_expired_at_final_clock"
-    ):
+    elif counterexample == "sandbox_expired_at_final_clock":
         world = Gov1D4World(
             tmp_path / "exp_after_cas",
             synthetic_gov1_keys,
@@ -1374,3 +1422,379 @@ def test_gov1_admission_verifier_rejects_d4_counterexamples_fail_closed(
         assert world.runtime.cas_calls == 0
     elif counterexample == "cas_conflict":
         assert world.runtime.floor.epoch == 0
+
+
+def test_gov1_admission_verifier_rejects_malformed_signed_envelopes_with_value_error_not_key_error(
+    tmp_path: Path,
+    baseline_artifacts: dict[str, Any],
+    synthetic_gov1_keys: dict[str, tuple[Path, bytes, str]],
+) -> None:
+    world = Gov1D4World(tmp_path, synthetic_gov1_keys, baseline_artifacts)
+    verifier = world.make_verifier()
+
+    # 1. Signed sandbox envelope missing "validity" -> must raise ValueError, never KeyError
+    bad_sbx = copy.deepcopy(world.sandbox_env)
+    del bad_sbx["validity"]
+    bad_sbx = p1.sign_envelope(
+        bad_sbx,
+        world.profiles[gov1_sandbox.SANDBOX_PROFILE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_owner"][0],
+    )
+    bad_sbx_loc = world.store.put(bad_sbx)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            bad_sbx_loc,
+            seccomp_profile=baseline_artifacts["seccomp_profile"],
+        )
+    with pytest.raises(ValueError):
+        verifier.admit_etapa7_bundle(
+            sandbox_profile_locator=bad_sbx_loc,
+            wheel_provenance_locator=world.prov_loc,
+            wheel_boundary_report_locator=world.boundary_loc,
+            mcp_rejection_report_locator=world.mcp_loc,
+            seccomp_profile=baseline_artifacts["seccomp_profile"],
+            wheel_path=baseline_artifacts["wheel_path"],
+            repo_root=REPO_ROOT,
+        )
+
+    # 2. Signed wheel_boundary_report missing "wheel_build_provenance_locator" -> ValueError, never KeyError
+    bad_bound = copy.deepcopy(world.boundary_env)
+    del bad_bound["wheel_build_provenance_locator"]
+    bad_bound = p1.sign_envelope(
+        bad_bound,
+        world.profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_boundary_verifier"][0],
+    )
+    bad_bound_loc = world.store.put(bad_bound)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            bad_bound_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+        )
+
+    # 3. Signed mcp_rejection_matrix_report missing "sealed_sandbox_profile_locator" -> ValueError, never KeyError
+    bad_mcp = copy.deepcopy(world.mcp_env)
+    del bad_mcp["sealed_sandbox_profile_locator"]
+    bad_mcp = p1.sign_envelope(
+        bad_mcp,
+        world.profiles[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_verifier"][0],
+    )
+    bad_mcp_loc = world.store.put(bad_mcp)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            bad_mcp_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+        )
+
+    # 4. Boundary report referencing a signed provenance envelope missing "migration_run_context_locator"
+    # or having built_at_utc > verified_at_utc -> ValueError, never KeyError
+    bad_prov_missing_ctx = copy.deepcopy(world.prov_env)
+    del bad_prov_missing_ctx["migration_run_context_locator"]
+    bad_prov_missing_ctx = p1.sign_envelope(
+        bad_prov_missing_ctx,
+        world.profiles[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_provenance_verifier"][0],
+    )
+    bad_prov_loc = world.store.put(bad_prov_missing_ctx)
+    bound_ref_bad_prov = copy.deepcopy(world.boundary_env)
+    bound_ref_bad_prov["wheel_build_provenance_locator"] = bad_prov_loc
+    bound_ref_bad_prov = p1.sign_envelope(
+        bound_ref_bad_prov,
+        world.profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_boundary_verifier"][0],
+    )
+    bound_ref_bad_prov_loc = world.store.put(bound_ref_bad_prov)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            bound_ref_bad_prov_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+        )
+
+    prov_after_verify = copy.deepcopy(world.prov_env)
+    prov_after_verify["built_at_utc"] = "2026-09-07T10:00:12Z"  # > VERIFIED_AT_UTC (10:00:10Z)
+    prov_after_verify = p1.sign_envelope(
+        prov_after_verify,
+        world.profiles[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_provenance_verifier"][0],
+    )
+    prov_after_verify_loc = world.store.put(prov_after_verify)
+    bound_backdated = copy.deepcopy(world.boundary_env)
+    bound_backdated["wheel_build_provenance_locator"] = prov_after_verify_loc
+    bound_backdated = p1.sign_envelope(
+        bound_backdated,
+        world.profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_boundary_verifier"][0],
+    )
+    bound_backdated_loc = world.store.put(bound_backdated)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            bound_backdated_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+        )
+
+    # 5. MCP report referencing a signed sandbox envelope whose issued_at_utc >= validity.until
+    bad_sbx_issuance = copy.deepcopy(world.sandbox_env)
+    bad_sbx_issuance["validity"] = {
+        "from": "2026-01-01T00:00:00Z",
+        "until": "2026-09-07T09:59:00Z",
+    }
+    bad_sbx_issuance = p1.sign_envelope(
+        bad_sbx_issuance,
+        world.profiles[gov1_sandbox.SANDBOX_PROFILE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_owner"][0],
+    )
+    bad_sbx_issuance_loc = world.store.put(bad_sbx_issuance)
+    mcp_ref_bad_sbx = copy.deepcopy(world.mcp_env)
+    mcp_ref_bad_sbx["sealed_sandbox_profile_locator"] = bad_sbx_issuance_loc
+    mcp_ref_bad_sbx = p1.sign_envelope(
+        mcp_ref_bad_sbx,
+        world.profiles[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_verifier"][0],
+    )
+    mcp_ref_bad_sbx_loc = world.store.put(mcp_ref_bad_sbx)
+    with pytest.raises(ValueError):
+        verifier.verify_artifact(
+            mcp_ref_bad_sbx_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+        )
+
+    # 6. Missing required material inputs in Gov1AdmissionVerifier.verify_artifact fail closed
+    with pytest.raises(ValueError, match="seccomp_profile"):
+        verifier.verify_artifact(world.sandbox_loc, seccomp_profile=None)
+    with pytest.raises(ValueError, match="wheel_path"):
+        verifier.verify_artifact(
+            world.prov_loc, wheel_path=None, repo_root=REPO_ROOT
+        )
+    with pytest.raises(ValueError, match="repo_root"):
+        verifier.verify_artifact(
+            world.prov_loc,
+            wheel_path=baseline_artifacts["wheel_path"],
+            repo_root=None,
+        )
+    with pytest.raises(ValueError, match="wheel_path"):
+        verifier.verify_artifact(world.boundary_loc, wheel_path=None)
+    with pytest.raises(ValueError, match="wheel_path"):
+        verifier.verify_artifact(world.mcp_loc, wheel_path=None)
+
+    assert world.runtime.cas_calls == 0
+
+
+def test_etapa11_certified_pr3_verifier_enforces_store_constituent_linkage_and_d4_authority(
+    tmp_path: Path,
+    baseline_artifacts: dict[str, Any],
+    synthetic_gov1_keys: dict[str, tuple[Path, bytes, str]],
+) -> None:
+    world = Gov1D4World(tmp_path, synthetic_gov1_keys, baseline_artifacts)
+    snapshot: gov1_wheel.GitBuildSnapshot = baseline_artifacts["snapshot"]
+    neg_loc = make_locator(
+        gov1_convergence.NEGATIVE_SECURITY_SCHEMA, b'{"neg":"pr3-certified"}'
+    )
+    cert7a_loc = make_locator(
+        gov1_convergence.CERTIFICATION_7A_SCHEMA, b'{"cert":"pr3-certified"}'
+    )
+
+    class _CertifiedPr3Verifier:
+        def verify_7a_constituents(self, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "certified": True,
+                "negative_cases": list(
+                    gov1_convergence.MANDATORY_7A_NEGATIVE_SECURITY_CASES
+                ),
+                "negative_executed_at_utc": EXECUTED_AT_UTC,
+                "certified_at_utc": EXECUTED_AT_UTC,
+            }
+
+    pr3_ok = _CertifiedPr3Verifier()
+    assert isinstance(pr3_ok, gov1_convergence.Pr3SevenAConstituentVerifier)
+
+    base_kwargs: dict[str, Any] = {
+        "migration_run_context_locator": RUN_CONTEXT_LOCATOR,
+        "wheel_boundary_report_locator": world.boundary_loc,
+        "sealed_sandbox_profile_locator": world.sandbox_loc,
+        "negative_security_test_report_locator": neg_loc,
+        "mcp_rejection_matrix_report_locator": world.mcp_loc,
+        "certification_7a_record_locator": cert7a_loc,
+        "build_run_id": BUILD_RUN_ID,
+        "converged_at_utc": CONVERGED_AT_UTC,
+        "source_commit_sha": snapshot.commit_sha,
+        "wheel_digest": digest(baseline_artifacts["wheel_bytes"]),
+        "build_backend_digest": snapshot.build_backend_digest,
+        "schema_bundle_digest": baseline_artifacts["inspection"]["schema_bundle_digest"],
+        "registry_locator": world.registry_loc,
+        "signer_key_id": synthetic_gov1_keys["gov1_convergence_verifier"][2],
+    }
+
+    # 1. Calling build or verify with pr3_verifier!=None but store=None MUST fail closed
+    with pytest.raises(ValueError, match="Store|store"):
+        gov1_convergence.build_gov1_convergence_record_envelope(
+            **base_kwargs,
+            store=None,
+            pr3_verifier=pr3_ok,
+        )
+
+    conv_unsigned = gov1_convergence.build_gov1_convergence_record_envelope(
+        **base_kwargs,
+        store=world.store,
+        pr3_verifier=pr3_ok,
+    )
+    conv_signed = p1.sign_envelope(
+        conv_unsigned,
+        world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["gov1_convergence_verifier"][0],
+    )
+    conv_loc = world.store.put(conv_signed)
+
+    with pytest.raises(ValueError, match="Store|store"):
+        gov1_convergence.verify_gov1_convergence_record(
+            conv_signed,
+            store=None,
+            pr3_verifier=pr3_ok,
+        )
+
+    # 2. Transitive provenance mismatch (boundary -> provenance with mismatched source_commit_sha)
+    bad_prov = copy.deepcopy(world.prov_env)
+    bad_prov["source_commit_sha"] = "f" * 40
+    bad_prov = p1.sign_envelope(
+        bad_prov,
+        world.profiles[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_provenance_verifier"][0],
+    )
+    bad_prov_loc = world.store.put(bad_prov)
+    bound_with_bad_prov = copy.deepcopy(world.boundary_env)
+    bound_with_bad_prov["wheel_build_provenance_locator"] = bad_prov_loc
+    bound_with_bad_prov = p1.sign_envelope(
+        bound_with_bad_prov,
+        world.profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["build_boundary_verifier"][0],
+    )
+    bound_with_bad_prov_loc = world.store.put(bound_with_bad_prov)
+    with pytest.raises(ValueError, match="source_commit_sha|provenance"):
+        gov1_convergence.build_gov1_convergence_record_envelope(
+            **{**base_kwargs, "wheel_boundary_report_locator": bound_with_bad_prov_loc},
+            store=world.store,
+            pr3_verifier=pr3_ok,
+        )
+
+    # 3. MCP executed_at_utc outside sandbox validity window in Store
+    narrow_sbx = gov1_sandbox.build_sealed_sandbox_profile_envelope(
+        migration_run_context_locator=RUN_CONTEXT_LOCATOR,
+        oci_image_digest=OCI_IMAGE_DIGEST,
+        runner_binary_digest=RUNNER_BINARY_DIGEST,
+        seccomp_profile=baseline_artifacts["seccomp_profile"],
+        issued_at_utc="2026-09-07T10:00:00Z",
+        valid_from_utc="2026-09-07T10:00:00Z",
+        valid_until_utc="2026-09-07T10:00:10Z",  # expires BEFORE EXECUTED_AT_UTC (10:00:15Z)
+        registry_locator=world.registry_loc,
+        signer_key_id=synthetic_gov1_keys["security_owner"][2],
+    )
+    narrow_sbx = p1.sign_envelope(
+        narrow_sbx,
+        world.profiles[gov1_sandbox.SANDBOX_PROFILE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_owner"][0],
+    )
+    narrow_sbx_loc = world.store.put(narrow_sbx)
+    mcp_outside_sbx = copy.deepcopy(world.mcp_env)
+    mcp_outside_sbx["sealed_sandbox_profile_locator"] = narrow_sbx_loc
+    mcp_outside_sbx = p1.sign_envelope(
+        mcp_outside_sbx,
+        world.profiles[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_verifier"][0],
+    )
+    mcp_outside_sbx_loc = world.store.put(mcp_outside_sbx)
+    with pytest.raises(ValueError, match="validity"):
+        gov1_convergence.build_gov1_convergence_record_envelope(
+            **{
+                **base_kwargs,
+                "sealed_sandbox_profile_locator": narrow_sbx_loc,
+                "mcp_rejection_matrix_report_locator": mcp_outside_sbx_loc,
+            },
+            store=world.store,
+            pr3_verifier=pr3_ok,
+        )
+
+    # Anti-backdating with certified pr3_verifier: converged_at_utc before constituent or PR3 timestamps fails closed
+    with pytest.raises(ValueError, match="backdated"):
+        gov1_convergence.build_gov1_convergence_record_envelope(
+            **{**base_kwargs, "converged_at_utc": "2026-09-07T10:00:04Z"},
+            store=world.store,
+            pr3_verifier=pr3_ok,
+        )
+    backdated_conv = copy.deepcopy(conv_signed)
+    backdated_conv["converged_at_utc"] = "2026-09-07T10:00:04Z"
+    backdated_conv = p1.sign_envelope(
+        backdated_conv,
+        world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["gov1_convergence_verifier"][0],
+    )
+    with pytest.raises(ValueError, match="backdated"):
+        gov1_convergence.verify_gov1_convergence_record(
+            backdated_conv,
+            store=world.store,
+            pr3_verifier=pr3_ok,
+        )
+
+    # 4. Gov1AdmissionVerifier with pr3_verifier!=None requires seccomp_profile, wheel_path, AND repo_root
+    verifier_with_pr3 = gov1_convergence.Gov1AdmissionVerifier(
+        world.runtime,
+        world.pins,
+        world.store,
+        world.adr,
+        inventory_locator=world.inventory_loc,
+        pr3_verifier=pr3_ok,
+    )
+    for missing_kw in (
+        {"seccomp_profile": None},
+        {"wheel_path": None},
+        {"repo_root": None},
+    ):
+        call_kw: dict[str, Any] = {
+            "seccomp_profile": baseline_artifacts["seccomp_profile"],
+            "wheel_path": baseline_artifacts["wheel_path"],
+            "repo_root": REPO_ROOT,
+            **missing_kw,
+        }
+        with pytest.raises(ValueError):
+            verifier_with_pr3.verify_artifact(conv_loc, **call_kw)
+    assert world.runtime.cas_calls == 0
+
+    # 5. Gov1AdmissionVerifier with pr3_verifier!=None rejects constituent with wrong D4 signature/role
+    wrong_signer_mcp = copy.deepcopy(world.mcp_env)
+    wrong_signer_mcp["integrity"]["key_id"] = synthetic_gov1_keys["security_owner"][2]
+    wrong_signer_mcp = p1.sign_envelope(
+        wrong_signer_mcp,
+        world.profiles[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["security_owner"][0],  # security_owner instead of security_verifier!
+    )
+    wrong_signer_mcp_loc = world.store.put(wrong_signer_mcp)
+    conv_bad_constituent_sig = gov1_convergence.build_gov1_convergence_record_envelope(
+        **{**base_kwargs, "mcp_rejection_matrix_report_locator": wrong_signer_mcp_loc},
+        store=world.store,
+        pr3_verifier=pr3_ok,
+    )
+    conv_bad_constituent_sig = p1.sign_envelope(
+        conv_bad_constituent_sig,
+        world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"],
+        synthetic_gov1_keys["gov1_convergence_verifier"][0],
+    )
+    conv_bad_constituent_sig_loc = world.store.put(conv_bad_constituent_sig)
+    with pytest.raises(ValueError):
+        verifier_with_pr3.verify_artifact(
+            conv_bad_constituent_sig_loc,
+            seccomp_profile=baseline_artifacts["seccomp_profile"],
+            wheel_path=baseline_artifacts["wheel_path"],
+            repo_root=REPO_ROOT,
+        )
+    assert world.runtime.cas_calls == 0
+
+    # 6. Positive control: valid D4 signatures on all 4 Etapa 7 constituents + material inputs + certified pr3_verifier
+    admitted_conv = verifier_with_pr3.verify_artifact(
+        conv_loc,
+        seccomp_profile=baseline_artifacts["seccomp_profile"],
+        wheel_path=baseline_artifacts["wheel_path"],
+        repo_root=REPO_ROOT,
+    )
+    assert admitted_conv["verification_status"] == "VERIFIED"
+    assert admitted_conv["schema"] == gov1_convergence.GOV1_CONVERGENCE_SCHEMA
+    assert world.runtime.cas_calls == 1
+
