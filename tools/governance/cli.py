@@ -11,6 +11,7 @@ Run as: `python3 -m tools.governance.cli <command> ...`
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 import argparse
 import base64
 import hashlib
@@ -19,9 +20,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Final
 
-from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES
 from tools.governance import (
     artifacts,
     decomposition as dec,
@@ -652,6 +653,19 @@ def _decode_ed25519_pubkey_b64(
     return raw32
 
 
+# ADR-0001 §12.7 P1 domain separation prefixes for Etapa 7 CLI envelope verifiers.
+# Kept self-contained in `tools.governance` so `python3 -m tools.governance.cli`
+# never depends on an editable `smart_ads` install on host `sys.path`.
+_GOV1_CLI_P1_DOMAIN_PREFIXES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        gov1_sandbox.SANDBOX_PROFILE_SCHEMA: "SMART-ADS:SANDBOX:V1\n",
+        gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA: "SMART-ADS:WHEEL-BUILD:V1\n",
+        gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA: "SMART-ADS:WHEEL-BOUNDARY:V1\n",
+        gov1_mcp.MCP_REJECTION_REPORT_SCHEMA: "SMART-ADS:MCP-REJECTION:V1\n",
+    }
+)
+
+
 def _verify_cli_p1_envelope_signature(
     envelope: dict[str, Any],
     *,
@@ -661,7 +675,7 @@ def _verify_cli_p1_envelope_signature(
     flag_name: str = "--pubkey-raw-base64",
 ) -> None:
     raw32 = _decode_ed25519_pubkey_b64(pubkey_b64, cmd=cmd, flag_name=flag_name)
-    domain_prefix = ADR_P1_DOMAIN_PREFIXES.get(schema)
+    domain_prefix = _GOV1_CLI_P1_DOMAIN_PREFIXES.get(schema)
     if domain_prefix is None:
         raise ValueError(
             f"{cmd}: unknown GOV 1 P1 domain prefix for schema {schema!r}"

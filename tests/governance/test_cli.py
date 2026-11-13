@@ -1775,5 +1775,84 @@ def test_history004_gov1_cli_verify_commands_enforce_p1_signatures_and_predecess
     assert mcp_cand_out["authority"] == "none"
 
 
+def test_governance_modules_never_import_smart_ads_and_cli_domain_prefixes_match_adr() -> None:
+    import ast
+    import sysconfig
+    from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES
+    from tools.governance import (
+        cli,
+        decomposition_admission,
+        gov1_mcp,
+        gov1_sandbox,
+        gov1_wheel,
+    )
+
+    gov_dir = REPO_ROOT / "tools" / "governance"
+    py_files = sorted(gov_dir.rglob("*.py"))
+    assert py_files
+    violations: list[str] = []
+    for py_file in py_files:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        rel = py_file.relative_to(REPO_ROOT).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "smart_ads" or alias.name.startswith("smart_ads."):
+                        violations.append(f"{rel}:{node.lineno}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                mod = node.module or ""
+                if mod == "smart_ads" or mod.startswith("smart_ads."):
+                    violations.append(f"{rel}:{node.lineno}: from {mod} import ...")
+    assert violations == []
+
+    expected_schemas = {
+        gov1_sandbox.SANDBOX_PROFILE_SCHEMA,
+        gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+        gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA,
+        gov1_mcp.MCP_REJECTION_REPORT_SCHEMA,
+    }
+    assert set(cli._GOV1_CLI_P1_DOMAIN_PREFIXES.keys()) == expected_schemas
+
+    adr_bytes = (REPO_ROOT / "docs" / "adr" / "ADR-0001-smart-ads-read-gateway.md").read_bytes()
+    adr_by_schema = {
+        row["schema"]: row["domain_prefix"]
+        for row in decomposition_admission.profile_proposals(adr_bytes)
+    }
+    for schema, prefix in cli._GOV1_CLI_P1_DOMAIN_PREFIXES.items():
+        assert ADR_P1_DOMAIN_PREFIXES[schema] == prefix
+        assert adr_by_schema[schema] == prefix
+
+    site_dirs = sorted(
+        {
+            str(Path(p).resolve())
+            for key in ("purelib", "platlib")
+            if (p := sysconfig.get_path(key))
+        }
+    )
+    probe_code = (
+        "import importlib, json, sys\n"
+        "repo_root, site_dirs = sys.argv[1], json.loads(sys.argv[2])\n"
+        "sys.path.extend(site_dirs)\n"
+        "sys.path.insert(0, repo_root)\n"
+        "try:\n"
+        "    importlib.import_module('smart_ads')\n"
+        "except ModuleNotFoundError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit('smart_ads unexpectedly importable without .pth or src on sys.path')\n"
+        "from tools.governance import cli\n"
+        "raise SystemExit(cli.main(['keygen-instructions']))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", probe_code, str(REPO_ROOT), json.dumps(site_dirs)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "openssl genpkey" in proc.stdout
+
+
+
 
 
