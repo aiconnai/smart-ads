@@ -713,3 +713,135 @@ def test_tampered_envelope_and_candidate_ref_edges() -> None:
             expected_schema="smart_ads/wheel_boundary_report/v1",
         )
 
+
+@pytest.mark.parametrize(
+    "bad_arg",
+    [
+        {},
+        {"index": 0, "value": 0},
+        {"index": 0, "op": "SCMP_CMP_EQ"},
+        {"value": 0, "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": 0, "op": "SCMP_CMP_EQ", "extra": 1},
+        {"index": 0, "value": 0, "Value": 1, "op": "SCMP_CMP_EQ"},
+        {"index": -1, "value": 0, "op": "SCMP_CMP_EQ"},
+        {"index": 6, "value": 0, "op": "SCMP_CMP_EQ"},
+        {"index": True, "value": 0, "op": "SCMP_CMP_EQ"},
+        {"index": "0", "value": 0, "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": -1, "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": (1 << 53), "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": (1 << 64) - 1, "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": False, "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": "0", "op": "SCMP_CMP_EQ"},
+        {"index": 0, "value": 0, "valueTwo": -1, "op": "SCMP_CMP_MASKED_EQ"},
+        {"index": 0, "value": 0, "valueTwo": (1 << 53), "op": "SCMP_CMP_MASKED_EQ"},
+        {"index": 0, "value": 0, "valueTwo": True, "op": "SCMP_CMP_MASKED_EQ"},
+        {"index": 0, "value": 0, "valueTwo": None, "op": "SCMP_CMP_MASKED_EQ"},
+        {"index": 0, "value": 0, "op": ""},
+        {"index": 0, "value": 0, "op": "SCMP_CMP_UNKNOWN"},
+        {"index": 0, "value": 0, "op": 1},
+    ],
+)
+def test_seccomp_rejects_invalid_oci_syscall_arg_specs(bad_arg: dict[str, Any]) -> None:
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    seccomp["syscalls"].append(
+        {
+            "names": ["ioctl"],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [bad_arg],
+        }
+    )
+    with pytest.raises(ValueError, match=r"args\[0\]"):
+        gov1_sandbox.verify_seccomp_profile(seccomp)
+
+
+def test_seccomp_valid_oci_args_roundtrip_strict_jcs() -> None:
+    from smart_ads.contracts.jcs import MAX_JCS_SAFE_INT, canonicalize_jcs, loads_strict_json
+
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    all_ops = (
+        "SCMP_CMP_NE",
+        "SCMP_CMP_LT",
+        "SCMP_CMP_LE",
+        "SCMP_CMP_EQ",
+        "SCMP_CMP_GE",
+        "SCMP_CMP_GT",
+        "SCMP_CMP_MASKED_EQ",
+    )
+    for idx, op in enumerate(all_ops):
+        arg: dict[str, Any] = {
+            "index": idx % 6,
+            "value": MAX_JCS_SAFE_INT if idx == 0 else idx,
+            "op": op,
+        }
+        if op == "SCMP_CMP_MASKED_EQ":
+            arg["valueTwo"] = MAX_JCS_SAFE_INT
+        seccomp["syscalls"].append(
+            {
+                "names": ["ioctl"],
+                "action": "SCMP_ACT_ALLOW",
+                "args": [arg],
+            }
+        )
+
+    gov_digest = gov1_sandbox.verify_seccomp_profile(seccomp)
+    jcs_bytes = canonicalize_jcs(seccomp)
+    assert jcs_bytes == canonicalize(seccomp)
+    assert loads_strict_json(jcs_bytes) == seccomp
+    assert gov_digest == "sha256:" + hashlib.sha256(jcs_bytes).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "forbidden_action",
+    [
+        "SCMP_ACT_NOTIFY",
+        "SCMP_ACT_TRACE",
+        "SCMP_ACT_LOG",
+        "SCMP_ACT_TRAP",
+    ],
+)
+@pytest.mark.parametrize("allowed_syscall", ["openat", "read"])
+def test_seccomp_rejects_non_hermetic_actions_globally(
+    forbidden_action: str, allowed_syscall: str
+) -> None:
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    seccomp["syscalls"].append(
+        {"names": [allowed_syscall], "action": forbidden_action}
+    )
+    with pytest.raises(ValueError, match=r"action"):
+        gov1_sandbox.verify_seccomp_profile(seccomp)
+
+
+@pytest.mark.parametrize(
+    "io_uring_syscall",
+    ["io_uring_enter", "io_uring_register", "io_uring_setup"],
+)
+def test_seccomp_blocks_io_uring_kernel_bypass_syscalls(io_uring_syscall: str) -> None:
+    assert gov1_sandbox.KERNEL_BYPASS_DENIED_SYSCALLS == (
+        "io_uring_enter",
+        "io_uring_register",
+        "io_uring_setup",
+    )
+    assert len(gov1_sandbox.MANDATORY_DENIED_SYSCALLS) == 26
+
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    seccomp["syscalls"].append(
+        {"names": [io_uring_syscall], "action": "SCMP_ACT_ALLOW"}
+    )
+    with pytest.raises(ValueError, match=io_uring_syscall):
+        gov1_sandbox.verify_seccomp_profile(seccomp)
+
+    with pytest.raises(ValueError, match=io_uring_syscall):
+        gov1_sandbox.build_default_7a_seccomp_profile(
+            allowed_syscalls=["read", io_uring_syscall]
+        )
+
+    # Explicit denying rule on io_uring_* remains valid
+    explicit_deny = gov1_sandbox.build_default_7a_seccomp_profile()
+    explicit_deny["syscalls"].append(
+        {"names": [io_uring_syscall], "action": "SCMP_ACT_KILL_PROCESS"}
+    )
+    assert gov1_sandbox.verify_seccomp_profile(explicit_deny) == json_digest(
+        explicit_deny
+    )
+
+

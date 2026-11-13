@@ -1289,4 +1289,491 @@ def test_gov1_cli_rejects_colliding_wheel_and_json_out_and_symlink_outputs(
     assert "symlink" in err_dangling_cli
 
 
+def test_history004_gov1_cli_verify_commands_enforce_p1_signatures_and_predecessor_bindings(
+    tmp_path: Path,
+    anchor_key: Path,
+    operator_key: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES
+    from tools.governance import cli, gov1_mcp, gov1_sandbox, gov1_wheel, p1
+    from tools.governance.jcs import canonicalize
+
+    anchor_b64 = _raw32_b64(anchor_key)
+    anchor_kid = _key_id(anchor_b64)
+    operator_b64 = _raw32_b64(operator_key)
+    operator_kid = _key_id(operator_b64)
+
+    run_ctx_loc = _locator_for(
+        "smart_ads/migration_run_context/v1", b'{"run":"cli-history004"}'
+    )
+    reg_loc = _locator_for(
+        "smart_ads/key_authorization_registry/v1", b'{"reg":"cli-history004"}'
+    )
+    reg_loc_path = tmp_path / "reg_loc.json"
+    reg_loc_path.write_bytes(canonicalize(reg_loc))
+
+    seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
+    seccomp_path = tmp_path / "seccomp_7a.json"
+    seccomp_path.write_bytes(canonicalize(seccomp))
+
+    wheel_path, snapshot = gov1_wheel.build_reproducible_wheel(
+        REPO_ROOT, tmp_path / "dist"
+    )
+    wheel_bytes = wheel_path.read_bytes()
+    inspection = gov1_wheel.inspect_wheel_boundary(wheel_path)
+    execution = gov1_mcp.execute_mcp_rejection_matrix_on_wheel(wheel_path)
+
+    # Build unsigned P1 envelopes (as emitted by --mode envelope)
+    sbx_unsigned = gov1_sandbox.build_sealed_sandbox_profile_envelope(
+        migration_run_context_locator=run_ctx_loc,
+        oci_image_digest="sha256:" + ("1" * 64),
+        runner_binary_digest="sha256:" + ("2" * 64),
+        seccomp_profile=seccomp,
+        issued_at_utc="2026-11-12T12:00:00Z",
+        valid_from_utc="2026-11-01T00:00:00Z",
+        valid_until_utc="2027-11-01T00:00:00Z",
+        registry_locator=reg_loc,
+        signer_key_id=anchor_kid,
+    )
+    prov_unsigned = gov1_wheel.build_wheel_build_provenance_envelope(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        built_at_utc="2026-11-12T12:01:00Z",
+        snapshot=snapshot,
+        source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH,
+        schema_bundle_digest=inspection["schema_bundle_digest"],
+        wheel_bytes=wheel_bytes,
+        registry_locator=reg_loc,
+        signer_key_id=anchor_kid,
+    )
+
+    sbx_signed = p1.sign_envelope(
+        sbx_unsigned,
+        ADR_P1_DOMAIN_PREFIXES[gov1_sandbox.SANDBOX_PROFILE_SCHEMA],
+        anchor_key,
+    )
+    prov_signed = p1.sign_envelope(
+        prov_unsigned,
+        ADR_P1_DOMAIN_PREFIXES[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA],
+        anchor_key,
+    )
+    sbx_loc = _locator_for(
+        gov1_sandbox.SANDBOX_PROFILE_SCHEMA, canonicalize(sbx_signed)
+    )
+    prov_loc = _locator_for(
+        gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(prov_signed)
+    )
+
+    bound_unsigned = gov1_wheel.build_wheel_boundary_report_envelope(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        verified_at_utc="2026-11-12T12:02:00Z",
+        source_commit_sha=snapshot.commit_sha,
+        build_backend_digest=snapshot.build_backend_digest,
+        wheel_build_provenance_locator=prov_loc,
+        inspection=inspection,
+        registry_locator=reg_loc,
+        signer_key_id=operator_kid,
+    )
+    mcp_unsigned = gov1_mcp.build_mcp_rejection_matrix_report_envelope(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        executed_at_utc="2026-11-12T12:03:00Z",
+        source_commit_sha=snapshot.commit_sha,
+        build_backend_digest=snapshot.build_backend_digest,
+        sealed_sandbox_profile_locator=sbx_loc,
+        execution=execution,
+        registry_locator=reg_loc,
+        signer_key_id=operator_kid,
+    )
+    bound_signed = p1.sign_envelope(
+        bound_unsigned,
+        ADR_P1_DOMAIN_PREFIXES[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA],
+        operator_key,
+    )
+    mcp_signed = p1.sign_envelope(
+        mcp_unsigned,
+        ADR_P1_DOMAIN_PREFIXES[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA],
+        operator_key,
+    )
+
+    def _write(name: str, obj: dict[str, object]) -> Path:
+        p = tmp_path / name
+        p.write_bytes(canonicalize(obj))
+        return p
+
+    def _forge_zero_sig(unsigned_env: dict[str, object]) -> dict[str, object]:
+        forged = json.loads(json.dumps(unsigned_env))
+        forged["integrity"]["content_digest"] = p1.content_digest(unsigned_env)
+        forged["integrity"]["signature_base64"] = base64.b64encode(b"\x00" * 64).decode(
+            "ascii"
+        )
+        return forged
+
+    sbx_unsigned_p = _write("sbx_unsigned.json", sbx_unsigned)
+    prov_unsigned_p = _write("prov_unsigned.json", prov_unsigned)
+    bound_unsigned_p = _write("bound_unsigned.json", bound_unsigned)
+    mcp_unsigned_p = _write("mcp_unsigned.json", mcp_unsigned)
+
+    sbx_forged_p = _write("sbx_forged.json", _forge_zero_sig(sbx_unsigned))
+    prov_forged_p = _write("prov_forged.json", _forge_zero_sig(prov_unsigned))
+    bound_forged_p = _write("bound_forged.json", _forge_zero_sig(bound_unsigned))
+    mcp_forged_p = _write("mcp_forged.json", _forge_zero_sig(mcp_unsigned))
+
+    sbx_wrong_dom_p = _write(
+        "sbx_wrong_dom.json",
+        p1.sign_envelope(sbx_unsigned, "SMART-ADS:WRONG:V1\n", anchor_key),
+    )
+    prov_wrong_dom_p = _write(
+        "prov_wrong_dom.json",
+        p1.sign_envelope(prov_unsigned, "SMART-ADS:WRONG:V1\n", anchor_key),
+    )
+    bound_wrong_dom_p = _write(
+        "bound_wrong_dom.json",
+        p1.sign_envelope(bound_unsigned, "SMART-ADS:WRONG:V1\n", operator_key),
+    )
+    mcp_wrong_dom_p = _write(
+        "mcp_wrong_dom.json",
+        p1.sign_envelope(mcp_unsigned, "SMART-ADS:WRONG:V1\n", operator_key),
+    )
+
+    sbx_signed_p = _write("sbx_signed.json", sbx_signed)
+    prov_signed_p = _write("prov_signed.json", prov_signed)
+    bound_signed_p = _write("bound_signed.json", bound_signed)
+    mcp_signed_p = _write("mcp_signed.json", mcp_signed)
+
+    # 1. Unsigned 2-field --mode envelope files MUST fail all 4 verify-* commands (exit code 1)
+    for argv in (
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_unsigned_p), "--seccomp-profile", str(seccomp_path)],
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_unsigned_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-provenance", "--in", str(prov_unsigned_p), "--repo", str(REPO_ROOT), "--wheel", str(wheel_path)],
+        ["verify-wheel-provenance", "--in", str(prov_unsigned_p), "--repo", str(REPO_ROOT), "--wheel", str(wheel_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-boundary-report", "--in", str(bound_unsigned_p), "--wheel", str(wheel_path)],
+        ["verify-wheel-boundary-report", "--in", str(bound_unsigned_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--provenance", str(prov_signed_p), "--repo", str(REPO_ROOT), "--provenance-pubkey-raw-base64", anchor_b64],
+        ["verify-mcp-rejection-report", "--in", str(mcp_unsigned_p), "--wheel", str(wheel_path)],
+        ["verify-mcp-rejection-report", "--in", str(mcp_unsigned_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--sandbox-profile", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--sandbox-pubkey-raw-base64", anchor_b64],
+    ):
+        assert cli.main(argv) == 1
+        capsys.readouterr()
+
+    # 2. Forged 64-zero-byte signature_base64, wrong-domain, wrong-key, and malformed base64 MUST fail (exit code 1)
+    for argv in (
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_forged_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_wrong_dom_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", operator_b64],
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", "not-valid-b64!"],
+        ["verify-sealed-sandbox-profile", "--in", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--pubkey-raw-base64", base64.b64encode(b"short").decode("ascii")],
+        ["verify-wheel-provenance", "--in", str(prov_forged_p), "--repo", str(REPO_ROOT), "--wheel", str(wheel_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-provenance", "--in", str(prov_wrong_dom_p), "--repo", str(REPO_ROOT), "--wheel", str(wheel_path), "--pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-provenance", "--in", str(prov_signed_p), "--repo", str(REPO_ROOT), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64],
+        ["verify-wheel-boundary-report", "--in", str(bound_forged_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--provenance", str(prov_signed_p), "--repo", str(REPO_ROOT), "--provenance-pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-boundary-report", "--in", str(bound_wrong_dom_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--provenance", str(prov_signed_p), "--repo", str(REPO_ROOT), "--provenance-pubkey-raw-base64", anchor_b64],
+        ["verify-wheel-boundary-report", "--in", str(bound_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", anchor_b64, "--provenance", str(prov_signed_p), "--repo", str(REPO_ROOT), "--provenance-pubkey-raw-base64", anchor_b64],
+        ["verify-mcp-rejection-report", "--in", str(mcp_forged_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--sandbox-profile", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--sandbox-pubkey-raw-base64", anchor_b64],
+        ["verify-mcp-rejection-report", "--in", str(mcp_wrong_dom_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--sandbox-profile", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--sandbox-pubkey-raw-base64", anchor_b64],
+        ["verify-mcp-rejection-report", "--in", str(mcp_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", anchor_b64, "--sandbox-profile", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path), "--sandbox-pubkey-raw-base64", anchor_b64],
+    ):
+        assert cli.main(argv) == 1
+        capsys.readouterr()
+
+    # 3. Missing predecessor flags or out-of-window sandbox validity in envelope mode MUST fail (exit code 1)
+    for argv in (
+        # Missing --provenance / --repo / --provenance-pubkey-raw-base64 on signed boundary envelope
+        ["verify-wheel-boundary-report", "--in", str(bound_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64],
+        ["verify-wheel-boundary-report", "--in", str(bound_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--provenance", str(prov_signed_p), "--repo", str(REPO_ROOT)],
+        # Forged provenance signature passed to boundary envelope verify
+        ["verify-wheel-boundary-report", "--in", str(bound_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--provenance", str(prov_forged_p), "--repo", str(REPO_ROOT), "--provenance-pubkey-raw-base64", anchor_b64],
+        # Missing --sandbox-profile / --seccomp-profile / --sandbox-pubkey-raw-base64 on signed MCP envelope
+        ["verify-mcp-rejection-report", "--in", str(mcp_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64],
+        ["verify-mcp-rejection-report", "--in", str(mcp_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--sandbox-profile", str(sbx_signed_p), "--seccomp-profile", str(seccomp_path)],
+        # Forged sandbox signature passed to MCP envelope verify
+        ["verify-mcp-rejection-report", "--in", str(mcp_signed_p), "--wheel", str(wheel_path), "--pubkey-raw-base64", operator_b64, "--sandbox-profile", str(sbx_forged_p), "--seccomp-profile", str(seccomp_path), "--sandbox-pubkey-raw-base64", anchor_b64],
+    ):
+        assert cli.main(argv) == 1
+        capsys.readouterr()
+
+    # Out-of-window MCP executed_at_utc == validity.until (half-open [from, until)) MUST fail
+    mcp_expired_unsigned = gov1_mcp.build_mcp_rejection_matrix_report_envelope(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        executed_at_utc="2027-11-01T00:00:00Z",
+        source_commit_sha=snapshot.commit_sha,
+        build_backend_digest=snapshot.build_backend_digest,
+        sealed_sandbox_profile_locator=sbx_loc,
+        execution=execution,
+        registry_locator=reg_loc,
+        signer_key_id=operator_kid,
+    )
+    mcp_expired_p = _write(
+        "mcp_expired.json",
+        p1.sign_envelope(
+            mcp_expired_unsigned,
+            ADR_P1_DOMAIN_PREFIXES[gov1_mcp.MCP_REJECTION_REPORT_SCHEMA],
+            operator_key,
+        ),
+    )
+    assert (
+        cli.main(
+            [
+                "verify-mcp-rejection-report",
+                "--in",
+                str(mcp_expired_p),
+                "--wheel",
+                str(wheel_path),
+                "--pubkey-raw-base64",
+                operator_b64,
+                "--sandbox-profile",
+                str(sbx_signed_p),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--sandbox-pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    # 4. Valid P1-signed envelopes pass all 4 verify-* commands with signature_verified=True, d4_authority_verified=False, authority="none"
+    assert (
+        cli.main(
+            [
+                "verify-sealed-sandbox-profile",
+                "--in",
+                str(sbx_signed_p),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 0
+    )
+    sbx_out = json.loads(capsys.readouterr().out)
+    assert sbx_out["status"] == "PASS"
+    assert sbx_out["mode"] == "envelope"
+    assert sbx_out["signature_verified"] is True
+    assert sbx_out["d4_authority_verified"] is False
+    assert sbx_out["authority"] == "none"
+
+    assert (
+        cli.main(
+            [
+                "verify-wheel-provenance",
+                "--in",
+                str(prov_signed_p),
+                "--repo",
+                str(REPO_ROOT),
+                "--wheel",
+                str(wheel_path),
+                "--pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 0
+    )
+    prov_out = json.loads(capsys.readouterr().out)
+    assert prov_out["status"] == "PASS"
+    assert prov_out["mode"] == "envelope"
+    assert prov_out["signature_verified"] is True
+    assert prov_out["d4_authority_verified"] is False
+    assert prov_out["authority"] == "none"
+
+    assert (
+        cli.main(
+            [
+                "verify-wheel-boundary-report",
+                "--in",
+                str(bound_signed_p),
+                "--wheel",
+                str(wheel_path),
+                "--pubkey-raw-base64",
+                operator_b64,
+                "--provenance",
+                str(prov_signed_p),
+                "--repo",
+                str(REPO_ROOT),
+                "--provenance-pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 0
+    )
+    bound_out = json.loads(capsys.readouterr().out)
+    assert bound_out["status"] == "PASS"
+    assert bound_out["mode"] == "envelope"
+    assert bound_out["signature_verified"] is True
+    assert bound_out["d4_authority_verified"] is False
+    assert bound_out["authority"] == "none"
+
+    assert (
+        cli.main(
+            [
+                "verify-mcp-rejection-report",
+                "--in",
+                str(mcp_signed_p),
+                "--wheel",
+                str(wheel_path),
+                "--pubkey-raw-base64",
+                operator_b64,
+                "--sandbox-profile",
+                str(sbx_signed_p),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--sandbox-pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 0
+    )
+    mcp_out = json.loads(capsys.readouterr().out)
+    assert mcp_out["status"] == "PASS"
+    assert mcp_out["mode"] == "envelope"
+    assert mcp_out["signature_verified"] is True
+    assert mcp_out["d4_authority_verified"] is False
+    assert mcp_out["authority"] == "none"
+
+    # 5. Candidate mode rejects --pubkey-raw-base64, enforces paired predecessor flags when given, and emits signable=False, authority="none"
+    sbx_cand = gov1_sandbox.build_sealed_sandbox_profile_candidate(
+        migration_run_context_locator=run_ctx_loc,
+        oci_image_digest="sha256:" + ("1" * 64),
+        runner_binary_digest="sha256:" + ("2" * 64),
+        seccomp_profile=seccomp,
+        issued_at_utc="2026-11-12T12:00:00Z",
+        valid_from_utc="2026-11-01T00:00:00Z",
+        valid_until_utc="2027-11-01T00:00:00Z",
+    )
+    prov_cand = gov1_wheel.build_wheel_build_provenance_candidate(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        built_at_utc="2026-11-12T12:01:00Z",
+        snapshot=snapshot,
+        source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH,
+        schema_bundle_digest=inspection["schema_bundle_digest"],
+        wheel_bytes=wheel_bytes,
+    )
+    bound_cand = gov1_wheel.build_wheel_boundary_report_candidate(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        verified_at_utc="2026-11-12T12:02:00Z",
+        source_commit_sha=snapshot.commit_sha,
+        build_backend_digest=snapshot.build_backend_digest,
+        wheel_build_provenance_candidate_ref=gov1_sandbox.build_local_candidate_ref(
+            prov_cand
+        ),
+        inspection=inspection,
+    )
+    mcp_cand = gov1_mcp.build_mcp_rejection_matrix_report_candidate(
+        migration_run_context_locator=run_ctx_loc,
+        build_run_id="history004-run-001",
+        executed_at_utc="2026-11-12T12:03:00Z",
+        source_commit_sha=snapshot.commit_sha,
+        build_backend_digest=snapshot.build_backend_digest,
+        sealed_sandbox_profile_candidate_ref=gov1_sandbox.build_local_candidate_ref(
+            sbx_cand
+        ),
+        execution=execution,
+    )
+    sbx_cand_p = _write("sbx_cand.json", sbx_cand)
+    prov_cand_p = _write("prov_cand.json", prov_cand)
+    bound_cand_p = _write("bound_cand.json", bound_cand)
+    mcp_cand_p = _write("mcp_cand.json", mcp_cand)
+
+    # Rejects --pubkey-raw-base64 on candidate input
+    assert (
+        cli.main(
+            [
+                "verify-sealed-sandbox-profile",
+                "--in",
+                str(sbx_cand_p),
+                "--seccomp-profile",
+                str(seccomp_path),
+                "--pubkey-raw-base64",
+                anchor_b64,
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    # Rejects unpaired --provenance without --repo and --sandbox-profile without --seccomp-profile
+    assert (
+        cli.main(
+            [
+                "verify-wheel-boundary-report",
+                "--in",
+                str(bound_cand_p),
+                "--wheel",
+                str(wheel_path),
+                "--provenance",
+                str(prov_cand_p),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+    assert (
+        cli.main(
+            [
+                "verify-mcp-rejection-report",
+                "--in",
+                str(mcp_cand_p),
+                "--wheel",
+                str(wheel_path),
+                "--sandbox-profile",
+                str(sbx_cand_p),
+            ]
+        )
+        == 1
+    )
+    capsys.readouterr()
+
+    # Paired candidate verification succeeds with signable=False, authority="none"
+    assert (
+        cli.main(
+            [
+                "verify-wheel-boundary-report",
+                "--in",
+                str(bound_cand_p),
+                "--wheel",
+                str(wheel_path),
+                "--provenance",
+                str(prov_cand_p),
+                "--repo",
+                str(REPO_ROOT),
+            ]
+        )
+        == 0
+    )
+    bound_cand_out = json.loads(capsys.readouterr().out)
+    assert bound_cand_out["status"] == "PASS"
+    assert bound_cand_out["mode"] == "candidate"
+    assert bound_cand_out["signable"] is False
+    assert bound_cand_out["authority"] == "none"
+
+    assert (
+        cli.main(
+            [
+                "verify-mcp-rejection-report",
+                "--in",
+                str(mcp_cand_p),
+                "--wheel",
+                str(wheel_path),
+                "--sandbox-profile",
+                str(sbx_cand_p),
+                "--seccomp-profile",
+                str(seccomp_path),
+            ]
+        )
+        == 0
+    )
+    mcp_cand_out = json.loads(capsys.readouterr().out)
+    assert mcp_cand_out["status"] == "PASS"
+    assert mcp_cand_out["mode"] == "candidate"
+    assert mcp_cand_out["signable"] is False
+    assert mcp_cand_out["authority"] == "none"
+
+
+
 

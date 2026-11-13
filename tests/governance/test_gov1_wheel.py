@@ -1111,12 +1111,242 @@ def test_closed_pyproject_project_tool_and_toplevel_tables_rejections(
     # Also prove a commit attempting [project.license] file = "/etc/hosts" is rejected before PEP 517 runs
     repo = _init_temp_git_repo(tmp_path / "closed_pyproject_repo")
     (repo / "pyproject.toml").write_text(
-        base_pyproject_text + '\n[project.license]\nfile = "/etc/hosts"\n',
+        base_pyproject_text + '\n[project.license] \nfile = "/etc/hosts"\n',
         encoding="utf-8",
     )
     run_git_offline(repo, "add", "pyproject.toml")
     run_git_offline(repo, "commit", "-q", "-m", "attempt host file read via project.license")
     with pytest.raises(ValueError):
         gov1_wheel.build_reproducible_wheel(repo, tmp_path / "blocked_out")
+
+
+def _prepend_unreferenced_local_entry_to_zip(
+    orig_bytes: bytes, *, filename: bytes = b"tooling/injected.py", payload: bytes = b"X = 1\n"
+) -> bytes:
+    import struct
+    import zlib
+
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    lfh = (
+        struct.pack(
+            "<4sHHHHHIIIHH",
+            b"PK\x03\x04",
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc,
+            len(payload),
+            len(payload),
+            len(filename),
+            0,
+        )
+        + filename
+        + payload
+    )
+    shift = len(lfh)
+    (
+        eocd_sig,
+        disk_no,
+        cd_start_disk,
+        disk_entries,
+        cd_count,
+        cd_size,
+        cd_offset,
+        comment_len,
+    ) = struct.unpack("<4sHHHHIIH", orig_bytes[-22:])
+    local_region = orig_bytes[:cd_offset]
+    cd_region = bytearray(orig_bytes[cd_offset : cd_offset + cd_size])
+    cursor = 0
+    for _ in range(cd_count):
+        fname_len, extra_len, cmt_len = struct.unpack_from("<HHH", cd_region, cursor + 28)
+        old_off = struct.unpack_from("<I", cd_region, cursor + 42)[0]
+        struct.pack_into("<I", cd_region, cursor + 42, old_off + shift)
+        cursor += 46 + fname_len + extra_len + cmt_len
+    new_eocd = struct.pack(
+        "<4sHHHHIIH",
+        eocd_sig,
+        disk_no,
+        cd_start_disk,
+        disk_entries,
+        cd_count,
+        cd_size,
+        cd_offset + shift,
+        comment_len,
+    )
+    return lfh + local_region + bytes(cd_region) + new_eocd
+
+
+def _corrupt_first_zip_entry_payload_byte(orig_bytes: bytes) -> bytes:
+    import struct
+
+    fname_len, extra_len = struct.unpack_from("<HH", orig_bytes, 26)
+    data_start = 30 + fname_len + extra_len
+    mutated = bytearray(orig_bytes)
+    mutated[data_start] ^= 0xFF
+    return bytes(mutated)
+
+
+def test_corrupt_zip_payload_and_malformed_record_csv_translate_to_value_error(
+    tmp_path: Path,
+) -> None:
+    wheel_path, _ = gov1_wheel.build_reproducible_wheel(REPO_ROOT, tmp_path / "base_out")
+    orig_bytes = wheel_path.read_bytes()
+
+    # 1. Corrupt compressed payload byte -> BadZipFile / zlib.error translated to ValueError
+    corrupt_whl = tmp_path / "corrupt_payload.whl"
+    corrupt_whl.write_bytes(_corrupt_first_zip_entry_payload_byte(orig_bytes))
+    with pytest.raises(ValueError):
+        gov1_wheel.inspect_wheel_boundary(corrupt_whl)
+
+    # Also check _read_and_verify_wheelhouse_closure_pkg zf.read translation
+    bad_closure_dir = tmp_path / "bad_closure"
+    bad_closure_dir.mkdir()
+    bad_pkg_whl = bad_closure_dir / "hatchling-1.33.0-py3-none-any.whl"
+    corrupt_pkg_bytes = _corrupt_first_zip_entry_payload_byte(orig_bytes)
+    bad_pkg_whl.write_bytes(corrupt_pkg_bytes)
+    with pytest.raises(ValueError):
+        gov1_wheel._read_and_verify_wheelhouse_closure_pkg(
+            bad_closure_dir,
+            pkg_name="hatchling",
+            version="1.33.0",
+            wheel_filename="hatchling-1.33.0-py3-none-any.whl",
+            expected_wheel_sha256=digest(corrupt_pkg_bytes),
+            dist_info_dir="smart_ads-0.1.0.dist-info",
+            module_dir="smart_ads",
+            expected_tree_sha256="sha256:" + "0" * 64,
+        )
+
+    # 2. Oversized CSV field (> 128 KiB csv.field_size_limit) in RECORD -> ValueError (not csv.Error)
+    members = _read_wheel_members(wheel_path)
+    huge_record = (
+        "smart_ads/__init__.py,sha256=" + ("A" * 200_000) + ",10\n"
+        "smart_ads-0.1.0.dist-info/RECORD,,\n"
+    )
+    huge_csv_whl = _rebuild_wheel_from_dict(
+        tmp_path / "huge_csv.whl", members, custom_record_text=huge_record
+    )
+    with pytest.raises(ValueError):
+        gov1_wheel.inspect_wheel_boundary(huge_csv_whl)
+
+
+def test_inspect_wheel_boundary_translates_subprocess_timeout_and_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel_path, _ = gov1_wheel.build_reproducible_wheel(REPO_ROOT, tmp_path / "subproc_out")
+
+    def _raise_timeout(*args: Any, **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=30)
+
+    monkeypatch.setattr(gov1_wheel.subprocess, "run", _raise_timeout)
+    with pytest.raises(ValueError, match="clean_venv"):
+        gov1_wheel.inspect_wheel_boundary(wheel_path)
+
+    def _raise_oserror(*args: Any, **kwargs: Any) -> Any:
+        raise OSError("simulated exec failure")
+
+    monkeypatch.setattr(gov1_wheel.subprocess, "run", _raise_oserror)
+    with pytest.raises(ValueError, match="clean_venv"):
+        gov1_wheel.inspect_wheel_boundary(wheel_path)
+
+
+def test_zip_layout_contiguity_rejects_prepended_unreferenced_entry_and_comment(
+    tmp_path: Path,
+) -> None:
+    wheel_path, _ = gov1_wheel.build_reproducible_wheel(REPO_ROOT, tmp_path / "contig_out")
+    orig_bytes = wheel_path.read_bytes()
+
+    # Baseline real reproducible wheel passes contiguous layout check
+    insp = gov1_wheel.inspect_wheel_boundary(wheel_path)
+    assert insp["archive_allowlist_passed"] is True
+
+    # Prepended unreferenced PK\x03\x04 tooling/injected.py entry (valid to zipfile.ZipFile!) is rejected
+    polyglot_bytes = _prepend_unreferenced_local_entry_to_zip(orig_bytes)
+    with zipfile.ZipFile(io.BytesIO(polyglot_bytes), "r") as zf:
+        assert "tooling/injected.py" not in zf.namelist()
+    polyglot_whl = tmp_path / "polyglot.whl"
+    polyglot_whl.write_bytes(polyglot_bytes)
+    with pytest.raises(ValueError, match="contiguous|offset|layout|comment|EOCD"):
+        gov1_wheel.inspect_wheel_boundary(polyglot_whl)
+
+    # Non-empty ZIP comment or trailing garbage past EOCD is rejected
+    commented_whl = tmp_path / "commented.whl"
+    shutil.copy2(wheel_path, commented_whl)
+    with zipfile.ZipFile(commented_whl, "a") as zf:
+        zf.comment = b"non-empty-comment"
+    with pytest.raises(ValueError, match="comment|EOCD|layout"):
+        gov1_wheel.inspect_wheel_boundary(commented_whl)
+
+    trailing_whl = tmp_path / "trailing.whl"
+    trailing_whl.write_bytes(orig_bytes + b"TRAILING")
+    with pytest.raises(ValueError):
+        gov1_wheel.inspect_wheel_boundary(trailing_whl)
+
+
+@pytest.mark.parametrize(
+    "bad_record_hash",
+    [
+        "sha256=",
+        "sha256=" + ("A" * 43) + "=",
+        "sha256=" + ("+" * 43),
+        "sha256=" + ("/" * 43),
+        "sha256=" + ("A" * 42) + "B",  # non-canonical non-zero trailing bits
+        "sha256=" + ("A" * 42),  # wrong length (31 bytes)
+        "sha256=" + ("A" * 44),  # wrong length
+    ],
+)
+def test_validate_sorted_record_entries_rejects_malformed_pep427_hashes(
+    tmp_path: Path, bad_record_hash: str
+) -> None:
+    wheel_path, snapshot = gov1_wheel.build_reproducible_wheel(
+        REPO_ROOT, tmp_path / "rechash_out"
+    )
+    inspection = gov1_wheel.inspect_wheel_boundary(wheel_path)
+    prov_cand = gov1_wheel.build_wheel_build_provenance_candidate(
+        migration_run_context_locator=RUN_CONTEXT_LOCATOR,
+        build_run_id=BUILD_RUN_ID,
+        built_at_utc=BUILT_AT_UTC,
+        snapshot=snapshot,
+        source_date_epoch=1_700_000_000,
+        schema_bundle_digest=inspection["schema_bundle_digest"],
+        wheel_bytes=wheel_path.read_bytes(),
+    )
+    cand_ref = gov1_sandbox.build_local_candidate_ref(prov_cand)
+    prov_locator = make_locator(
+        gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, b'{"prov":"rechash"}'
+    )
+
+    bad_insp = copy.deepcopy(inspection)
+    for entry in bad_insp["sorted_record_entries"]:
+        if entry["path"] != gov1_wheel.EXPECTED_SELF_RECORD_PATH:
+            entry["record_hash"] = bad_record_hash
+            break
+    bad_insp["sorted_record_digest"] = json_digest(bad_insp["sorted_record_entries"])
+
+    with pytest.raises(ValueError, match="record_hash"):
+        gov1_wheel.build_wheel_boundary_report_candidate(
+            migration_run_context_locator=RUN_CONTEXT_LOCATOR,
+            build_run_id=BUILD_RUN_ID,
+            verified_at_utc=VERIFIED_AT_UTC,
+            source_commit_sha=snapshot.commit_sha,
+            build_backend_digest=snapshot.build_backend_digest,
+            wheel_build_provenance_candidate_ref=cand_ref,
+            inspection=bad_insp,
+        )
+
+    with pytest.raises(ValueError, match="record_hash"):
+        gov1_wheel.build_wheel_boundary_report_envelope(
+            migration_run_context_locator=RUN_CONTEXT_LOCATOR,
+            build_run_id=BUILD_RUN_ID,
+            verified_at_utc=VERIFIED_AT_UTC,
+            source_commit_sha=snapshot.commit_sha,
+            build_backend_digest=snapshot.build_backend_digest,
+            wheel_build_provenance_locator=prov_locator,
+            inspection=bad_insp,
+            registry_locator=REGISTRY_LOCATOR,
+            signer_key_id=SIGNER_KEY_ID,
+        )
+
 
 

@@ -25,6 +25,7 @@ import tempfile
 from typing import Any, Final
 import venv
 import zipfile
+import zlib
 
 from tools.governance import p1
 from tools.governance.gov1_sandbox import (
@@ -34,7 +35,10 @@ from tools.governance.gov1_sandbox import (
     verify_local_candidate_ref,
     wrap_local_candidate,
 )
-from tools.governance.gov1_wheel import inspect_wheel_boundary
+from tools.governance.gov1_wheel import (
+    inspect_wheel_boundary,
+    verify_contiguous_zip_layout,
+)
 from tools.governance.jcs import canonicalize, loads_strict
 from tools.governance.locator import (
     digest,
@@ -808,7 +812,11 @@ def _extract_verified_wheel_to_purelib(
 
     extracted: dict[str, bytes] = {}
     with zf_ctx as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        if not infos:
+            raise ValueError("wheel archive: empty ZIP central directory")
+        verify_contiguous_zip_layout(wheel_bytes, infos, comment=zf.comment)
+        for info in infos:
             if info.is_dir() or info.filename.endswith("/"):
                 raise ValueError(
                     f"wheel archive: directory entry forbidden: {info.filename!r}"
@@ -823,7 +831,18 @@ def _extract_verified_wheel_to_purelib(
                 raise ValueError(
                     f"wheel archive: duplicate central-directory entry {info.filename!r}"
                 )
-            raw = zf.read(info)
+            try:
+                raw = zf.read(info)
+            except (
+                zipfile.BadZipFile,
+                zlib.error,
+                EOFError,
+                RuntimeError,
+                NotImplementedError,
+            ) as exc:
+                raise ValueError(
+                    f"wheel archive: failed to decompress member {info.filename!r}: {exc}"
+                ) from exc
             if len(raw) != info.file_size:
                 raise ValueError(
                     f"wheel archive: declared file_size mismatch on {info.filename!r}"

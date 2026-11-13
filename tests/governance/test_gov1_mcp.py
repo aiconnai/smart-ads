@@ -904,3 +904,95 @@ def test_isolated_clean_venv_executes_wheel_not_repo_src_under_hostile_pythonpat
     wheel_d = _rebuild_wheel_from_dict(tmp_path / "sabotaged_assert.whl", members_d)
     with pytest.raises(ValueError, match="assert"):
         gov1_mcp.execute_mcp_rejection_matrix_on_wheel(wheel_d)
+
+
+def test_mcp_wheel_extraction_rejects_corrupt_member_and_prepended_polyglot(
+    tmp_path: Path,
+    baseline_mcp_bundle: tuple[Path, gov1_wheel.GitBuildSnapshot, bytes, dict[str, Any]],
+) -> None:
+    import struct
+    import zlib
+
+    wheel_path, _, _, _ = baseline_mcp_bundle
+    orig_bytes = wheel_path.read_bytes()
+    expected_paths = set(_read_wheel_members(wheel_path).keys())
+
+    # 1. Corrupt compressed payload byte -> ValueError in both helper and top-level runner
+    fname_len, extra_len = struct.unpack_from("<HH", orig_bytes, 26)
+    corrupt_bytes = bytearray(orig_bytes)
+    corrupt_bytes[30 + fname_len + extra_len] ^= 0xFF
+    purelib_a = tmp_path / "purelib_a"
+    purelib_a.mkdir()
+    with pytest.raises(ValueError):
+        gov1_mcp._extract_verified_wheel_to_purelib(
+            bytes(corrupt_bytes), purelib_a, expected_paths
+        )
+    corrupt_whl = tmp_path / "corrupt_mcp.whl"
+    corrupt_whl.write_bytes(bytes(corrupt_bytes))
+    with pytest.raises(ValueError):
+        gov1_mcp.execute_mcp_rejection_matrix_on_wheel(corrupt_whl)
+
+    # 2. Prepended unreferenced PK\x03\x04 tooling/injected.py entry -> ValueError
+    inj_name = b"tooling/injected.py"
+    inj_payload = b"INJECTED = 1\n"
+    crc = zlib.crc32(inj_payload) & 0xFFFFFFFF
+    lfh = (
+        struct.pack(
+            "<4sHHHHHIIIHH",
+            b"PK\x03\x04",
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc,
+            len(inj_payload),
+            len(inj_payload),
+            len(inj_name),
+            0,
+        )
+        + inj_name
+        + inj_payload
+    )
+    shift = len(lfh)
+    (
+        eocd_sig,
+        disk_no,
+        cd_start_disk,
+        disk_entries,
+        cd_count,
+        cd_size,
+        cd_offset,
+        comment_len,
+    ) = struct.unpack("<4sHHHHIIH", orig_bytes[-22:])
+    cd_region = bytearray(orig_bytes[cd_offset : cd_offset + cd_size])
+    cur = 0
+    for _ in range(cd_count):
+        fn_l, ex_l, cm_l = struct.unpack_from("<HHH", cd_region, cur + 28)
+        old_off = struct.unpack_from("<I", cd_region, cur + 42)[0]
+        struct.pack_into("<I", cd_region, cur + 42, old_off + shift)
+        cur += 46 + fn_l + ex_l + cm_l
+    new_eocd = struct.pack(
+        "<4sHHHHIIH",
+        eocd_sig,
+        disk_no,
+        cd_start_disk,
+        disk_entries,
+        cd_count,
+        cd_size,
+        cd_offset + shift,
+        comment_len,
+    )
+    polyglot_bytes = lfh + orig_bytes[:cd_offset] + bytes(cd_region) + new_eocd
+
+    purelib_b = tmp_path / "purelib_b"
+    purelib_b.mkdir()
+    with pytest.raises(ValueError):
+        gov1_mcp._extract_verified_wheel_to_purelib(
+            polyglot_bytes, purelib_b, expected_paths
+        )
+    polyglot_whl = tmp_path / "polyglot_mcp.whl"
+    polyglot_whl.write_bytes(polyglot_bytes)
+    with pytest.raises(ValueError):
+        gov1_mcp.execute_mcp_rejection_matrix_on_wheel(polyglot_whl)
+

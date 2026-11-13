@@ -65,6 +65,15 @@ MANDATORY_DENIED_SYSCALLS: Final[tuple[str, ...]] = (
 _MANDATORY_DENIED_SYSCALLS_SET: Final[frozenset[str]] = frozenset(
     MANDATORY_DENIED_SYSCALLS
 )
+KERNEL_BYPASS_DENIED_SYSCALLS: Final[tuple[str, ...]] = (
+    "io_uring_enter",
+    "io_uring_register",
+    "io_uring_setup",
+)
+_ALL_DENIED_SYSCALLS_SET: Final[frozenset[str]] = (
+    _MANDATORY_DENIED_SYSCALLS_SET | frozenset(KERNEL_BYPASS_DENIED_SYSCALLS)
+)
+MAX_JCS_SAFE_INT: Final[int] = (1 << 53) - 1
 
 _DEFAULT_7A_ALLOWED_SYSCALLS: Final[tuple[str, ...]] = (
     "access",
@@ -134,25 +143,26 @@ _DEFAULT_7A_ALLOWED_SYSCALLS: Final[tuple[str, ...]] = (
     "writev",
 )
 
-_VALID_SECCOMP_ACTIONS: Final[frozenset[str]] = frozenset(
-    {
-        "SCMP_ACT_ALLOW",
-        "SCMP_ACT_ERRNO",
-        "SCMP_ACT_KILL",
-        "SCMP_ACT_KILL_PROCESS",
-        "SCMP_ACT_KILL_THREAD",
-        "SCMP_ACT_LOG",
-        "SCMP_ACT_NOTIFY",
-        "SCMP_ACT_TRACE",
-        "SCMP_ACT_TRAP",
-    }
-)
 _DENYING_SECCOMP_ACTIONS: Final[frozenset[str]] = frozenset(
     {
         "SCMP_ACT_ERRNO",
         "SCMP_ACT_KILL",
         "SCMP_ACT_KILL_PROCESS",
         "SCMP_ACT_KILL_THREAD",
+    }
+)
+_ALLOWED_7A_SECCOMP_ACTIONS: Final[frozenset[str]] = (
+    frozenset({"SCMP_ACT_ALLOW"}) | _DENYING_SECCOMP_ACTIONS
+)
+_VALID_SECCOMP_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "SCMP_CMP_NE",
+        "SCMP_CMP_LT",
+        "SCMP_CMP_LE",
+        "SCMP_CMP_EQ",
+        "SCMP_CMP_GE",
+        "SCMP_CMP_GT",
+        "SCMP_CMP_MASKED_EQ",
     }
 )
 
@@ -499,9 +509,9 @@ def verify_seccomp_profile(seccomp_profile: dict[str, Any]) -> str:
                 )
 
         action = rule["action"]
-        if type(action) is not str or action not in _VALID_SECCOMP_ACTIONS:
+        if type(action) is not str or action not in _ALLOWED_7A_SECCOMP_ACTIONS:
             raise ValueError(
-                f"seccomp_profile.syscalls[{idx}].action: invalid seccomp action {action!r}"
+                f"seccomp_profile.syscalls[{idx}].action: invalid or non-hermetic seccomp action {action!r}"
             )
 
         if "args" in rule:
@@ -515,19 +525,49 @@ def verify_seccomp_profile(seccomp_profile: dict[str, Any]) -> str:
                     raise ValueError(
                         f"seccomp_profile.syscalls[{idx}].args[{arg_idx}]: expected JSON object"
                     )
-                for arg_k, arg_v in arg_spec.items():
-                    if arg_k in {"index", "value", "valueTwo"} and type(arg_v) is bool:
+                arg_keys = set(arg_spec.keys())
+                if arg_keys not in (
+                    {"index", "value", "op"},
+                    {"index", "value", "op", "valueTwo"},
+                ):
+                    raise ValueError(
+                        f"seccomp_profile.syscalls[{idx}].args[{arg_idx}]: expected keys "
+                        "{'index', 'value', 'op'} with optional 'valueTwo'"
+                    )
+                arg_index = arg_spec["index"]
+                if type(arg_index) is not int or not (0 <= arg_index <= 5):
+                    raise ValueError(
+                        f"seccomp_profile.syscalls[{idx}].args[{arg_idx}].index: "
+                        "expected strict int in x86_64 register range 0..5"
+                    )
+                arg_val = arg_spec["value"]
+                if type(arg_val) is not int or not (0 <= arg_val <= MAX_JCS_SAFE_INT):
+                    raise ValueError(
+                        f"seccomp_profile.syscalls[{idx}].args[{arg_idx}].value: "
+                        f"expected strict int in [0, {MAX_JCS_SAFE_INT}]"
+                    )
+                if "valueTwo" in arg_spec:
+                    arg_val2 = arg_spec["valueTwo"]
+                    if type(arg_val2) is not int or not (
+                        0 <= arg_val2 <= MAX_JCS_SAFE_INT
+                    ):
                         raise ValueError(
-                            f"seccomp_profile.syscalls[{idx}].args[{arg_idx}].{arg_k}: "
-                            "boolean is not allowed for integer field"
+                            f"seccomp_profile.syscalls[{idx}].args[{arg_idx}].valueTwo: "
+                            f"expected strict int in [0, {MAX_JCS_SAFE_INT}]"
                         )
+                arg_op = arg_spec["op"]
+                if type(arg_op) is not str or arg_op not in _VALID_SECCOMP_OPS:
+                    raise ValueError(
+                        f"seccomp_profile.syscalls[{idx}].args[{arg_idx}].op: "
+                        f"invalid seccomp comparator {arg_op!r}"
+                    )
 
         if action not in _DENYING_SECCOMP_ACTIONS:
-            forbidden = sorted(set(names) & _MANDATORY_DENIED_SYSCALLS_SET)
+            forbidden = sorted(set(names) & _ALL_DENIED_SYSCALLS_SET)
             if forbidden:
                 raise ValueError(
                     f"seccomp_profile.syscalls[{idx}]: action {action!r} permits "
-                    f"mandatory denied syscalls {forbidden}"
+                    f"denied syscalls {forbidden}"
                 )
 
     canonical_bytes = canonicalize(seccomp_profile)

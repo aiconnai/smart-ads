@@ -21,6 +21,7 @@ import sys
 import tempfile
 from typing import Any
 
+from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES
 from tools.governance import (
     artifacts,
     decomposition as dec,
@@ -33,9 +34,10 @@ from tools.governance import (
 )
 from tools.governance.decomposition_governance import inspect_governance
 from tools.governance.decomposition_review import build_review_bundle
+from tools.governance.decomposition_runtime import validity
 from tools.governance.decomposition_scope import resolve_scope
 from tools.governance.jcs import canonicalize, loads_strict
-from tools.governance.locator import Store, digest, exact_fields
+from tools.governance.locator import Store, digest, exact_fields, make_locator, timestamp
 
 KEYGEN_INSTRUCTIONS = """\
 # Gerar chave Ed25519 (trust anchor OU operador) — executar OFFLINE.
@@ -635,6 +637,71 @@ def _guard_gov1_output_path(path: str, *, allow_overwrite: bool) -> Path:
     return out_path
 
 
+def _decode_ed25519_pubkey_b64(
+    pubkey_b64: object, *, cmd: str, flag_name: str
+) -> bytes:
+    if type(pubkey_b64) is not str or not pubkey_b64:
+        raise ValueError(
+            f"{cmd}: P1 envelope verification requires {flag_name} (or D4 Gov1AdmissionVerifier)"
+        )
+    raw32 = p1._strict_base64_decode(pubkey_b64)
+    if len(raw32) != 32:
+        raise ValueError(
+            f"{cmd}: {flag_name} must decode to a 32-byte raw Ed25519 public key"
+        )
+    return raw32
+
+
+def _verify_cli_p1_envelope_signature(
+    envelope: dict[str, Any],
+    *,
+    schema: str,
+    pubkey_b64: object,
+    cmd: str,
+    flag_name: str = "--pubkey-raw-base64",
+) -> None:
+    raw32 = _decode_ed25519_pubkey_b64(pubkey_b64, cmd=cmd, flag_name=flag_name)
+    domain_prefix = ADR_P1_DOMAIN_PREFIXES.get(schema)
+    if domain_prefix is None:
+        raise ValueError(
+            f"{cmd}: unknown GOV 1 P1 domain prefix for schema {schema!r}"
+        )
+    integrity = envelope.get("integrity")
+    if not isinstance(integrity, dict) or integrity.get("key_id") != p1.key_id_for(
+        raw32
+    ):
+        raise ValueError(
+            f"{cmd}: envelope integrity.key_id mismatch against {flag_name}"
+        )
+    p1.verify_envelope(envelope, domain_prefix, raw32)
+
+
+def _verify_boundary_provenance_cross_bindings(
+    boundary_obj: dict[str, Any],
+    prov_obj: dict[str, Any],
+    *,
+    cmd: str,
+) -> None:
+    if canonicalize(boundary_obj["migration_run_context_locator"]) != canonicalize(
+        prov_obj["migration_run_context_locator"]
+    ):
+        raise ValueError(
+            f"{cmd}: migration_run_context_locator mismatch against --provenance"
+        )
+    for field in (
+        "build_run_id",
+        "repository",
+        "source_commit_sha",
+        "wheel_digest",
+        "build_backend_digest",
+        "schema_bundle_digest",
+    ):
+        if boundary_obj[field] != prov_obj[field]:
+            raise ValueError(f"{cmd}: {field} mismatch against --provenance")
+    if timestamp(boundary_obj["verified_at_utc"]) < timestamp(prov_obj["built_at_utc"]):
+        raise ValueError(f"{cmd}: verified_at_utc precedes provenance built_at_utc")
+
+
 def run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     try:
         return _run_gov1(args)
@@ -696,9 +763,30 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         verified = gov1_sandbox.verify_sealed_sandbox_profile(
             artifact, seccomp_profile=seccomp
         )
+        if verified["mode"] == "candidate":
+            if args.pubkey_raw_base64 is not None:
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            return {
+                "status": "PASS",
+                "mode": "candidate",
+                "signable": False,
+                "authority": "none",
+                "schema": verified["schema"],
+                "profile_id": verified["profile_id"],
+                "seccomp_profile_digest": verified["seccomp_profile_digest"],
+            }, 0
+        _verify_cli_p1_envelope_signature(
+            artifact,
+            schema=verified["schema"],
+            pubkey_b64=args.pubkey_raw_base64,
+            cmd=cmd,
+        )
         return {
             "status": "PASS",
-            "mode": verified["mode"],
+            "mode": "envelope",
+            "signature_verified": True,
+            "d4_authority_verified": False,
+            "authority": "none",
             "schema": verified["schema"],
             "profile_id": verified["profile_id"],
             "seccomp_profile_digest": verified["seccomp_profile_digest"],
@@ -807,14 +895,47 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "verify-wheel-provenance":
         artifact = _read_json_file(args.input)
+        if artifact.get("artifact_kind") == gov1_sandbox.LOCAL_CANDIDATE_KIND:
+            if args.pubkey_raw_base64 is not None:
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+        elif artifact.get("$schema") == gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA:
+            _verify_cli_p1_envelope_signature(
+                artifact,
+                schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+                pubkey_b64=args.pubkey_raw_base64,
+                cmd=cmd,
+            )
         verified = gov1_wheel.verify_wheel_build_provenance(
             artifact,
             repo_root=Path(args.repo),
             wheel_path=Path(args.wheel),
         )
+        if verified["mode"] == "candidate":
+            if args.pubkey_raw_base64 is not None:
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            return {
+                "status": "PASS",
+                "mode": "candidate",
+                "signable": False,
+                "authority": "none",
+                "schema": verified["schema"],
+                "wheel_digest": verified["wheel_digest"],
+                "source_commit_sha": verified["source_commit_sha"],
+                "build_backend_digest": verified["build_backend_digest"],
+                "schema_bundle_digest": verified["schema_bundle_digest"],
+            }, 0
+        _verify_cli_p1_envelope_signature(
+            artifact,
+            schema=verified["schema"],
+            pubkey_b64=args.pubkey_raw_base64,
+            cmd=cmd,
+        )
         return {
             "status": "PASS",
-            "mode": verified["mode"],
+            "mode": "envelope",
+            "signature_verified": True,
+            "d4_authority_verified": False,
+            "authority": "none",
             "schema": verified["schema"],
             "wheel_digest": verified["wheel_digest"],
             "source_commit_sha": verified["source_commit_sha"],
@@ -921,12 +1042,139 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "verify-wheel-boundary-report":
         artifact = _read_json_file(args.input)
+        if artifact.get("artifact_kind") == gov1_sandbox.LOCAL_CANDIDATE_KIND:
+            if (
+                args.pubkey_raw_base64 is not None
+                or args.provenance_pubkey_raw_base64 is not None
+            ):
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            if (args.provenance is not None) != (args.repo is not None):
+                raise ValueError(
+                    f"{cmd}: --provenance and --repo must be supplied together"
+                )
+        elif artifact.get("$schema") == gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA:
+            _verify_cli_p1_envelope_signature(
+                artifact,
+                schema=gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA,
+                pubkey_b64=args.pubkey_raw_base64,
+                cmd=cmd,
+            )
+            if (
+                args.provenance is None
+                or args.repo is None
+                or args.provenance_pubkey_raw_base64 is None
+            ):
+                raise ValueError(
+                    f"{cmd}: envelope verification requires --provenance, --repo, and --provenance-pubkey-raw-base64"
+                )
+            prov_pre = _read_json_file(args.provenance)
+            if (
+                "artifact_kind" in prov_pre
+                or prov_pre.get("$schema") != gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA
+            ):
+                raise ValueError(
+                    f"{cmd}: envelope boundary report requires P1 envelope --provenance"
+                )
+            _verify_cli_p1_envelope_signature(
+                prov_pre,
+                schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+                pubkey_b64=args.provenance_pubkey_raw_base64,
+                cmd=cmd,
+                flag_name="--provenance-pubkey-raw-base64",
+            )
         verified = gov1_wheel.verify_wheel_boundary_report(
             artifact, wheel_path=Path(args.wheel)
         )
+        if verified["mode"] == "candidate":
+            if (
+                args.pubkey_raw_base64 is not None
+                or args.provenance_pubkey_raw_base64 is not None
+            ):
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            if (args.provenance is not None) != (args.repo is not None):
+                raise ValueError(
+                    f"{cmd}: --provenance and --repo must be supplied together"
+                )
+            if args.provenance is not None:
+                prov_cand = _read_json_file(args.provenance)
+                if prov_cand.get("artifact_kind") != gov1_sandbox.LOCAL_CANDIDATE_KIND:
+                    raise ValueError(
+                        f"{cmd}: candidate boundary report requires candidate --provenance"
+                    )
+                gov1_sandbox.verify_local_candidate_ref(
+                    artifact["payload"]["wheel_build_provenance_candidate_ref"],
+                    expected_schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+                    expected_candidate=prov_cand,
+                )
+                _verify_boundary_provenance_cross_bindings(
+                    artifact["payload"], prov_cand["payload"], cmd=cmd
+                )
+                gov1_wheel.verify_wheel_build_provenance(
+                    prov_cand,
+                    repo_root=Path(args.repo),
+                    wheel_path=Path(args.wheel),
+                )
+            return {
+                "status": "PASS",
+                "mode": "candidate",
+                "signable": False,
+                "authority": "none",
+                "schema": verified["schema"],
+                "wheel_digest": verified["wheel_digest"],
+                "schema_bundle_digest": verified["schema_bundle_digest"],
+                "sorted_record_digest": verified["sorted_record_digest"],
+            }, 0
+
+        _verify_cli_p1_envelope_signature(
+            artifact,
+            schema=verified["schema"],
+            pubkey_b64=args.pubkey_raw_base64,
+            cmd=cmd,
+        )
+        if (
+            args.provenance is None
+            or args.repo is None
+            or args.provenance_pubkey_raw_base64 is None
+        ):
+            raise ValueError(
+                f"{cmd}: envelope verification requires --provenance, --repo, and --provenance-pubkey-raw-base64"
+            )
+        prov_env = _read_json_file(args.provenance)
+        if (
+            "artifact_kind" in prov_env
+            or prov_env.get("$schema") != gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA
+        ):
+            raise ValueError(
+                f"{cmd}: envelope boundary report requires P1 envelope --provenance"
+            )
+        _verify_cli_p1_envelope_signature(
+            prov_env,
+            schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+            pubkey_b64=args.provenance_pubkey_raw_base64,
+            cmd=cmd,
+            flag_name="--provenance-pubkey-raw-base64",
+        )
+        expected_prov_loc = make_locator(
+            gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(prov_env)
+        )
+        if canonicalize(artifact["wheel_build_provenance_locator"]) != canonicalize(
+            expected_prov_loc
+        ):
+            raise ValueError(
+                f"{cmd}: wheel_build_provenance_locator mismatch against --provenance"
+            )
+        _verify_boundary_provenance_cross_bindings(artifact, prov_env, cmd=cmd)
+        gov1_wheel.verify_wheel_build_provenance(
+            prov_env,
+            repo_root=Path(args.repo),
+            wheel_path=Path(args.wheel),
+        )
         return {
             "status": "PASS",
-            "mode": verified["mode"],
+            "mode": "envelope",
+            "signature_verified": True,
+            "d4_authority_verified": False,
+            "authority": "none",
             "schema": verified["schema"],
             "wheel_digest": verified["wheel_digest"],
             "schema_bundle_digest": verified["schema_bundle_digest"],
@@ -1031,12 +1279,152 @@ def _run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
     if cmd == "verify-mcp-rejection-report":
         artifact = _read_json_file(args.input)
+        if artifact.get("artifact_kind") == gov1_sandbox.LOCAL_CANDIDATE_KIND:
+            if (
+                args.pubkey_raw_base64 is not None
+                or args.sandbox_pubkey_raw_base64 is not None
+            ):
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            if (args.sandbox_profile is not None) != (
+                args.seccomp_profile is not None
+            ):
+                raise ValueError(
+                    f"{cmd}: --sandbox-profile and --seccomp-profile must be supplied together"
+                )
+        elif artifact.get("$schema") == gov1_mcp.MCP_REJECTION_REPORT_SCHEMA:
+            _verify_cli_p1_envelope_signature(
+                artifact,
+                schema=gov1_mcp.MCP_REJECTION_REPORT_SCHEMA,
+                pubkey_b64=args.pubkey_raw_base64,
+                cmd=cmd,
+            )
+            if (
+                args.sandbox_profile is None
+                or args.seccomp_profile is None
+                or args.sandbox_pubkey_raw_base64 is None
+            ):
+                raise ValueError(
+                    f"{cmd}: envelope verification requires --sandbox-profile, --seccomp-profile, and --sandbox-pubkey-raw-base64"
+                )
+            sbx_pre = _read_json_file(args.sandbox_profile)
+            if (
+                "artifact_kind" in sbx_pre
+                or sbx_pre.get("$schema") != gov1_sandbox.SANDBOX_PROFILE_SCHEMA
+            ):
+                raise ValueError(
+                    f"{cmd}: envelope MCP report requires P1 envelope --sandbox-profile"
+                )
+            _verify_cli_p1_envelope_signature(
+                sbx_pre,
+                schema=gov1_sandbox.SANDBOX_PROFILE_SCHEMA,
+                pubkey_b64=args.sandbox_pubkey_raw_base64,
+                cmd=cmd,
+                flag_name="--sandbox-pubkey-raw-base64",
+            )
         verified = gov1_mcp.verify_mcp_rejection_matrix_report(
             artifact, wheel_path=Path(args.wheel)
         )
+        if verified["mode"] == "candidate":
+            if (
+                args.pubkey_raw_base64 is not None
+                or args.sandbox_pubkey_raw_base64 is not None
+            ):
+                raise ValueError(f"{cmd}: --pubkey-raw-base64 requires envelope input")
+            if (args.sandbox_profile is not None) != (
+                args.seccomp_profile is not None
+            ):
+                raise ValueError(
+                    f"{cmd}: --sandbox-profile and --seccomp-profile must be supplied together"
+                )
+            if args.sandbox_profile is not None:
+                sbx_cand = _read_json_file(args.sandbox_profile)
+                seccomp = _read_json_file(args.seccomp_profile)
+                if sbx_cand.get("artifact_kind") != gov1_sandbox.LOCAL_CANDIDATE_KIND:
+                    raise ValueError(
+                        f"{cmd}: candidate MCP report requires candidate --sandbox-profile"
+                    )
+                gov1_sandbox.verify_local_candidate_ref(
+                    artifact["payload"]["sealed_sandbox_profile_candidate_ref"],
+                    expected_schema=gov1_sandbox.SANDBOX_PROFILE_SCHEMA,
+                    expected_candidate=sbx_cand,
+                )
+                gov1_sandbox.verify_sealed_sandbox_profile(
+                    sbx_cand, seccomp_profile=seccomp
+                )
+                if canonicalize(
+                    artifact["payload"]["migration_run_context_locator"]
+                ) != canonicalize(sbx_cand["payload"]["migration_run_context_locator"]):
+                    raise ValueError(
+                        f"{cmd}: migration_run_context_locator mismatch against --sandbox-profile"
+                    )
+                validity(
+                    sbx_cand["payload"]["validity"],
+                    artifact["payload"]["executed_at_utc"],
+                )
+            return {
+                "status": "PASS",
+                "mode": "candidate",
+                "signable": False,
+                "authority": "none",
+                "schema": verified["schema"],
+                "wheel_digest": verified["wheel_digest"],
+                "schema_bundle_digest": verified["schema_bundle_digest"],
+                "executed_at_utc": verified["executed_at_utc"],
+            }, 0
+
+        _verify_cli_p1_envelope_signature(
+            artifact,
+            schema=verified["schema"],
+            pubkey_b64=args.pubkey_raw_base64,
+            cmd=cmd,
+        )
+        if (
+            args.sandbox_profile is None
+            or args.seccomp_profile is None
+            or args.sandbox_pubkey_raw_base64 is None
+        ):
+            raise ValueError(
+                f"{cmd}: envelope verification requires --sandbox-profile, --seccomp-profile, and --sandbox-pubkey-raw-base64"
+            )
+        sbx_env = _read_json_file(args.sandbox_profile)
+        seccomp = _read_json_file(args.seccomp_profile)
+        if (
+            "artifact_kind" in sbx_env
+            or sbx_env.get("$schema") != gov1_sandbox.SANDBOX_PROFILE_SCHEMA
+        ):
+            raise ValueError(
+                f"{cmd}: envelope MCP report requires P1 envelope --sandbox-profile"
+            )
+        _verify_cli_p1_envelope_signature(
+            sbx_env,
+            schema=gov1_sandbox.SANDBOX_PROFILE_SCHEMA,
+            pubkey_b64=args.sandbox_pubkey_raw_base64,
+            cmd=cmd,
+            flag_name="--sandbox-pubkey-raw-base64",
+        )
+        expected_sbx_loc = make_locator(
+            gov1_sandbox.SANDBOX_PROFILE_SCHEMA, canonicalize(sbx_env)
+        )
+        if canonicalize(artifact["sealed_sandbox_profile_locator"]) != canonicalize(
+            expected_sbx_loc
+        ):
+            raise ValueError(
+                f"{cmd}: sealed_sandbox_profile_locator mismatch against --sandbox-profile"
+            )
+        gov1_sandbox.verify_sealed_sandbox_profile(sbx_env, seccomp_profile=seccomp)
+        if canonicalize(artifact["migration_run_context_locator"]) != canonicalize(
+            sbx_env["migration_run_context_locator"]
+        ):
+            raise ValueError(
+                f"{cmd}: migration_run_context_locator mismatch against --sandbox-profile"
+            )
+        validity(sbx_env["validity"], artifact["executed_at_utc"])
         return {
             "status": "PASS",
-            "mode": verified["mode"],
+            "mode": "envelope",
+            "signature_verified": True,
+            "d4_authority_verified": False,
+            "authority": "none",
             "schema": verified["schema"],
             "wheel_digest": verified["wheel_digest"],
             "schema_bundle_digest": verified["schema_bundle_digest"],
@@ -1240,6 +1628,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_sbx = sub.add_parser("verify-sealed-sandbox-profile")
     p_verify_sbx.add_argument("--in", dest="input", required=True)
     p_verify_sbx.add_argument("--seccomp-profile", required=True)
+    p_verify_sbx.add_argument("--pubkey-raw-base64", default=None)
     p_verify_sbx.set_defaults(func=cmd_gov1)
 
     p_build_prov = sub.add_parser("build-wheel-provenance")
@@ -1258,6 +1647,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_prov.add_argument("--in", dest="input", required=True)
     p_verify_prov.add_argument("--repo", required=True)
     p_verify_prov.add_argument("--wheel", required=True)
+    p_verify_prov.add_argument("--pubkey-raw-base64", default=None)
     p_verify_prov.set_defaults(func=cmd_gov1)
 
     p_build_bound = sub.add_parser("build-wheel-boundary-report")
@@ -1276,6 +1666,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_bound = sub.add_parser("verify-wheel-boundary-report")
     p_verify_bound.add_argument("--in", dest="input", required=True)
     p_verify_bound.add_argument("--wheel", required=True)
+    p_verify_bound.add_argument("--pubkey-raw-base64", default=None)
+    p_verify_bound.add_argument("--provenance", default=None)
+    p_verify_bound.add_argument("--repo", default=None)
+    p_verify_bound.add_argument("--provenance-pubkey-raw-base64", default=None)
     p_verify_bound.set_defaults(func=cmd_gov1)
 
     p_build_mcp = sub.add_parser("build-mcp-rejection-report")
@@ -1294,6 +1688,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_mcp = sub.add_parser("verify-mcp-rejection-report")
     p_verify_mcp.add_argument("--in", dest="input", required=True)
     p_verify_mcp.add_argument("--wheel", required=True)
+    p_verify_mcp.add_argument("--pubkey-raw-base64", default=None)
+    p_verify_mcp.add_argument("--sandbox-profile", default=None)
+    p_verify_mcp.add_argument("--seccomp-profile", default=None)
+    p_verify_mcp.add_argument("--sandbox-pubkey-raw-base64", default=None)
     p_verify_mcp.set_defaults(func=cmd_gov1)
 
     p_verify_conv = sub.add_parser("verify-pr1-gov1-convergence")

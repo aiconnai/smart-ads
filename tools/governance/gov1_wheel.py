@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import binascii
 from collections.abc import Mapping
 import copy
 import csv
@@ -23,6 +24,7 @@ import io
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import sysconfig
@@ -32,6 +34,7 @@ from types import MappingProxyType
 from typing import Any, Final
 import venv
 import zipfile
+import zlib
 
 from tools.governance import p1
 from tools.governance.decomposition_scope import run_git_offline
@@ -886,8 +889,14 @@ def _read_and_verify_site_packages_closure_pkg(
     self_record_entry = f"{dist_info_dir}/RECORD"
     found_self_record = False
 
-    reader = csv.reader(io.StringIO(record_text, newline=""))
-    for row in reader:
+    try:
+        rows = list(csv.reader(io.StringIO(record_text, newline="")))
+    except csv.Error as exc:
+        raise ValueError(
+            f"site_packages[{pkg_name!r}]: invalid CSV in RECORD: {exc}"
+        ) from exc
+
+    for row in rows:
         if len(row) != 3:
             raise ValueError(
                 f"site_packages[{pkg_name!r}]: malformed 3-column CSV row in RECORD: {row!r}"
@@ -1004,7 +1013,18 @@ def _read_and_verify_wheelhouse_closure_pkg(
                 raise ValueError(
                     f"backend_wheel_dir[{pkg_name!r}]: duplicate ZIP entry {info.filename!r}"
                 )
-            data = zf.read(info)
+            try:
+                data = zf.read(info)
+            except (
+                zipfile.BadZipFile,
+                zlib.error,
+                EOFError,
+                RuntimeError,
+                NotImplementedError,
+            ) as exc:
+                raise ValueError(
+                    f"backend_wheel_dir[{pkg_name!r}]: failed to read ZIP member {info.filename!r}: {exc}"
+                ) from exc
             if len(data) != info.file_size:
                 raise ValueError(
                     f"backend_wheel_dir[{pkg_name!r}]: ZIP size mismatch on {info.filename!r}"
@@ -1023,8 +1043,15 @@ def _read_and_verify_wheelhouse_closure_pkg(
             f"backend_wheel_dir[{pkg_name!r}]: non-UTF-8 RECORD in wheel"
         ) from exc
 
+    try:
+        closure_rows = list(csv.reader(io.StringIO(rec_text, newline="")))
+    except csv.Error as exc:
+        raise ValueError(
+            f"backend_wheel_dir[{pkg_name!r}]: invalid CSV in wheel RECORD: {exc}"
+        ) from exc
+
     seen_rec: set[str] = set()
-    for row in csv.reader(io.StringIO(rec_text, newline="")):
+    for row in closure_rows:
         if len(row) != 3:
             raise ValueError(
                 f"backend_wheel_dir[{pkg_name!r}]: malformed RECORD row {row!r}"
@@ -1990,6 +2017,140 @@ def _scan_wheel_python_ast_violations(source: str, *, filename: str) -> list[str
     return violations
 
 
+def verify_contiguous_zip_layout(
+    raw_bytes: bytes,
+    infos: list[zipfile.ZipInfo],
+    *,
+    comment: bytes,
+) -> None:
+    """Verify strict gap-free 32-bit ZIP archive byte contiguity from offset 0."""
+    if type(raw_bytes) is not bytes or len(raw_bytes) < 22:
+        raise ValueError("wheel archive: truncated or non-bytes ZIP layout")
+    if comment != b"":
+        raise ValueError("wheel archive: non-empty ZIP archive comment forbidden")
+    if len(raw_bytes) >= 42 and raw_bytes[-42:-38] == b"PK\x06\x07":
+        raise ValueError("wheel archive: Zip64 EOCD locator record forbidden")
+
+    (
+        eocd_sig,
+        disk_no,
+        cd_start_disk,
+        disk_entries,
+        cd_count,
+        cd_size,
+        cd_offset,
+        comment_len,
+    ) = struct.unpack("<4sHHHHIIH", raw_bytes[-22:])
+    if eocd_sig != b"PK\x05\x06":
+        raise ValueError(
+            "wheel archive: missing standard 22-byte EOCD or trailing bytes past EOCD"
+        )
+    if comment_len != 0:
+        raise ValueError("wheel archive: non-zero EOCD comment length forbidden")
+    if (
+        0xFFFF in (disk_no, cd_start_disk, disk_entries, cd_count)
+        or 0xFFFFFFFF in (cd_size, cd_offset)
+    ):
+        raise ValueError("wheel archive: Zip64 EOCD sentinel values forbidden")
+    if (
+        disk_no != 0
+        or cd_start_disk != 0
+        or disk_entries != cd_count
+        or cd_count == 0
+    ):
+        raise ValueError("wheel archive: invalid multi-disk or empty EOCD header")
+    if len(infos) != cd_count:
+        raise ValueError("wheel archive: central directory count mismatch against EOCD")
+    if cd_offset + cd_size + 22 != len(raw_bytes):
+        raise ValueError(
+            "wheel archive: non-contiguous central directory or EOCD byte layout"
+        )
+
+    sorted_infos = sorted(infos, key=lambda item: item.header_offset)
+    if len({item.header_offset for item in sorted_infos}) != len(sorted_infos):
+        raise ValueError("wheel archive: duplicate local header_offset in central directory")
+    if sorted_infos[0].header_offset != 0:
+        raise ValueError(
+            "wheel archive: unreferenced prefix bytes before offset 0 local header"
+        )
+
+    cursor = 0
+    for info in sorted_infos:
+        if info.header_offset != cursor:
+            raise ValueError(
+                f"wheel archive: non-contiguous local header offset on {info.filename!r} "
+                f"(expected {cursor}, got {info.header_offset})"
+            )
+        if cursor + 30 > cd_offset:
+            raise ValueError(
+                f"wheel archive: truncated local file header on {info.filename!r}"
+            )
+        (
+            lfh_sig,
+            _lfh_ver,
+            lfh_flags,
+            lfh_method,
+            _lfh_time,
+            _lfh_date,
+            lfh_crc,
+            lfh_comp_size,
+            lfh_uncomp_size,
+            lfh_fname_len,
+            lfh_extra_len,
+        ) = struct.unpack_from("<4sHHHHHIIIHH", raw_bytes, cursor)
+        if lfh_sig != b"PK\x03\x04":
+            raise ValueError(
+                f"wheel archive: invalid local file header magic on {info.filename!r}"
+            )
+        if (lfh_flags & 0x08) != 0 or (info.flag_bits & 0x08) != 0:
+            raise ValueError(
+                f"wheel archive: streaming data descriptor flag forbidden on {info.filename!r}"
+            )
+        if 0xFFFFFFFF in (lfh_comp_size, lfh_uncomp_size):
+            raise ValueError(
+                f"wheel archive: Zip64 local header size sentinel forbidden on {info.filename!r}"
+            )
+        fname_start = cursor + 30
+        fname_end = fname_start + lfh_fname_len
+        data_start = fname_end + lfh_extra_len
+        next_cursor = data_start + info.compress_size
+        if next_cursor > cd_offset:
+            raise ValueError(
+                f"wheel archive: local entry span overflows central directory on {info.filename!r}"
+            )
+        if raw_bytes[fname_start:fname_end] != info.filename.encode("utf-8"):
+            raise ValueError(
+                f"wheel archive: local header filename mismatch against central directory on {info.filename!r}"
+            )
+        if (
+            lfh_method != info.compress_type
+            or lfh_comp_size != info.compress_size
+            or lfh_uncomp_size != info.file_size
+            or lfh_crc != info.CRC
+        ):
+            raise ValueError(
+                f"wheel archive: local header metadata mismatch against central directory on {info.filename!r}"
+            )
+        cursor = next_cursor
+
+    if cursor != cd_offset:
+        raise ValueError(
+            "wheel archive: unreferenced trailing gap between local entries and central directory"
+        )
+
+    cd_cursor = cd_offset
+    cd_end = cd_offset + cd_size
+    for _ in range(cd_count):
+        if cd_cursor + 46 > cd_end or raw_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
+            raise ValueError("wheel archive: corrupt central directory header")
+        cd_fname_len, cd_extra_len, cd_comment_len = struct.unpack_from(
+            "<HHH", raw_bytes, cd_cursor + 28
+        )
+        cd_cursor += 46 + cd_fname_len + cd_extra_len + cd_comment_len
+    if cd_cursor != cd_end:
+        raise ValueError("wheel archive: non-contiguous central directory byte span")
+
+
 def _read_and_validate_wheel_archive(
     wheel_bytes: bytes,
 ) -> tuple[dict[str, bytes], list[dict[str, Any]], str, list[str]]:
@@ -2003,6 +2164,7 @@ def _read_and_validate_wheel_archive(
         infos = zf.infolist()
         if not infos:
             raise ValueError("wheel archive: empty ZIP central directory")
+        verify_contiguous_zip_layout(wheel_bytes, infos, comment=zf.comment)
         for info in infos:
             if info.is_dir() or info.filename.endswith("/"):
                 raise ValueError(
@@ -2022,7 +2184,18 @@ def _read_and_validate_wheel_archive(
                 raise ValueError(
                     f"wheel archive: member violates strict allowlist: {info.filename!r}"
                 )
-            raw = zf.read(info)
+            try:
+                raw = zf.read(info)
+            except (
+                zipfile.BadZipFile,
+                zlib.error,
+                EOFError,
+                RuntimeError,
+                NotImplementedError,
+            ) as exc:
+                raise ValueError(
+                    f"wheel archive: failed to decompress member {info.filename!r}: {exc}"
+                ) from exc
             if len(raw) != info.file_size:
                 raise ValueError(
                     f"wheel archive: declared file_size mismatch on {info.filename!r}"
@@ -2049,9 +2222,14 @@ def _read_and_validate_wheel_archive(
         if not raw_line:
             raise ValueError("wheel RECORD: blank lines are forbidden")
 
+    try:
+        record_rows = list(csv.reader(io.StringIO(record_text, newline="")))
+    except csv.Error as exc:
+        raise ValueError(f"wheel RECORD: invalid CSV syntax: {exc}") from exc
+
     seen_record_paths: set[str] = set()
     record_entries: list[dict[str, Any]] = []
-    for row in csv.reader(io.StringIO(record_text, newline="")):
+    for row in record_rows:
         if len(row) != 3:
             raise ValueError(f"wheel RECORD: expected 3 CSV columns, got {row!r}")
         rec_path, rec_hash, rec_size = row
@@ -2192,20 +2370,23 @@ def inspect_wheel_boundary(wheel_path: Path) -> dict[str, Any]:
             "TZ": "UTC",
         }
 
-        purelib_proc = subprocess.run(
-            [
-                str(venv_python),
-                "-I",
-                "-B",
-                "-c",
-                "import sysconfig; print(sysconfig.get_path('purelib'))",
-            ],
-            cwd=str(probe_cwd),
-            env=clean_env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        try:
+            purelib_proc = subprocess.run(
+                [
+                    str(venv_python),
+                    "-I",
+                    "-B",
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_path('purelib'))",
+                ],
+                cwd=str(probe_cwd),
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"clean_venv: failed to query purelib: {exc}") from exc
         if purelib_proc.returncode != 0:
             raise ValueError(
                 f"clean_venv: failed to query purelib: {purelib_proc.stderr.strip()}"
@@ -2222,22 +2403,27 @@ def inspect_wheel_boundary(wheel_path: Path) -> dict[str, Any]:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(raw_bytes)
 
-        probe_proc = subprocess.run(
-            [
-                str(venv_python),
-                "-I",
-                "-B",
-                "-c",
-                _CLEAN_VENV_PROBE_SCRIPT,
-                str(purelib_path),
-                canonicalize(expected_modules).decode("utf-8"),
-            ],
-            cwd=str(probe_cwd),
-            env=clean_env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        try:
+            probe_proc = subprocess.run(
+                [
+                    str(venv_python),
+                    "-I",
+                    "-B",
+                    "-c",
+                    _CLEAN_VENV_PROBE_SCRIPT,
+                    str(purelib_path),
+                    canonicalize(expected_modules).decode("utf-8"),
+                ],
+                cwd=str(probe_cwd),
+                env=clean_env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(
+                f"clean_venv: isolated import probe failed or timed out: {exc}"
+            ) from exc
         if probe_proc.returncode != 0:
             raise ValueError(
                 f"clean_venv: isolated import probe failed: {probe_proc.stderr.strip()}"
@@ -2580,6 +2766,11 @@ def verify_wheel_build_provenance(
 # ---------------------------------------------------------------------------
 
 
+_PEP427_RECORD_HASH_RE: Final[re.Pattern[str]] = re.compile(
+    r"\Asha256=[A-Za-z0-9_-]{43}\Z"
+)
+
+
 def _validate_sorted_record_entries(entries: object, label: str) -> list[dict[str, Any]]:
     if type(entries) is not list or len(entries) == 0:
         raise ValueError(f"{label}: expected non-empty list")
@@ -2601,12 +2792,25 @@ def _validate_sorted_record_entries(entries: object, label: str) -> list[dict[st
                 )
             found_self = True
         else:
-            r_hash = _require_strict_str(
-                item["record_hash"], f"{label}[{idx}].record_hash"
-            )
-            if not r_hash.startswith("sha256="):
+            r_hash = item["record_hash"]
+            if type(r_hash) is not str or _PEP427_RECORD_HASH_RE.fullmatch(r_hash) is None:
                 raise ValueError(
-                    f"{label}[{idx}].record_hash: expected 'sha256=<urlsafe_b64>'"
+                    f"{label}[{idx}].record_hash: expected canonical 'sha256=<43_urlsafe_b64>'"
+                )
+            b64_part = r_hash[7:]
+            try:
+                raw32 = base64.urlsafe_b64decode(b64_part + "=")
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError(
+                    f"{label}[{idx}].record_hash: invalid base64url digest"
+                ) from exc
+            if (
+                len(raw32) != 32
+                or base64.urlsafe_b64encode(raw32).rstrip(b"=").decode("ascii")
+                != b64_part
+            ):
+                raise ValueError(
+                    f"{label}[{idx}].record_hash: non-canonical 32-byte base64url SHA-256 digest"
                 )
             _require_safe_nonneg_int(
                 item["record_size"], f"{label}[{idx}].record_size", minimum=0
