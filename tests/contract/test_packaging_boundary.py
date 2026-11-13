@@ -23,9 +23,10 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 UV_LOCK_PATH = REPO_ROOT / "uv.lock"
 PYTEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pytest.yml"
 
-EXPECTED_PR1_SUBPACKAGES = frozenset(
-    {"contracts", "domain", "ports", "application"}
+EXPECTED_PACKAGED_SUBPACKAGES = frozenset(
+    {"contracts", "domain", "ports", "application", "transports"}
 )
+EXPECTED_PR1_SUBPACKAGES = EXPECTED_PACKAGED_SUBPACKAGES
 EXPECTED_PACKAGED_MODULES = frozenset(
     {
         "smart_ads",
@@ -46,6 +47,12 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.application.admission",
         "smart_ads.application.collection",
         "smart_ads.application.completeness",
+        "smart_ads.transports",
+        "smart_ads.transports.mcp",
+        "smart_ads.transports.mcp.delegation",
+        "smart_ads.transports.mcp.gateway",
+        "smart_ads.transports.mcp.protocol",
+        "smart_ads.transports.mcp.schemas",
     }
 )
 
@@ -64,7 +71,7 @@ WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES = frozenset(
     {"__import__", "builtins", "eval", "exec", "compile"}
 )
 
-# Tier 2 (pure layers: contracts, domain, ports, application, analytics, reconciliation + root __init__.py)
+# Tier 2 (pure layers: contracts, domain, ports, application, analytics, reconciliation, transports + root __init__.py)
 PURE_LAYER_SUBPACKAGES = frozenset(
     {
         "contracts",
@@ -73,6 +80,7 @@ PURE_LAYER_SUBPACKAGES = frozenset(
         "application",
         "analytics",
         "reconciliation",
+        "transports",
     }
 )
 PURE_LAYER_ALLOWED_TOP_IMPORTS = frozenset(
@@ -179,6 +187,10 @@ def scan_wheel_wide_ast_violations(
                     violations.append(
                         f"{filename}:{node.lineno}: forbidden dynamic attribute {node.attr!r}"
                     )
+        elif isinstance(node, ast.Assert):
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden assert statement in wheel source"
+            )
     return violations
 
 
@@ -466,14 +478,23 @@ def test_clean_venv_outside_repo_isolated_import(tmp_path: Path) -> None:
         "assert sorted(walked) == expected, f'Walked mismatch: {sorted(walked)} != {expected}'\n"
         "for mod_name in expected:\n"
         "    assert mod_name in sys.modules, f'Missing module in sys.modules: {mod_name}'\n"
-        "from smart_ads.contracts import canonicalize_jcs, validate_resource_ref\n"
+        "from smart_ads.contracts import ArtifactLocator, canonicalize_jcs, validate_resource_ref\n"
         "from smart_ads.domain import TenantResourceKeyHandle, derive_resource_ref\n"
         "from smart_ads.ports import ExternalIOCounters\n"
+        "from smart_ads.transports.mcp import McpDelegationContext, McpRuntimeContext, handle_mcp_request_bytes\n"
         "assert canonicalize_jcs({'b': 1, 'a': 2}) == b'{\"a\":2,\"b\":1}'\n"
         "kh = TenantResourceKeyHandle('tenant:ibvi', 'key:ibvi-v1', b'0123456789abcdef0123456789abcdef')\n"
         "rref = derive_resource_ref(key_handle=kh, mapping_version='hmac-sha256-b32-v1', domain_separator='0x00', ad_platform_ref='meta', resource_level='campaign', raw_provider_id='123')\n"
         "assert validate_resource_ref(rref) == rref\n"
         "assert ExternalIOCounters.zero().is_zero is True\n"
+        "rej_out = handle_mcp_request_bytes(b'[]', None)\n"
+        "assert rej_out.rejection is not None and rej_out.rejection.case_id == 'batch_array' and rej_out.admitted_request is None\n"
+        "del_loc = ArtifactLocator.from_digest('smart_ads/ibvi_ads_delegation_context/v1', 'sha256:' + 'a' * 64)\n"
+        "del_ctx = McpDelegationContext(schema='smart_ads/ibvi_ads_delegation_context/v1', route='/ibvi-ads', host_conductor_ref='conductor:hermes', front_ref='front:pinna', profile_ref='profile:pinna', tenant_ref='tenant:ibvi', binding_ref='binding:meta', resource_scope_ref='scope:ibvi', allowed_method='smart_ads.queries.get_campaign_performance_v1', policy_digest='sha256:' + 'b' * 64, issued_at_utc='2026-11-12T12:00:00Z', valid_until_utc='2026-11-12T12:15:00Z', nonce='nonce-1', locator=del_loc)\n"
+        "rt_ctx = McpRuntimeContext(clock_lower_utc='2026-11-12T12:01:00Z', clock_upper_utc='2026-11-12T12:01:02Z', delegation_context=del_ctx)\n"
+        "req_bytes = canonicalize_jcs({'jsonrpc': '2.0', 'id': 'probe-1', 'method': 'smart_ads.queries.get_campaign_performance_v1', 'params': {'tenant_ref': 'tenant:ibvi', 'binding_ref': 'binding:meta', 'resource_scope_ref': 'scope:ibvi', 'date_range': {'start_date': '2026-11-10', 'end_date': '2026-11-10'}}})\n"
+        "adm_out = handle_mcp_request_bytes(req_bytes, rt_ctx)\n"
+        "assert adm_out.rejection is None and adm_out.admitted_request is not None\n"
         "for mod in ('tools', 'tooling'):\n"
         "    try:\n"
         "        __import__(mod)\n"
@@ -540,6 +561,7 @@ def test_ast_zero_io_and_zero_tooling_imports_in_src() -> None:
         "import tools.governance.jcs\n",
         "from tooling import helper\n",
         "from builtins import eval as ev\n",
+        "assert x == 1\n",
     ],
 )
 def test_ast_boundary_scanner_rejects_violating_snippets(bad_snippet: str) -> None:
@@ -547,6 +569,9 @@ def test_ast_boundary_scanner_rejects_violating_snippets(bad_snippet: str) -> No
         bad_snippet, filename="<synthetic>"
     )
     assert violations, f"Expected AST scanner to reject snippet:\n{bad_snippet}"
+    assert scan_wheel_wide_ast_violations(
+        "assert x == 1\n", filename="<synthetic>"
+    )
     assert not scan_pure_layer_ast_violations(
         "import re\nPAT = re.compile(r'^a+$')\n", filename="<ok>"
     )

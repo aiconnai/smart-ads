@@ -47,6 +47,7 @@ from smart_ads.contracts import (
     validate_timestamp_utc_seconds,
     validate_utf8_nfc,
 )
+from tools.governance import decomposition_admission
 from tools.governance import jcs as gov_jcs
 from tools.governance import locator as gov_locator
 from tools.governance import p1 as gov_p1
@@ -641,7 +642,7 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         ADR_DATA_DOMAIN_PREFIXES,
         SUPPLEMENTAL_DOMAIN_PREFIXES,
     )
-    assert len(ADR_P1_DOMAIN_PREFIXES) == 22
+    assert len(ADR_P1_DOMAIN_PREFIXES) == 27
     assert len(ADR_DATA_DOMAIN_PREFIXES) == 7
     assert len(SUPPLEMENTAL_DOMAIN_PREFIXES) == 2
 
@@ -655,9 +656,31 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
             assert prefix.startswith("SMART-ADS:") and prefix.endswith(":V1\n")
             all_values.append(prefix)
 
-    # All 31 prefix values across the 3 tables are pairwise disjoint
-    assert len(all_values) == 31
-    assert len(set(all_values)) == 31
+    # All 36 prefix values across the 3 tables are pairwise disjoint
+    assert len(all_values) == 36
+    assert len(set(all_values)) == 36
+
+    adr_bytes = (
+        Path(__file__).resolve().parents[2]
+        / "docs"
+        / "adr"
+        / "ADR-0001-smart-ads-read-gateway.md"
+    ).read_bytes()
+    proposals_by_schema = {
+        row["schema"]: row["domain_prefix"]
+        for row in decomposition_admission.profile_proposals(adr_bytes)
+    }
+    gov1_expected = {
+        "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
+        "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
+        "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
+        "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
+        "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
+    }
+    for schema, expected_prefix in gov1_expected.items():
+        assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
+        assert proposals_by_schema[schema] == expected_prefix
+        assert ADR_P1_DOMAIN_PREFIXES[schema] == proposals_by_schema[schema]
 
 
 def test_mapping_and_scalar_validators() -> None:
