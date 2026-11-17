@@ -75,7 +75,9 @@ def _cap_for_inconclusive(
 
     This cap is an analytical policy extension chosen by the repo owner, not a rule ADR-0001
     states: section 5.6 derives the status of derived metrics from their inputs, and neither
-    section 7 nor the section 12.7 `certification_record/v1` row requires or forbids it.
+    section 7 nor the section 12.7 `certification_record/v1` row requires or forbids it. So with
+    an inconclusive finding, VERIFIED, admitted DEGRADED and UNAVAILABLE inputs give the same
+    record, and `verify_certification_record` accepts it for any of those input lists.
     """
     if any(finding.finding_status == FINDING_INCONCLUSIVE for finding in recomputed):
         return min(status, _INCONCLUSIVE_CAP)
@@ -88,7 +90,8 @@ class AnalyticalCertificationRecord(_P1Artifact):
 
     `output_digest` equals the certified execution's `canonical_result_digest`, so a record
     with no findings is still bound to its analysis; the ADR names the member without fixing its
-    preimage, so this is a choice (open decision).
+    preimage, so this is a choice (open decision). The constructor and `from_dict` accept any of
+    the five statuses; only `verify_certification_record` proves a record's status.
     """
 
     SCHEMA: ClassVar[str] = CERTIFICATION_RECORD_SCHEMA
@@ -183,7 +186,8 @@ def build_certification_record(
     `canonical_result_digest`. Every argument is checked again first (see `_fresh_context`):
     supplied findings and `integrity` are re-parsed from their wire form, attested inputs
     re-constructed. The status is the attested inputs' status (DEGRADED admission included),
-    then capped at UNAVAILABLE if a recomputed finding is inconclusive (`_cap_for_inconclusive`).
+    then capped at UNAVAILABLE if a recomputed finding is inconclusive, a policy extension (see
+    `_cap_for_inconclusive` for the ADR references).
     """
     execution, expected = _evaluate(context, evidence)
     supplied = tuple(
