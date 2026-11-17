@@ -5,6 +5,14 @@ names below are a choice the ADR does not fix. ``native_request_digest`` is
 sha256 over the RFC 8785 bytes of the complete ``to_dict()`` (including
 ``integrity`` when present), also a choice the ADR does not fix beyond "from
 RFC 8785 bytes". The native-to-canonical algorithm itself is injected.
+
+The endpoint must be an authority-free, query-free path whose segments are an
+API version (``v21.0``) or a lowercase name without digits. The reference side's
+version segments must equal its ``api-version:<v>``; the version-opaque
+candidate (``opaque-driver-contract:sha256:<hex>``) carries no version segment.
+This path grammar is an open decision with two known limits: it rejects the
+bare path ``/`` and digit-bearing segments such as ``/oauth2/token``, and it
+admits a raw provider identifier made only of letters.
 """
 from __future__ import annotations
 
@@ -44,10 +52,15 @@ _ENDPOINT_VERSION_PREFIXES: Final[frozenset[str]] = frozenset(
 _ATTRIBUTION_OMITTED: Final[str] = "omitted"
 # Path only: no scheme, authority, userinfo, query or fragment. A segment is either an
 # API version (`v21.0`) or a lowercase name without digits, so raw numeric provider
-# identifiers (`act_123`, `1234`) cannot appear in the endpoint.
+# identifiers (`act_123`, `1234`) cannot appear in the endpoint. Known limits of this
+# grammar (an open decision, not fixed by the ADR): it rejects the bare path "/" and
+# legitimate digit-bearing segments such as `/oauth2/token`, and it admits a raw
+# provider identifier made only of letters.
 _ENDPOINT_PATH_RE: Final[re.Pattern[str]] = re.compile(
     r"\A(?:/(?:v[0-9]+(?:\.[0-9]+)*|[a-z][a-z_-]*))+\Z"
 )
+_VERSION_SEGMENT_RE: Final[re.Pattern[str]] = re.compile(r"\Av[0-9]+(?:\.[0-9]+)*\Z")
+_SHA256_BODY_RE: Final[re.Pattern[str]] = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _NATIVE_NAME_RE: Final[re.Pattern[str]] = re.compile(r"\A[a-z][a-z_]*\Z")
 
 
@@ -95,6 +108,32 @@ def _check_endpoint(endpoint: object) -> None:
         raise Bundle7BDefectError(
             "native_projection_forbidden_content",
             f"{label}: only an authority-free, query-free path without raw ids is allowed",
+        )
+
+
+def _check_endpoint_version(endpoint: str, version_ref: str) -> None:
+    """ADR L1213 and L923-924: the exact Gate-3 version, or a version-opaque candidate.
+
+    With ``api-version:<v>`` every version segment of the path must equal ``<v>``
+    (the side record ties ``<v>`` to the fingerprint's selected version). With
+    ``opaque-driver-contract:<sha256>`` the path carries no version segment.
+    """
+    label = "native_request_projection"
+    prefix, body = version_ref.split(":", 1)
+    versions = [s for s in endpoint.split("/")[1:] if _VERSION_SEGMENT_RE.fullmatch(s)]
+    if prefix == "opaque-driver-contract":
+        if _SHA256_BODY_RE.fullmatch(body) is None:
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.endpoint_version_ref: expected sha256:<hex>"
+            )
+        if versions:
+            raise Bundle7BDefectError(
+                "native_version_mismatch", f"{label}.endpoint: version-opaque driver path"
+            )
+        return
+    if any(version != body for version in versions):
+        raise Bundle7BDefectError(
+            "native_version_mismatch", f"{label}.endpoint: version differs from {body!r}"
         )
 
 
@@ -149,6 +188,7 @@ class NativeRequestProjection:
             prefixes=_ENDPOINT_VERSION_PREFIXES,
             label=f"{label}.endpoint_version_ref",
         )
+        _check_endpoint_version(self.endpoint, self.endpoint_version_ref)
         self._check_arrays(label)
         require_member(self.date_range, DateRange, label=f"{label}.date_range")
         _native_name(self.resource_level, label=f"{label}.resource_level")

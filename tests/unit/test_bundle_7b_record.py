@@ -232,6 +232,20 @@ def test_reference_execution_members_are_closed_and_cross_checked(
     assert record_defect(tampered(world.record, ("reference_execution", member), value)) == code
 
 
+def test_record_rejects_a_native_endpoint_version_that_disagrees_with_the_side(
+    world: World,
+) -> None:
+    reference = native_dict(endpoint="/v99.0/insights")
+    record = tampered(world.record, ("reference_execution", "native_request_projection"),
+                      reference)
+    assert record_defect(record) == "native_version_mismatch"
+    candidate = copy.deepcopy(world.record["candidate_execution"]["native_request_projection"])
+    candidate["endpoint"] = "/v21.0/insights"
+    record = tampered(world.record, ("candidate_execution", "native_request_projection"),
+                      candidate)
+    assert record_defect(record) == "native_version_mismatch"
+
+
 def test_record_requires_distinct_effect_proofs_and_provider_targets(world: World) -> None:
     same_proof = tampered(world.record, ("reference_execution", "effect_proof_locator"),
                           CAND_EFFECT.to_dict())

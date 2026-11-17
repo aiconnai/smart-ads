@@ -131,6 +131,46 @@ def test_native_projection_member_grammar(member: str, value: object, code: str)
     assert native_defect(native_dict(**{member: value})) == code
 
 
+OPAQUE_REF = "opaque-driver-contract:" + sha("3")
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "version_ref", "code"),
+    [
+        # Reference: every version segment must equal the Gate-3 version in the ref.
+        ("/v99.0/insights", "api-version:v21.0", "native_version_mismatch"),
+        ("/v21.0/insights/v22", "api-version:v21.0", "native_version_mismatch"),
+        ("/v21/insights", "api-version:v21.0", "native_version_mismatch"),
+        # Candidate: Pipeboard is version-opaque, so no version segment at all.
+        ("/v21.0/insights", OPAQUE_REF, "native_version_mismatch"),
+        ("/mcp/v1/tools", OPAQUE_REF, "native_version_mismatch"),
+        # The standalone opaque identity is exactly a sha256 digest.
+        ("/mcp/tools/get_insights", "opaque-driver-contract:pipeboard-v1", "malformed_member"),
+        ("/mcp/tools/get_insights", "opaque-driver-contract:sha256:ABC", "malformed_member"),
+    ],
+)
+def test_native_endpoint_version_must_match_its_version_identity(
+    endpoint: str, version_ref: str, code: str
+) -> None:
+    data = native_dict(endpoint=endpoint, endpoint_version_ref=version_ref)
+    assert native_defect(data) == code
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "version_ref"),
+    [
+        ("/v21.0/insights", "api-version:v21.0"),
+        ("/insights", "api-version:v21.0"),
+        ("/mcp/tools/get_insights", OPAQUE_REF),
+    ],
+)
+def test_native_endpoint_version_accepts_matching_identities(
+    endpoint: str, version_ref: str
+) -> None:
+    data = native_dict(endpoint=endpoint, endpoint_version_ref=version_ref)
+    assert b7.NativeRequestProjection.from_dict(data).endpoint == endpoint
+
+
 def test_native_projection_rejects_non_mapping_input() -> None:
     for bad in ("x", None, {1: "x"}):
         assert native_defect(bad) == "malformed_member"
