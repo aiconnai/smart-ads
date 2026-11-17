@@ -18,24 +18,16 @@ from typing import Any, Callable
 import pytest
 
 from smart_ads.analytics import intelligence
-from smart_ads.analytics.formulas import (
-    CertificationInput,
-    DerivedCertificationStatus,
-    FormulaGraphError,
-)
 from smart_ads.analytics.intelligence import (
     INTELLIGENCE_ERROR_CODES,
     METRIC_WINDOW_COLUMNS,
     AnalysisEvidence,
-    AnalyticalCertificationRecord,
-    AttestedCertificationInput,
     EvaluationContext,
     Finding,
     IntelligenceError,
-    build_certification_record,
-    derive_certification_status,
     evaluate_findings,
 )
+from smart_ads.analytics.policy import SaturationRule, WasteRule
 from smart_ads.analytics.policy import (
     AnalysisPolicy,
     EvaluationScope,
@@ -61,7 +53,6 @@ SPEND = "metric:spend_v1"
 CLICKS = "metric:clicks_v1"
 IMPRESSIONS = "metric:impressions_v1"
 FINDING_TYPE = "smart_ads/finding/v1"
-RECORD_TYPE = "smart_ads/certification_record/v1"
 RESULT_TYPE = "smart_ads/analysis_result/v1"
 EXECUTION_TYPE = "smart_ads/analysis_execution/v1"
 POLICY_TYPE = "smart_ads/analysis_policy/v1"
@@ -425,6 +416,8 @@ def _build(
     scope: EvaluationScope = SCOPE,
     instant: str = INSTANT,
     curation: int = 30,
+    anchor: str = END,
+    end: str = END,
     policy: AnalysisPolicy | None = None,
     inventory: ExpectedResourceInventory | None = None,
     signed: bool = False,
@@ -440,8 +433,9 @@ def _build(
         policy=chosen,
         scope=scope,
         evaluation_instant_utc=instant,
-        window_end_date=END,
+        window_end_date=end,
         curation_restatement_lookback_days=curation,
+        curation_anchor_date=anchor,
         inventory=seal(inventory if inventory is not None else _inventory(resources)),
         metrics_result_key=METRICS_KEY,
         restatement_history=history,
@@ -555,6 +549,20 @@ def test_waste_non_value_input_is_inconclusive_never_zero(state: str, position: 
     assert findings[0].mutation_recommendation_blocked is True
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        _waste_rows("999", "0", clicks_state="provider:timeout"),  # known spend below the minimum
+        _waste_rows("5000", "1", spend_state="derived:input_missing"),  # known outcome above max
+        _waste_rows("999", "1", clicks_state=ABSENT),  # known spend below the minimum, no outcome row
+    ],
+)
+def test_waste_unknown_input_dominates_a_known_ruling_out(rows: list[Any]) -> None:
+    # Pinned convention: any non-valued input gives inconclusive, even when a known value alone
+    # would already rule the finding out (the ADR does not fix this; open decision).
+    assert _verdicts(_run((_waste_rule(),), rows)) == [("waste", "inconclusive")]
+
+
 def test_waste_row_for_another_window_is_absent_not_zero() -> None:
     rows = _metric(R0, (_day(3), END), SPEND, "5000") + _metric(R0, W3, CLICKS, "0")
     assert _verdicts(_run((_waste_rule(),), rows)) == [("waste", "inconclusive")]
@@ -613,18 +621,24 @@ def test_inapplicable_policy_raises_the_policy_code(
     code: str, scope_change: dict[str, str], instant: str
 ) -> None:
     scope = dataclasses.replace(SCOPE, **scope_change)
-    context, evidence = _build((_waste_rule(),), _waste_rows("1000", "0"), scope=scope, instant=instant)
+    end = min(END, instant.partition("T")[0])  # the window may not end after the instant date
+    rows = _waste_rows("1000", "0")
+    context, evidence = _build((_waste_rule(),), rows, scope=scope, instant=instant, end=end)
     with pytest.raises(PolicyNotApplicableError) as info:
         evaluate_findings(context, evidence)
     assert info.value.code == code
 
 
 @pytest.mark.parametrize(
-    "instant", ["2026-01-01T00:00:00.000000Z", "2027-01-01T00:00:00.000000Z"]
+    ("instant", "end", "verdict"),
+    [
+        ("2026-01-01T00:00:00.000000Z", "2026-01-01", "inconclusive"),  # rows are for END
+        ("2027-01-01T00:00:00.000000Z", END, "detected"),
+    ],
 )
-def test_policy_validity_bounds_are_inclusive(instant: str) -> None:
-    findings = _run((_waste_rule(),), _waste_rows("1000", "0"), instant=instant)
-    assert _verdicts(findings) == [("waste", "detected")]
+def test_policy_validity_bounds_are_inclusive(instant: str, end: str, verdict: str) -> None:
+    findings = _run((_waste_rule(),), _waste_rows("1000", "0"), instant=instant, end=end)
+    assert _verdicts(findings) == [("waste", verdict)]
 
 
 # ------------------------------------------------------------------ saturation
@@ -748,6 +762,24 @@ def test_saturation_non_value_input_is_inconclusive(state: str, position: int) -
     assert findings[0].finding_key == _expected_key(
         "rule:saturation", "saturation", R0, BASELINE[0], CURRENT[1]
     )
+
+
+@pytest.mark.parametrize(
+    ("spend", "clicks", "states"),
+    [
+        # known baseline spend below the gate, current outcome non-valued
+        (("99", "1000"), ("100", "100"), ("observed", "observed", "observed", "provider:missing")),
+        # known spend growth below the minimum, baseline outcome non-valued
+        (("1000", "1000"), ("100", "100"), ("observed", "observed", "derived:input_unproven", "observed")),
+        # known outcome growth above the maximum (100 -> 500), current spend absent
+        (("1000", "5000"), ("100", "500"), ("observed", ABSENT, "observed", "observed")),
+    ],
+)
+def test_saturation_unknown_input_dominates_a_known_ruling_out(
+    spend: tuple[str, str], clicks: tuple[str, str], states: tuple[str, str, str, str]
+) -> None:
+    rows = _sat_rows(spend, clicks, states)
+    assert _verdicts(_run((_saturation_rule(),), rows)) == [("saturation", "inconclusive")]
 
 
 def test_saturation_computed_inputs_carry_values() -> None:
@@ -879,13 +911,16 @@ def _landing(
     )
 
 
-def _row_loc(row: AnalyticsLandingRow) -> dict[str, Any]:
-    return _locator_dict(LANDING_TYPE, row.to_dict())
+def _restatement_evidence(evidence: AnalysisEvidence) -> list[dict[str, Any]]:
+    """Containing artifacts only: the metric result and the bundle's dataset snapshot."""
+    result = _locator_dict(RESULT_TYPE, evidence.resolved_results[1].to_dict())
+    return sorted([result, SNAPSHOT.to_dict()], key=_jcs)
 
 
-def _evidence(*rows: AnalyticsLandingRow) -> list[dict[str, Any]]:
-    unique = {_jcs(_row_loc(row)): _row_loc(row) for row in rows}
-    return [unique[key] for key in sorted(unique)]
+def _restated(rule: dict[str, Any], *history: AnalyticsLandingRow, **kwargs: Any) -> bool:
+    findings = _run((rule,), [], history=history, **kwargs)
+    assert _verdicts(findings) in ([], [("restatement", "detected")])
+    return bool(findings)
 
 
 RESTATEMENT_PAIRS = {
@@ -905,7 +940,7 @@ def test_restatement_of_each_kind_is_detected_and_blocks(case: str) -> None:
     assert (finding.finding_type, finding.finding_status) == ("restatement", "detected")
     assert finding.mutation_recommendation_blocked is True
     assert finding.finding_key == _expected_key("rule:restatement", "restatement", R0, _day(6), END)
-    assert finding.to_dict()["evidence_locators"] == _evidence(prior, current)
+    assert finding.to_dict()["evidence_locators"] == _restatement_evidence(evidence)
 
 
 @pytest.mark.parametrize(
@@ -941,12 +976,37 @@ def test_pairs_classify_restatement_returns_none_for_never_find(
 def test_restatement_chain_classifies_each_successive_winner() -> None:
     first, second = _landing(raw="100"), _landing(raw="200", at=T2)
     third = _landing(presence="missing", at=T3)
-    flips = _run((_restatement_rule(kinds=("state_flip",)),), [], history=(third, first, second))
-    assert flips[0].to_dict()["evidence_locators"] == _evidence(second, third)
-    changes = _run((_restatement_rule(kinds=("value_change",)),), [], history=(second, third, first))
-    assert changes[0].to_dict()["evidence_locators"] == _evidence(first, second)
-    both = _run((_restatement_rule(),), [], history=(first, second, third))
-    assert both[0].to_dict()["evidence_locators"] == _evidence(first, second, third)
+    assert _restated(_restatement_rule(kinds=("state_flip",)), third, first, second)
+    assert _restated(_restatement_rule(kinds=("value_change",)), second, third, first)
+    assert not _restated(_restatement_rule(kinds=("tombstone",)), first, second, third)
+    # 100 -> 200 -> 100: successive pairs change value although first and last are equal.
+    back = _landing(raw="100", at=T3)
+    assert _restated(_restatement_rule(kinds=("value_change",)), back, second, first)
+    # 100 -> missing -> 100: only state flips, never a value change.
+    gap = _landing(presence="missing", at=T2)
+    assert not _restated(_restatement_rule(kinds=("value_change",)), first, gap, back)
+    assert _restated(_restatement_rule(kinds=("state_flip",)), first, gap, back)
+
+
+def test_restatement_groups_by_fact_key_within_a_resource() -> None:
+    # Two fact keys of one resource: a cross-key pairing would invent a value change.
+    one_day = _landing(raw="100", metric_date=END)
+    other_day = _landing(raw="200", metric_date=_day(1), at=T2)
+    assert not _restated(_restatement_rule(), one_day, other_day)
+    restated_day = _landing(raw="300", metric_date=_day(1), at=T3)
+    assert _restated(_restatement_rule(), one_day, other_day, restated_day)
+
+
+def test_restatement_groups_resources_apart_on_one_metric_date() -> None:
+    first = _landing(raw="100", resource=RES[0])
+    other = _landing(raw="200", resource=RES[2], at=T2)
+    assert _run((_restatement_rule(),), [], history=(first, other), resources=RES) == ()
+
+
+def test_restatement_ignores_rows_dated_after_the_window_end() -> None:
+    later = _day(-1)
+    prior, current = _landing(raw="1", metric_date=later), _landing(raw="2", metric_date=later, at=T2)
+    assert not _restated(_restatement_rule(), prior, current)
 
 
 def test_policy_without_a_restatement_rule_emits_no_restatement() -> None:
@@ -966,6 +1026,42 @@ def test_restatement_lookback_window_is_inclusive(back: int, found: bool) -> Non
 def test_restatement_lookback_cannot_exceed_the_curation_window() -> None:
     assert _run((_restatement_rule(lookback=30),), [], curation=30) == ()
     _raises("lookback_exceeds_curation", _run, (_restatement_rule(lookback=31),), [], curation=30)
+
+
+@pytest.mark.parametrize(
+    ("lookback", "curation", "anchor", "inside"),
+    [
+        (7, 7, END, True),  # identical windows
+        (7, 30, _day(-5), True),  # rule window strictly inside
+        (7, 7, _day(-1), False),  # rule window starts one day before the curation window
+        (7, 30, _day(1), False),  # rule window ends one day after the curation anchor
+        (1, 1, END, True),
+        (1, 1, _day(1), False),
+    ],
+)
+def test_restatement_window_must_lie_inside_the_curation_window(
+    lookback: int, curation: int, anchor: str, inside: bool
+) -> None:
+    rule = (_restatement_rule(lookback=lookback),)
+    if inside:
+        assert _run(rule, [], curation=curation, anchor=anchor) == ()
+    else:
+        _raises("lookback_exceeds_curation", _run, rule, [], curation=curation, anchor=anchor)
+
+
+def test_free_window_end_cannot_escape_the_curation_window() -> None:
+    # Reviewer reproduction: history ends at END, the window end is moved past the anchor.
+    prior, current = RESTATEMENT_PAIRS["tombstone"]
+    context, evidence = _build(
+        (_restatement_rule(),), [], history=(prior, current), instant="2027-01-01T00:00:00.000000Z"
+    )
+    moved = dataclasses.replace(context, window_end_date="2026-12-31")
+    _raises("lookback_exceeds_curation", evaluate_findings, moved, evidence)
+
+
+def test_curation_anchor_is_irrelevant_without_a_restatement_rule() -> None:
+    findings = _run((_waste_rule(),), _waste_rows("1000", "0"), anchor="2000-01-01", curation=1)
+    assert _verdicts(findings) == [("waste", "detected")]
 
 
 def test_restatement_findings_are_per_resource() -> None:
@@ -1004,148 +1100,6 @@ def test_restatement_and_threshold_findings_coexist_in_key_order() -> None:
         key=lambda pair: pair[0].encode("utf-8"),
     )
     assert [(f.finding_key, f.mutation_recommendation_blocked) for f in findings] == expected
-
-
-# ------------------------------------------------------------------ certification status
-
-RANK = ["BLOCKED", "UNRECONCILED", "UNAVAILABLE", "DEGRADED", "VERIFIED"]
-ALLOWED_INPUTS = [
-    (status, origin, validated)
-    for status in RANK
-    for origin in ("phase1_7b_base", "derived_input")
-    for validated in (False, True)
-    if not (status == "DEGRADED" and origin == "phase1_7b_base")
-]
-
-
-def _attested(
-    status: str, origin: str = "derived_input", validated: bool = False
-) -> AttestedCertificationInput:
-    return AttestedCertificationInput(
-        CertificationInput(DerivedCertificationStatus(status), origin), validated  # type: ignore[arg-type]
-    )
-
-
-VERIFIED_INPUTS = [_attested("VERIFIED", "phase1_7b_base")]
-
-
-@pytest.mark.parametrize(
-    "specs",
-    [(spec,) for spec in ALLOWED_INPUTS] + list(itertools.product(ALLOWED_INPUTS, repeat=2)),
-)
-def test_certification_status_is_the_minimum_with_constrained_degraded(
-    specs: tuple[tuple[str, str, bool], ...]
-) -> None:
-    inputs = [_attested(*spec) for spec in specs]
-    expected = min((spec[0] for spec in specs), key=RANK.index)
-    validated_degraded = any(spec[0] == "DEGRADED" and spec[2] for spec in specs)
-    if expected == "DEGRADED" and not validated_degraded:
-        _raises("degraded_not_permitted", derive_certification_status, inputs)
-        return
-    assert derive_certification_status(inputs) is DerivedCertificationStatus(expected)
-    assert derive_certification_status(tuple(reversed(inputs))) is DerivedCertificationStatus(expected)
-
-
-def test_certification_status_rejections() -> None:
-    with pytest.raises(FormulaGraphError) as formula_error:
-        CertificationInput(DerivedCertificationStatus.DEGRADED, "phase1_7b_base")
-    assert formula_error.value.code == "degraded_from_phase1_7b"
-    with pytest.raises(FormulaGraphError) as formula_error:
-        derive_certification_status([])
-    assert formula_error.value.code == "empty_certification_inputs"
-    verified = CertificationInput(DerivedCertificationStatus.VERIFIED, "derived_input")
-    _raises("invalid_type", AttestedCertificationInput, "VERIFIED", True)
-    _raises("invalid_type", AttestedCertificationInput, verified, 1)
-    _raises("invalid_type", derive_certification_status, "VERIFIED")
-    _raises("invalid_type", derive_certification_status, [verified])
-
-
-# ------------------------------------------------------------------ certification record
-
-
-def _record_scenario(signed: bool = False) -> tuple[EvaluationContext, AnalysisEvidence]:
-    """Waste detected, stalled inconclusive (no impressions), restatement detected."""
-    prior, current = RESTATEMENT_PAIRS["value_change"]
-    rules = (_waste_rule(), _stalled_rule(), _restatement_rule())
-    return _build(rules, _waste_rows("1000", "0"), history=(prior, current), signed=signed)
-
-
-def _output_digest(evidence: AnalysisEvidence) -> str:
-    preimage = evidence.execution.canonical_result_set.to_dict()
-    del preimage["canonical_result_digest"]
-    return _sha(preimage)
-
-
-def test_certification_record_binds_exact_findings_and_output() -> None:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    assert sorted(_verdicts(findings)) == [
-        ("restatement", "detected"), ("stalled_delivery", "inconclusive"), ("waste", "detected"),
-    ]
-    record = build_certification_record(context, evidence, findings, VERIFIED_INPUTS)
-    locators = sorted((_locator_dict(FINDING_TYPE, f.to_dict()) for f in findings), key=_jcs)
-    assert record.to_dict() == {
-        "$schema": RECORD_TYPE,
-        "finding_locators": locators,
-        "derived_certification_status": "VERIFIED",
-        "mutation_recommendations_blocked": True,
-        "output_digest": _output_digest(evidence),
-    }
-    assert record.locator().to_dict() == _locator_dict(RECORD_TYPE, record.to_dict())
-
-
-@pytest.mark.parametrize(
-    ("spend", "clicks_state", "count", "blocked"),
-    [("999", "observed", 0, False), ("1000", "observed", 1, False), ("1000", "provider:missing", 1, True)],
-)
-def test_record_blocks_only_when_a_finding_blocks(
-    spend: str, clicks_state: str, count: int, blocked: bool
-) -> None:
-    context, evidence = _build((_waste_rule(),), _waste_rows(spend, "0", clicks_state=clicks_state))
-    findings = evaluate_findings(context, evidence)
-    record = build_certification_record(context, evidence, findings, VERIFIED_INPUTS)
-    assert len(record.finding_locators) == count
-    assert record.mutation_recommendations_blocked is blocked
-    assert record.output_digest == _output_digest(evidence)
-
-
-@pytest.mark.parametrize("variant", ["drop", "reverse", "foreign", "extra"])
-def test_record_rejects_findings_that_differ_from_recomputation(variant: str) -> None:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    foreign = _run((_waste_rule(rule_id="rule:other"),), _waste_rows("1000", "0"))
-    supplied = {
-        "drop": findings[1:],
-        "reverse": tuple(reversed(findings)),
-        "foreign": foreign,
-        "extra": findings + foreign,
-    }[variant]
-    _raises("findings_mismatch", build_certification_record, context, evidence, supplied, VERIFIED_INPUTS)
-
-
-def test_record_degraded_requires_an_independently_validated_degraded_input() -> None:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    unvalidated = [_attested("DEGRADED"), _attested("VERIFIED")]
-    _raises("degraded_not_permitted", build_certification_record, context, evidence, findings, unvalidated)
-    validated = [_attested("DEGRADED", validated=True), _attested("VERIFIED")]
-    record = build_certification_record(context, evidence, findings, validated)
-    assert record.to_dict()["derived_certification_status"] == "DEGRADED"
-
-
-def test_signed_certification_path() -> None:
-    context, evidence = _record_scenario(signed=True)
-    findings = evaluate_findings(context, evidence)
-    _raises("unsigned_artifact", build_certification_record, context, evidence, findings, VERIFIED_INPUTS)
-    sealed = tuple(_sign(finding) for finding in findings)
-    record = build_certification_record(
-        context, evidence, sealed, VERIFIED_INPUTS, integrity=_unsigned_integrity()
-    )
-    assert record.to_dict()["finding_locators"] == sorted(
-        (_locator_dict(FINDING_TYPE, f.to_dict()) for f in sealed), key=_jcs
-    )
-    final = _sign(record)
-    assert AnalyticalCertificationRecord.from_dict(final.to_dict(), require_signed=True) == final
 
 
 def test_require_signed_rejects_an_unsigned_policy() -> None:
@@ -1187,12 +1141,6 @@ def test_finding_p1_preimage_digest_and_locator_by_hand() -> None:
     (finding,) = _run((_waste_rule(),), _waste_rows("1000", "0"))
     _check_p1(finding, FINDING_TYPE)
     assert _sign(finding).finding_digest == finding.finding_digest  # excludes integrity
-
-
-def test_record_p1_preimage_digest_and_locator_by_hand() -> None:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    _check_p1(build_certification_record(context, evidence, findings, VERIFIED_INPUTS), RECORD_TYPE)
 
 
 # ------------------------------------------------------------------ closed parsing
@@ -1273,48 +1221,30 @@ def test_finding_construction_enforces_restatement_blocking() -> None:
     assert as_list == restated and isinstance(as_list.evidence_locators, tuple)
 
 
-def _record_fixture() -> AnalyticalCertificationRecord:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    return build_certification_record(context, evidence, findings, VERIFIED_INPUTS)
-
-
-def test_record_round_trip() -> None:
-    record = _record_fixture()
-    assert AnalyticalCertificationRecord.from_dict(record.to_dict()) == record
-    _raises("missing_member", AnalyticalCertificationRecord.from_dict, record.to_dict(), require_signed=True)
-
-
-RECORD_MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], Any]]] = [
-    ("unknown_member", lambda d: d.update(extra="x")),
-    ("missing_member", lambda d: d.pop("output_digest")),
-    ("schema_mismatch", lambda d: d.update({"$schema": "smart_ads/certification_7b_record/v1"})),
-    ("unknown_value", lambda d: d.update(derived_certification_status="GOOD")),
-    ("invalid_type", lambda d: d.update(derived_certification_status=4)),
-    ("invalid_type", lambda d: d.update(mutation_recommendations_blocked=1)),
-    ("invalid_type", lambda d: d.update(finding_locators=tuple(d["finding_locators"]))),
-    ("duplicate", lambda d: d.update(finding_locators=d["finding_locators"] * 2)),
-    ("unsorted", lambda d: d.update(finding_locators=list(reversed(d["finding_locators"])))),
-    ("invalid_locator", lambda d: d.update(finding_locators=[_locator_dict(POLICY_TYPE, {})])),
-    ("invalid_grammar", lambda d: d.update(output_digest="sha256:XYZ")),
-    ("invalid_type", lambda d: d.update(output_digest=5)),
-    ("mutation_blocked_mismatch", lambda d: d.update(finding_locators=[])),
+FOREIGN_EVIDENCE = [
+    _loc("smart_ads/gate2_approval_receipt/v1", "9"),
+    _loc(LANDING_TYPE, "9"),
+    _loc(EXECUTION_TYPE, "9"),
+    _loc(POLICY_TYPE, "9"),
 ]
 
 
-@pytest.mark.parametrize(("code", "mutate"), RECORD_MUTATIONS)
-def test_record_closed_parsing(code: str, mutate: Callable[[dict[str, Any]], Any]) -> None:
-    data = _record_fixture().to_dict()
-    mutate(data)
-    _raises(code, AnalyticalCertificationRecord.from_dict, data)
+@pytest.mark.parametrize("foreign", FOREIGN_EVIDENCE, ids=lambda loc: loc.artifact_type)
+def test_evidence_locator_types_are_closed(foreign: ArtifactLocator) -> None:
+    finding = _finding_fixture()
+    _raises("invalid_locator", dataclasses.replace, finding, evidence_locators=(foreign,))
+    data = finding.to_dict()
+    data["evidence_locators"] = [foreign.to_dict()]
+    _raises("invalid_locator", Finding.from_dict, data)
 
 
-def test_record_rejects_non_objects_and_bad_members() -> None:
-    _raises("invalid_type", AnalyticalCertificationRecord.from_dict, "record")
-    _raises("invalid_type", AnalyticalCertificationRecord.from_dict, {None: 1})
-    record = _record_fixture()
-    _raises("invalid_type", dataclasses.replace, record, derived_certification_status="VERIFIED")
-    _raises("invalid_type", dataclasses.replace, record, finding_locators=None)
+def test_finding_class_constants_describe_the_wire_shape() -> None:
+    finding = _finding_fixture()
+    assert Finding.SCHEMA == FINDING_TYPE
+    assert Finding.CORE_KEYS == frozenset(finding.to_dict())
+    assert Finding.KEYS == Finding.CORE_KEYS | {"integrity"}
+    assert Finding.KEYS == frozenset(_sign(finding).to_dict())
+    assert Finding.P1_DOMAIN_PREFIX == "SMART-ADS:FINDING:V1\n"
 
 
 # ------------------------------------------------------------------ bindings and inputs
@@ -1387,6 +1317,9 @@ CONTEXT_CASES: list[tuple[str, dict[str, Any]]] = [
     ("invalid_grammar", {"evaluation_instant_utc": "2026-11-11T00:00:00Z"}),
     ("invalid_grammar", {"window_end_date": "2026-02-30"}),
     ("invalid_type", {"window_end_date": None}),
+    ("window_after_instant", {"window_end_date": "2026-11-12"}),  # instant date is 2026-11-11
+    ("invalid_grammar", {"curation_anchor_date": "2026-11-31"}),
+    ("invalid_type", {"curation_anchor_date": None}),
     ("invalid_type", {"curation_restatement_lookback_days": True}),
     ("invalid_type", {"curation_restatement_lookback_days": "7"}),
     ("out_of_range", {"curation_restatement_lookback_days": 0}),
@@ -1419,11 +1352,51 @@ def test_evidence_rejections(code: str, change: dict[str, Any]) -> None:
     _raises(code, dataclasses.replace, evidence, **change)
 
 
+@pytest.mark.parametrize(
+    ("instant", "end", "allowed"),
+    [
+        ("2026-11-10T00:00:00.000000Z", END, True),  # same UTC date, first microsecond
+        ("2026-11-10T23:59:59.999999Z", END, True),
+        ("2026-11-09T23:59:59.999999Z", END, False),
+        ("2026-11-11T00:00:00.000000Z", "2026-11-11", True),
+        ("2026-11-11T00:00:00.000000Z", "2026-11-12", False),
+    ],
+)
+def test_window_end_cannot_follow_the_instant_utc_date(instant: str, end: str, allowed: bool) -> None:
+    context, _ = _build((_waste_rule(),), [])
+    if allowed:
+        moved = dataclasses.replace(context, evaluation_instant_utc=instant, window_end_date=end)
+        assert moved.window_end_date == end
+    else:
+        _raises(
+            "window_after_instant",
+            dataclasses.replace,
+            context,
+            evaluation_instant_utc=instant,
+            window_end_date=end,
+        )
+
+
+class _SubclassedWaste(WasteRule):
+    """Passes the policy's isinstance check but is not one of the four closed rule classes."""
+
+
+class _SubclassedSaturation(SaturationRule):
+    """Second subclass, so the check is not tied to one rule type."""
+
+
+@pytest.mark.parametrize("rule_cls", [_SubclassedWaste, _SubclassedSaturation])
+def test_rule_subclass_is_a_coded_rejection_not_a_key_error(rule_cls: type) -> None:
+    base = _waste_rule() if rule_cls is _SubclassedWaste else _saturation_rule()
+    members = {k: v for k, v in base.items() if k != "rule_type"}
+    policy = dataclasses.replace(_policy(base), rules=(rule_cls(**members),))
+    _raises("invalid_type", _run, (), _waste_rows("1000", "0"), policy=policy)
+
+
 def test_entry_points_reject_wrong_argument_types() -> None:
     context, evidence = _build((_waste_rule(),), [])
     _raises("invalid_type", evaluate_findings, None, evidence)
     _raises("invalid_type", evaluate_findings, context, None)
-    _raises("invalid_type", build_certification_record, context, evidence, [None], VERIFIED_INPUTS)
     listed = dataclasses.replace(context, restatement_history=[_landing()])
     assert isinstance(listed.restatement_history, tuple)
 
@@ -1462,17 +1435,6 @@ def test_evaluation_is_deterministic_and_order_independent() -> None:
     keys = [finding.finding_key for finding in baseline]
     assert len(baseline) == 10 and len(set(keys)) == len(keys)
     assert [key.encode("utf-8") for key in keys] == sorted(key.encode("utf-8") for key in keys)
-
-
-def test_certification_record_is_independent_of_input_order() -> None:
-    context, evidence = _record_scenario()
-    findings = evaluate_findings(context, evidence)
-    inputs = [_attested("VERIFIED"), _attested("UNAVAILABLE", "phase1_7b_base"), _attested("DEGRADED", validated=True)]
-    records = {
-        _jcs(build_certification_record(context, evidence, findings, list(order)).to_dict())
-        for order in itertools.permutations(inputs)
-    }
-    assert len(records) == 1
 
 
 def test_finding_key_depends_only_on_stable_identity() -> None:

@@ -57,6 +57,7 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.application.completeness",
         "smart_ads.analytics",
         "smart_ads.analytics.cells",
+        "smart_ads.analytics.certification",
         "smart_ads.analytics.formulas",
         "smart_ads.analytics.intelligence",
         "smart_ads.analytics.lattice",
