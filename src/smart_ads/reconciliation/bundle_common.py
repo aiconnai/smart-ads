@@ -308,8 +308,21 @@ def parse_member_locator(
 
 
 def artifact_locator_for(artifact_type: str, artifact: Any) -> ArtifactLocator:
-    """Repo locator convention: ``for_canonical_bytes(type, RFC8785(artifact.to_dict()))``."""
-    return ArtifactLocator.for_canonical_bytes(artifact_type, canonicalize_jcs(artifact.to_dict()))
+    """Repo locator convention: ``for_canonical_bytes(type, RFC8785(artifact.to_dict()))``.
+
+    An artifact without a callable ``to_dict``, a non-JSON serialization or an
+    invalid artifact type is ``malformed_argument``.
+    """
+    to_dict = getattr(artifact, "to_dict", None)
+    if not callable(to_dict):
+        raise Bundle7BDefectError(
+            "malformed_argument", "artifact: expected an object with a to_dict() method"
+        )
+    return guard(
+        "malformed_argument",
+        "artifact_locator_for",
+        lambda: ArtifactLocator.for_canonical_bytes(artifact_type, canonicalize_jcs(to_dict())),
+    )
 
 
 def parse_query(value: object, *, label: str) -> CanonicalQueryContract:

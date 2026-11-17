@@ -152,6 +152,32 @@ def test_facade_exports_the_renamed_locator_helper() -> None:
     assert "native_projection_not_closed" not in b7.DEFECT_CODES
 
 
+class _FloatArtifact:
+    def to_dict(self) -> dict[str, Any]:
+        return {"value": 1.5}
+
+
+class _NotCallable:
+    to_dict = "x"
+
+
+@pytest.mark.parametrize(
+    ("artifact_type", "artifact"),
+    [
+        ("smart_ads/finding/v1", object()),
+        ("smart_ads/finding/v1", {"a": 1}),
+        ("smart_ads/finding/v1", _NotCallable()),
+        ("smart_ads/finding/v1", _FloatArtifact()),
+        ("not a schema id", b7.Gate3CertificationFingerprint.from_dict(fingerprint_dict())),
+        (None, b7.Gate3CertificationFingerprint.from_dict(fingerprint_dict())),
+    ],
+)
+def test_artifact_locator_for_raises_only_coded_defects(artifact_type: Any, artifact: Any) -> None:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.artifact_locator_for(artifact_type, artifact)
+    assert code_of(excinfo) == "malformed_argument"
+
+
 def test_record_types_are_immutable(world: World) -> None:
     parsed = world.parsed()
     with pytest.raises(dataclasses.FrozenInstanceError):
