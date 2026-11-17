@@ -10,6 +10,7 @@ import copy
 import dataclasses
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 import hashlib
+from itertools import product
 from typing import Any
 
 import pytest
@@ -22,10 +23,11 @@ from smart_ads.contracts.jcs import (
     p1_content_digest,
     p1_preimage,
 )
-from smart_ads.contracts.numerics import MAX_INT64
+from smart_ads.contracts.numerics import MAX_INT64, PROVIDER_PRESENCE_TO_UNKNOWN_REASON
 from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.reconciliation.tolerance import (
     DECIMAL_SCALE,
+    PHASE1_7B_MONEY_CURRENCY,
     REFERENCE_ZERO_RULE,
     ROUNDING_MODE,
     AuthorizationBinding,
@@ -39,12 +41,11 @@ CLICKS = "metric:clicks_v1"
 IMPRESSIONS = "metric:impressions_v1"
 SPEND = "metric:spend_v1"
 MIN_INT64 = -(1 << 63)
-NON_OBSERVED = (
-    "missing",
-    "unproven_zero",
-    "timeout",
-    "not_applicable_at_level",
-    "retracted_tombstone",
+# Derived from the shared provider presence states (contracts/numerics.py), so a
+# state added there is exercised here automatically; a literal pin test below
+# fails loudly when the set changes.
+NON_OBSERVED = tuple(
+    sorted(state for state in PROVIDER_PRESENCE_TO_UNKNOWN_REASON if state != "observed")
 )
 KEY_ID = "key:ed25519:" + ("a" * 64)
 PROFILE_CORE_KEYS = frozenset(
@@ -186,15 +187,8 @@ def compare(
     profile: ToleranceProfile,
     *,
     metric: str = CLICKS,
-    query_currency: str = "BRL",
 ) -> ToleranceComparison:
-    return compare_sides(
-        candidate,
-        reference,
-        profile,
-        canonical_metric_ref=metric,
-        query_currency=query_currency,
-    )
+    return compare_sides(candidate, reference, profile, canonical_metric_ref=metric)
 
 
 def five(result: ToleranceComparison) -> tuple[Any, Any, Any, Any, Any]:
@@ -370,14 +364,97 @@ def test_row_7_decimal_ratio_sides_are_not_comparable_with_integer_profiles() ->
     assert five(compare(ratio("0.000000"), count(0), exact_profile())) == BLOCKED
 
 
-def test_row_7_currency_divergence_between_sides_and_against_query() -> None:
+def test_7b_money_currency_is_pinned_to_brl_by_the_adr() -> None:
+    # ADR-0001 L1150: "spend uses int64_minor_currency/minor_currency/BRL."
+    assert PHASE1_7B_MONEY_CURRENCY == "BRL"
+
+
+@pytest.mark.parametrize(
+    ("cand_currency", "ref_currency"),
+    [
+        pytest.param("BRL", "USD", id="reference_foreign"),
+        pytest.param("USD", "BRL", id="candidate_foreign"),
+        pytest.param("USD", "USD", id="both_foreign_and_equal"),
+        pytest.param("USD", "EUR", id="both_foreign_and_different"),
+        pytest.param("EUR", "EUR", id="both_eur"),
+    ],
+)
+def test_row_7_money_in_any_currency_other_than_brl_is_blocked(
+    cand_currency: str, ref_currency: str
+) -> None:
     spend = exact_profile(SPEND, "int64_minor_currency")
-    assert five(compare(money(5, "BRL"), money(5, "USD"), spend, metric=SPEND)) == BLOCKED
-    assert five(compare(money(5, "USD"), money(5, "BRL"), spend, metric=SPEND)) == BLOCKED
-    # both sides agree with each other but not with the query currency
-    assert five(compare(money(5, "USD"), money(5, "USD"), spend, metric=SPEND)) == BLOCKED
-    ok = compare(money(5, "USD"), money(5, "USD"), spend, metric=SPEND, query_currency="USD")
+    result = compare(money(5, cand_currency), money(5, ref_currency), spend, metric=SPEND)
+    assert five(result) == BLOCKED
+    loose = loose_profile("5", "0.500000", SPEND, "int64_minor_currency")
+    assert five(compare(money(5, cand_currency), money(5, ref_currency), loose, metric=SPEND)) == BLOCKED
+
+
+def test_brl_money_on_both_sides_is_verified() -> None:
+    spend = exact_profile(SPEND, "int64_minor_currency")
+    ok = compare(money(5, "BRL"), money(5, "BRL"), spend, metric=SPEND)
     assert five(ok) == ("0", "0.000000", "computed", "exact_match", "VERIFIED")
+
+
+def test_the_query_currency_parameter_no_longer_exists() -> None:
+    spend = exact_profile(SPEND, "int64_minor_currency")
+    with pytest.raises(TypeError):
+        compare_sides(  # type: ignore[call-arg]
+            money(5, "USD"),
+            money(5, "USD"),
+            spend,
+            canonical_metric_ref=SPEND,
+            query_currency="USD",
+        )
+
+
+def test_money_within_declared_tolerance_is_verified_in_brl() -> None:
+    spend = loose_profile("5", "0.050000", SPEND, "int64_minor_currency")
+    result = compare(money(103), money(100), spend, metric=SPEND)
+    assert five(result) == ("3", "0.030000", "computed", "within_declared_tolerance", "VERIFIED")
+    over = compare(money(106), money(100), spend, metric=SPEND)
+    assert five(over) == ("6", "0.060000", "computed", "mismatch", "UNRECONCILED")
+    zero_ref = compare(money(3), money(0), spend, metric=SPEND)
+    assert five(zero_ref) == ("3", None, "reference_zero", "mismatch", "UNRECONCILED")
+
+
+# A non-observed side beats any defect on the other, observed side: the verdict is
+# UNAVAILABLE (retry-able evidence gap), never BLOCKED, whichever side is missing.
+DEFECTIVE_OBSERVED_SIDES = [
+    pytest.param(count(-1), exact_profile(), CLICKS, id="negative_value"),
+    pytest.param(ratio("0.500000"), exact_profile(), CLICKS, id="decimal_ratio"),
+    pytest.param(money(5), exact_profile(), CLICKS, id="wrong_value_type_for_profile"),
+    pytest.param(
+        money(5, "USD"),
+        exact_profile(SPEND, "int64_minor_currency"),
+        SPEND,
+        id="foreign_currency",
+    ),
+    pytest.param(
+        money(-5),
+        exact_profile(SPEND, "int64_minor_currency"),
+        SPEND,
+        id="negative_money",
+    ),
+]
+
+
+@pytest.mark.parametrize("status", NON_OBSERVED)
+@pytest.mark.parametrize(("defective", "prof", "metric"), DEFECTIVE_OBSERVED_SIDES)
+def test_non_observed_side_beats_a_defect_on_the_other_side(
+    status: str, defective: ComparisonSide, prof: ToleranceProfile, metric: str
+) -> None:
+    missing = absent(status)
+    assert five(compare(missing, defective, prof, metric=metric)) == UNAVAILABLE
+    assert five(compare(defective, missing, prof, metric=metric)) == UNAVAILABLE
+
+
+@pytest.mark.parametrize(("defective", "prof", "metric"), DEFECTIVE_OBSERVED_SIDES)
+def test_the_same_defects_are_blocked_when_both_sides_are_observed(
+    defective: ComparisonSide, prof: ToleranceProfile, metric: str
+) -> None:
+    other = money(5) if metric == SPEND else count(5)
+    assert five(compare(defective, other, prof, metric=metric)) == BLOCKED
+    assert five(compare(other, defective, prof, metric=metric)) == BLOCKED
 
 
 def test_row_7_profile_metric_must_match_the_compared_metric() -> None:
@@ -586,17 +663,30 @@ SWEEP_VALUES = sorted(
 
 
 @pytest.mark.parametrize(
+    ("kind", "metric", "value_type"),
+    [
+        pytest.param(count, CLICKS, "int64_count", id="count"),
+        pytest.param(money, SPEND, "int64_minor_currency", id="money_brl"),
+    ],
+)
+@pytest.mark.parametrize(
     ("max_abs", "max_rel"),
     [("0", "0.000000"), ("3", "0.250000"), ("1", "0.000000"), (str(MAX_INT64), "9999.000000")],
 )
 def test_comparator_agrees_with_an_independent_decimal_oracle(
-    max_abs: str, max_rel: str
+    kind: Any, metric: str, value_type: str, max_abs: str, max_rel: str
 ) -> None:
-    prof = exact_profile() if (max_abs, max_rel) == ("0", "0.000000") else loose_profile(max_abs, max_rel)
+    if (max_abs, max_rel) == ("0", "0.000000"):
+        prof = exact_profile(metric, value_type)
+    else:
+        prof = loose_profile(max_abs, max_rel, metric, value_type)
     for cand in SWEEP_VALUES:
         for ref in SWEEP_VALUES:
             expected = _oracle(cand, ref, int(max_abs), max_rel)
-            assert five(compare(count(cand), count(ref), prof)) == expected, (cand, ref)
+            assert five(compare(kind(cand), kind(ref), prof, metric=metric)) == expected, (
+                cand,
+                ref,
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -718,11 +808,6 @@ def test_comparator_rejects_malformed_arguments() -> None:
     for bad_ref in ("", "clicks", "Metric:clicks_v1", "resource:x", None, 5):
         with pytest.raises(ClosedValidationError):
             compare_sides(good, good, prof, canonical_metric_ref=bad_ref)  # type: ignore[arg-type]
-    for bad_ccy in ("brl", "BR", "", None, 5):
-        with pytest.raises(ClosedValidationError):
-            compare_sides(
-                good, good, prof, canonical_metric_ref=CLICKS, query_currency=bad_ccy  # type: ignore[arg-type]
-            )
 
 
 def test_comparator_is_pure_deterministic_and_returns_strings_only() -> None:
@@ -830,6 +915,97 @@ def test_every_legal_row_constructs(name: str) -> None:
 def test_comparison_rejects_unlisted_combinations(bad: tuple[Any, ...]) -> None:
     with pytest.raises(ClosedValidationError):
         ToleranceComparison(*bad)
+
+
+# The seven truth-table rows (ADR-0001 section 5.4 / spec T5), as literals that do
+# not come from the module under test: triple -> a delta pair that must construct.
+TRUTH_TABLE_ROWS: dict[tuple[str, str, str], tuple[str | None, str | None]] = {
+    ("reference_zero", "exact_match", "VERIFIED"): ("0", None),
+    ("reference_zero", "mismatch", "UNRECONCILED"): ("7", None),
+    ("computed", "exact_match", "VERIFIED"): ("0", "0.000000"),
+    ("computed", "within_declared_tolerance", "VERIFIED"): ("3", "0.030000"),
+    ("computed", "mismatch", "UNRECONCILED"): ("3", "0.030000"),
+    ("not_computable", "not_comparable", "UNAVAILABLE"): (None, None),
+    ("not_computable", "not_comparable", "BLOCKED"): (None, None),
+}
+ALL_STATUSES = ("computed", "reference_zero", "not_computable")
+ALL_OUTCOMES = ("exact_match", "within_declared_tolerance", "mismatch", "not_comparable")
+ALL_VERIFICATIONS = ("VERIFIED", "UNRECONCILED", "UNAVAILABLE", "BLOCKED")
+ALL_TRIPLES = list(product(ALL_STATUSES, ALL_OUTCOMES, ALL_VERIFICATIONS))
+# every delta shape a wrong extra row could plausibly be registered with
+DELTA_SHAPES = list(product((None, "0", "3", "7"), (None, "0.000000", "0.030000", "1.000000")))
+
+
+def test_the_truth_table_literals_are_seven_distinct_rows_inside_the_48_triples() -> None:
+    assert len(TRUTH_TABLE_ROWS) == 7
+    assert len(ALL_TRIPLES) == 48
+    assert set(TRUTH_TABLE_ROWS) <= set(ALL_TRIPLES)
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "verification"),
+    [pytest.param(*triple, id="-".join(triple)) for triple in ALL_TRIPLES],
+)
+def test_exactly_the_seven_truth_table_rows_construct(
+    status: str, outcome: str, verification: str
+) -> None:
+    triple = (status, outcome, verification)
+    if triple in TRUTH_TABLE_ROWS:
+        absolute, relative = TRUTH_TABLE_ROWS[triple]
+        built = ToleranceComparison(absolute, relative, status, outcome, verification)  # type: ignore[arg-type]
+        assert five(built) == (absolute, relative, status, outcome, verification)
+        return
+    for absolute, relative in DELTA_SHAPES:
+        with pytest.raises(ClosedValidationError):
+            ToleranceComparison(absolute, relative, status, outcome, verification)  # type: ignore[arg-type]
+
+
+def test_forty_one_of_forty_eight_triples_reject_under_every_delta_shape() -> None:
+    constructible = []
+    for triple in ALL_TRIPLES:
+        for absolute, relative in DELTA_SHAPES:
+            try:
+                ToleranceComparison(absolute, relative, *triple)  # type: ignore[arg-type]
+            except ClosedValidationError:
+                continue
+            constructible.append(triple)
+    assert set(constructible) == set(TRUTH_TABLE_ROWS)
+    assert len(ALL_TRIPLES) - len(set(constructible)) == 41
+
+
+def test_comparator_only_ever_produces_truth_table_triples() -> None:
+    seen = set()
+    for cand, ref, prof in (
+        (count(0), count(0), exact_profile()),
+        (count(5), count(0), exact_profile()),
+        (count(9), count(9), exact_profile()),
+        (count(10), count(9), loose_profile("1", "0.200000")),
+        (count(10), count(9), exact_profile()),
+        (absent("missing"), count(9), exact_profile()),
+        (count(-1), count(9), exact_profile()),
+    ):
+        result = compare(cand, ref, prof)
+        seen.add(
+            (
+                result.relative_delta_status,
+                result.reconciliation_outcome,
+                result.metric_verification_status,
+            )
+        )
+    assert seen == set(TRUTH_TABLE_ROWS)
+
+
+def test_non_observed_states_are_exactly_the_five_non_observed_provider_states() -> None:
+    assert set(PROVIDER_PRESENCE_TO_UNKNOWN_REASON) - {"observed"} == set(NON_OBSERVED)
+    assert set(NON_OBSERVED) == {
+        "missing",
+        "unproven_zero",
+        "timeout",
+        "not_applicable_at_level",
+        "retracted_tombstone",
+    }
+    for status in NON_OBSERVED:
+        assert absent(status).presence_status == status
 
 
 def test_comparison_from_dict_is_closed() -> None:
@@ -1232,3 +1408,164 @@ def test_integrity_must_be_p1_integrity_or_none() -> None:
                 authorization_binding=None,
                 integrity=bad,  # type: ignore[arg-type]
             )
+
+
+# --------------------------------------------------------------------------- #
+# require_bound_to: a non-zero profile must be authorized for this query/scope/run
+# --------------------------------------------------------------------------- #
+
+BINDING_MEMBERS = (
+    "gate3_selection_locator",
+    "canonical_query_digest",
+    "authorized_certification_scope",
+    "migration_run_context_locator",
+)
+DIFFERENT_MEMBERS: dict[str, Any] = {
+    "gate3_selection_locator": _loc("smart_ads/gate3_selection_receipt/v1", "7"),
+    "canonical_query_digest": "sha256:" + ("8" * 64),
+    "authorized_certification_scope": "scope:campaigns-paused",
+    "migration_run_context_locator": _loc("smart_ads/migration_run_context/v1", "6"),
+}
+
+
+def bound_args(**overrides: Any) -> dict[str, Any]:
+    authorized = binding()
+    args = {name: getattr(authorized, name) for name in BINDING_MEMBERS}
+    return {**args, **overrides}
+
+
+def test_the_binding_helper_matches_the_four_member_contract() -> None:
+    assert set(bound_args()) == set(BINDING_MEMBERS) == _binding_keys()
+    for name in BINDING_MEMBERS:
+        assert bound_args()[name] != DIFFERENT_MEMBERS[name]
+
+
+def _binding_keys() -> set[str]:
+    return set(binding().to_dict())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        pytest.param(bound_args(), id="same_members_as_a_binding"),
+        pytest.param(dict(DIFFERENT_MEMBERS), id="all_four_different"),
+        pytest.param(bound_args(**{"canonical_query_digest": DIFFERENT_MEMBERS["canonical_query_digest"]}), id="one_different"),
+    ],
+)
+def test_zero_profile_passes_with_any_well_formed_arguments(arguments: dict[str, Any]) -> None:
+    prof = exact_profile()
+    assert prof.authorization_binding is None
+    assert prof.require_bound_to(**arguments) is None
+
+
+@pytest.mark.parametrize(
+    ("max_abs", "max_rel"),
+    [("1", "0.000000"), ("0", "0.000001"), ("5", "0.050000"), (str(MAX_INT64), "1.000000")],
+)
+def test_non_zero_profile_passes_when_all_four_members_match(max_abs: str, max_rel: str) -> None:
+    prof = loose_profile(max_abs, max_rel)
+    assert prof.require_bound_to(**bound_args()) is None
+    round_tripped = ToleranceProfile.from_dict(prof.to_dict())
+    assert round_tripped.require_bound_to(**bound_args()) is None
+
+
+@pytest.mark.parametrize("member", BINDING_MEMBERS)
+def test_non_zero_profile_rejects_each_member_differing_alone(member: str) -> None:
+    prof = loose_profile("5", "0.050000")
+    with pytest.raises(ClosedValidationError, match=member):
+        prof.require_bound_to(**bound_args(**{member: DIFFERENT_MEMBERS[member]}))
+
+
+@pytest.mark.parametrize("member", ["gate3_selection_locator", "migration_run_context_locator"])
+def test_non_zero_profile_rejects_a_locator_differing_in_a_single_member(member: str) -> None:
+    prof = loose_profile("5", "0.050000")
+    authorized: ArtifactLocator = getattr(binding(), member)
+    other_type = (
+        "smart_ads/migration_run_context/v1"
+        if member == "gate3_selection_locator"
+        else "smart_ads/gate3_selection_receipt/v1"
+    )
+    # same content_digest, different artifact_type
+    same_digest_other_type = ArtifactLocator.from_digest(other_type, authorized.content_digest)
+    with pytest.raises(ClosedValidationError, match=member):
+        prof.require_bound_to(**bound_args(**{member: same_digest_other_type}))
+    # same artifact_type, content_digest differing in its last hex digit only
+    flipped = authorized.content_digest[:-1] + ("0" if authorized.content_digest[-1] != "0" else "1")
+    same_type_other_digest = ArtifactLocator.from_digest(authorized.artifact_type, flipped)
+    assert same_type_other_digest.artifact_type == authorized.artifact_type
+    with pytest.raises(ClosedValidationError, match=member):
+        prof.require_bound_to(**bound_args(**{member: same_type_other_digest}))
+
+
+def test_the_first_differing_member_in_binding_order_is_named() -> None:
+    prof = loose_profile("5", "0.050000")
+    with pytest.raises(ClosedValidationError, match="gate3_selection_locator"):
+        prof.require_bound_to(**DIFFERENT_MEMBERS)
+    later = {name: DIFFERENT_MEMBERS[name] for name in BINDING_MEMBERS[1:]}
+    with pytest.raises(ClosedValidationError, match="canonical_query_digest"):
+        prof.require_bound_to(**bound_args(**later))
+    last_two = {name: DIFFERENT_MEMBERS[name] for name in BINDING_MEMBERS[2:]}
+    with pytest.raises(ClosedValidationError, match="authorized_certification_scope"):
+        prof.require_bound_to(**bound_args(**last_two))
+
+
+@pytest.mark.parametrize(
+    ("member", "bad"),
+    [
+        ("gate3_selection_locator", None),
+        ("gate3_selection_locator", "sha256:" + ("1" * 64)),
+        ("gate3_selection_locator", {"artifact_type": "smart_ads/gate3_selection_receipt/v1"}),
+        ("gate3_selection_locator", binding().gate3_selection_locator.to_dict()),
+        ("migration_run_context_locator", None),
+        ("migration_run_context_locator", 5),
+        ("migration_run_context_locator", binding().migration_run_context_locator.to_dict()),
+        ("canonical_query_digest", None),
+        ("canonical_query_digest", ""),
+        ("canonical_query_digest", "2" * 64),
+        ("canonical_query_digest", "sha256:" + ("G" * 64)),
+        ("canonical_query_digest", "sha256:" + ("2" * 63)),
+        ("canonical_query_digest", 5),
+        ("authorized_certification_scope", None),
+        ("authorized_certification_scope", ""),
+        ("authorized_certification_scope", "scope"),
+        ("authorized_certification_scope", "scope:"),
+        ("authorized_certification_scope", "tenant:ibvi"),
+        ("authorized_certification_scope", 5),
+    ],
+)
+@pytest.mark.parametrize("zero", [False, True], ids=["non_zero_profile", "zero_profile"])
+def test_malformed_arguments_raise_for_zero_and_non_zero_profiles(
+    zero: bool, member: str, bad: Any
+) -> None:
+    prof = exact_profile() if zero else loose_profile("5", "0.050000")
+    with pytest.raises(ClosedValidationError):
+        prof.require_bound_to(**bound_args(**{member: bad}))
+
+
+def test_require_bound_to_takes_keyword_only_arguments_and_all_four() -> None:
+    prof = loose_profile("5", "0.050000")
+    args = bound_args()
+    with pytest.raises(TypeError):
+        prof.require_bound_to(*args.values())  # type: ignore[misc]
+    for member in BINDING_MEMBERS:
+        partial = {k: v for k, v in args.items() if k != member}
+        with pytest.raises(TypeError):
+            prof.require_bound_to(**partial)  # type: ignore[arg-type]
+    with pytest.raises(TypeError):
+        prof.require_bound_to(**args, extra="x")  # type: ignore[call-arg]
+
+
+def test_compare_sides_does_not_take_binding_arguments() -> None:
+    with pytest.raises(TypeError):
+        compare_sides(  # type: ignore[call-arg]
+            count(1), count(1), exact_profile(), canonical_metric_ref=CLICKS, **bound_args()
+        )
+
+
+def test_require_bound_to_is_pure_and_does_not_alter_the_profile() -> None:
+    prof = loose_profile("5", "0.050000", integrity=unsigned_integrity())
+    before = prof.to_dict()
+    prof.require_bound_to(**bound_args())
+    with pytest.raises(ClosedValidationError):
+        prof.require_bound_to(**bound_args(**{"authorized_certification_scope": "scope:other"}))
+    assert prof.to_dict() == before

@@ -43,7 +43,9 @@ MetricVerificationStatus = Literal["VERIFIED", "UNRECONCILED", "UNAVAILABLE", "B
 DECIMAL_SCALE: Final[int] = 6
 ROUNDING_MODE: Final[str] = "ROUND_HALF_UP"
 REFERENCE_ZERO_RULE: Final[str] = "exact_zero_only"
-DEFAULT_QUERY_CURRENCY: Final[str] = "BRL"
+# ADR-0001 section 5.4 (L1150): "spend uses int64_minor_currency/minor_currency/BRL."
+# The 7B money currency is fixed by the ADR, not chosen by the caller.
+PHASE1_7B_MONEY_CURRENCY: Final[str] = "BRL"
 
 _SCALE_FACTOR: Final[int] = 10**DECIMAL_SCALE
 _MAX_INT64_DIGITS: Final[int] = len(str(MAX_INT64))
@@ -207,6 +209,49 @@ def _require_locator(value: object, artifact_type: str, *, field_name: str) -> A
             f"{field_name}: expected ArtifactLocator for {artifact_type!r}"
         )
     return value
+
+
+def _describe_binding_value(value: object) -> str:
+    if isinstance(value, ArtifactLocator):
+        return f"<{value.artifact_type} {value.content_digest}>"
+    return _show(value)
+
+
+def _validated_binding_members(
+    *,
+    gate3_selection_locator: object,
+    canonical_query_digest: object,
+    authorized_certification_scope: object,
+    migration_run_context_locator: object,
+) -> tuple[tuple[str, object], ...]:
+    """Check the four supplied members are well formed; return them in binding order.
+
+    Locators are only required to be `ArtifactLocator` values here: a locator of a
+    different artifact type is a well-formed value that differs from the binding.
+    """
+    label = "tolerance_profile.require_bound_to"
+    for name, locator in (
+        ("gate3_selection_locator", gate3_selection_locator),
+        ("migration_run_context_locator", migration_run_context_locator),
+    ):
+        if not isinstance(locator, ArtifactLocator):
+            raise ClosedValidationError(
+                f"{label}.{name}: expected ArtifactLocator, got {type(locator).__name__}"
+            )
+    validate_sha256_prefixed(
+        canonical_query_digest, field_name=f"{label}.canonical_query_digest"
+    )
+    validate_opaque_ref(
+        authorized_certification_scope,
+        field_name=f"{label}.authorized_certification_scope",
+        expected_prefix="scope",
+    )
+    return (
+        ("gate3_selection_locator", gate3_selection_locator),
+        ("canonical_query_digest", canonical_query_digest),
+        ("authorized_certification_scope", authorized_certification_scope),
+        ("migration_run_context_locator", migration_run_context_locator),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,6 +559,44 @@ class ToleranceProfile:
                     f"{expected_p1!r} != asserted {self.integrity.content_digest!r}"
                 )
 
+    def require_bound_to(
+        self,
+        *,
+        gate3_selection_locator: ArtifactLocator,
+        canonical_query_digest: str,
+        authorized_certification_scope: str,
+        migration_run_context_locator: ArtifactLocator,
+    ) -> None:
+        """Require this profile to be authorized for the given query, scope, and run.
+
+        ADR-0001 section 5.4: "any non-zero limit requires an explicit
+        Gate-3-authorized profile bound to the same query, scope, and run."
+        The four arguments (the same-named members of the 7B record) are always
+        validated: a malformed argument raises `ClosedValidationError`, even for a
+        zero profile. A zero profile (null binding) then passes without comparing
+        anything. A non-zero profile requires each binding member to equal the
+        argument exactly (locators as whole values) and raises
+        `ClosedValidationError` naming the first member, in binding order, that
+        differs.
+        """
+        supplied = _validated_binding_members(
+            gate3_selection_locator=gate3_selection_locator,
+            canonical_query_digest=canonical_query_digest,
+            authorized_certification_scope=authorized_certification_scope,
+            migration_run_context_locator=migration_run_context_locator,
+        )
+        authorized = self.authorization_binding
+        if authorized is None:
+            return
+        for name, value in supplied:
+            expected = getattr(authorized, name)
+            if expected != value:
+                raise ClosedValidationError(
+                    f"tolerance_profile.authorization_binding.{name}: profile is bound to "
+                    f"{_describe_binding_value(expected)} but this {name} is "
+                    f"{_describe_binding_value(value)}"
+                )
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize `tolerance_profile/v1`; `integrity` is present only when set."""
         binding = self.authorization_binding
@@ -580,9 +663,12 @@ def _sides_are_blocked(
     candidate: ComparisonSide,
     reference: ComparisonSide,
     profile: ToleranceProfile,
-    query_currency: str,
 ) -> bool:
-    """True when type, unit, or currency diverge between the sides, the profile, or the query."""
+    """True when type/unit/currency diverge between the sides or from the profile and the ADR.
+
+    Money must be `PHASE1_7B_MONEY_CURRENCY` on both sides; every other currency
+    (including two equal foreign currencies) is not comparable.
+    """
     if (candidate.value_type, candidate.unit, candidate.currency) != (
         reference.value_type,
         reference.unit,
@@ -591,7 +677,8 @@ def _sides_are_blocked(
         return True
     if candidate.value_type != profile.value_type:
         return True
-    expected_currency = query_currency if profile.value_type == "int64_minor_currency" else None
+    is_money = profile.value_type == "int64_minor_currency"
+    expected_currency = PHASE1_7B_MONEY_CURRENCY if is_money else None
     return candidate.currency != expected_currency
 
 
@@ -622,18 +709,20 @@ def compare_sides(
     profile: ToleranceProfile,
     *,
     canonical_metric_ref: str,
-    query_currency: str = DEFAULT_QUERY_CURRENCY,
 ) -> ToleranceComparison:
     """Recompute deltas, outcome, and verification status per ADR-0001 section 5.4.
 
     Legitimate failed comparisons (`mismatch`, `not_comparable`) are returned as
     values; only malformed arguments raise `ClosedValidationError`. Precedence:
     a profile that does not apply to `canonical_metric_ref` is BLOCKED; otherwise
-    any non-observed side is UNAVAILABLE (an unknown reference is never zero);
-    otherwise type/unit/currency divergence or a negative value is BLOCKED;
-    otherwise the delta rows 1-5 apply. Both the absolute and the relative limit
-    must pass for `within_declared_tolerance`; a zero reference admits only an
-    exactly zero candidate (`reference_zero_rule: exact_zero_only`).
+    any non-observed side is UNAVAILABLE (an unknown reference is never zero) and
+    beats any defect on the other side; otherwise type/unit divergence, a money
+    currency other than `PHASE1_7B_MONEY_CURRENCY`, or a negative value is
+    BLOCKED; otherwise the delta rows 1-5 apply. Both the absolute and the
+    relative limit must pass for `within_declared_tolerance`; a zero reference
+    admits only an exactly zero candidate (`reference_zero_rule: exact_zero_only`).
+    Whether a non-zero profile was authorized for this query, scope, and run is
+    checked separately by `ToleranceProfile.require_bound_to`.
     """
     for name, value, expected in (
         ("candidate", candidate, ComparisonSide),
@@ -647,12 +736,11 @@ def compare_sides(
     validate_opaque_ref(
         canonical_metric_ref, field_name="canonical_metric_ref", expected_prefix="metric"
     )
-    validate_currency_iso4217(query_currency, field_name="query_currency")
     if profile.canonical_metric_ref != canonical_metric_ref:
         return _BLOCKED
     if candidate.presence_status != "observed" or reference.presence_status != "observed":
         return _UNAVAILABLE
-    if _sides_are_blocked(candidate, reference, profile, query_currency):
+    if _sides_are_blocked(candidate, reference, profile):
         return _BLOCKED
     field = "comparison_side.raw_numeric_value"
     candidate_value = _parse_signed_int64(candidate.raw_numeric_value, field_name=field)
@@ -667,8 +755,8 @@ __all__ = [
     "ComparableValueType",
     "ComparisonSide",
     "DECIMAL_SCALE",
-    "DEFAULT_QUERY_CURRENCY",
     "MetricVerificationStatus",
+    "PHASE1_7B_MONEY_CURRENCY",
     "REFERENCE_ZERO_RULE",
     "ROUNDING_MODE",
     "ReconciliationOutcome",
