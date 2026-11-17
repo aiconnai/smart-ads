@@ -16,6 +16,19 @@ digest, failed binding) raises ``Bundle7BDefectError`` with a closed ``code``.
 Legitimate failed comparisons (``mismatch``, ``not_comparable``) are values.
 No float, clock, I/O or signature verification is involved.
 
+Frozen objects validate once, in ``__post_init__``, and ``object.__setattr__``
+bypasses that, so every public function that consumes a value object (the verifier,
+``reconcile_7b_fact_sets``, ``check_native_request``, ``require_same_fingerprint``,
+``select_fact_evidence``, ``resolve_fact_evidence`` and the ``compute_*`` /
+``expected_pair_universe`` digest helpers) re-parses it from its wire form first,
+``from_dict(to_dict())``, and uses only the copy. A tampered object is rejected exactly
+as its wire form would be; a bare error from ``to_dict`` or ``from_dict`` is
+``malformed_member``. Foreign objects are re-parsed through their own ``from_dict``;
+``ResolvedGate3SelectionState`` has none and is rebuilt with its own constructor.
+``artifact_locator_for`` and ``collection_result_locator`` only address a
+serialization (coded errors, no re-parse). Constructors and methods of an already
+built, tampered instance are not entry points.
+
 Not verified, because no resolved evidence for them is supplied:
 
 * ``wheel_digest``, ``reference_workload_binary_digest``, ``reference_code_digest``

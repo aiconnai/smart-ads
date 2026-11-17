@@ -37,6 +37,7 @@ from smart_ads.reconciliation.bundle_common import (
     metric_ref,
     parse_locator,
     require_collection,
+    reparsed,
     require_locator,
     require_member,
     require_strictly_ascending,
@@ -46,7 +47,7 @@ from smart_ads.reconciliation.bundle_common import (
 from smart_ads.reconciliation.bundle_universe import (
     MetricPairKey,
     as_row_key,
-    compute_canonical_fact_key_digest,
+    digest_fact_key,
     pair_of,
 )
 from smart_ads.reconciliation.tolerance import (
@@ -219,18 +220,32 @@ class FactEvidenceSelector:
         )
 
 
+def checked_result(result: object, *, label: str = "collection_result") -> CollectionResult:
+    """``result`` re-parsed from its wire form: the copy is what callers index and read."""
+    return reparsed(result, CollectionResult, label=label)
+
+
 def select_fact_evidence(result: CollectionResult, pair: MetricPairKey) -> FactEvidenceSelector:
-    """Build the selector addressing exactly one fact of ``pair`` inside ``result``."""
-    require_type(result, CollectionResult, label="collection_result")
-    return select_indexed_evidence(ResultIndex.of(result), pair)
+    """Build the selector addressing exactly one fact of ``pair`` inside ``result``.
+
+    ``result`` and ``pair`` are re-parsed from their wire forms first: a tampered
+    object is ``malformed_member``, never a bare error.
+    """
+    index = ResultIndex.of(checked_result(result))
+    return select_indexed_evidence(index, reparsed(pair, MetricPairKey, label="pair"))
 
 
 def resolve_fact_evidence(
     selector: FactEvidenceSelector, result: CollectionResult
 ) -> NormalizedCollectionFact:
-    """Resolve a selector against the side's resolved result; every member is recomputed."""
-    require_type(result, CollectionResult, label="collection_result")
-    return resolve_indexed_evidence(selector, ResultIndex.of(result))
+    """Resolve a selector against the side's resolved result; every member is recomputed.
+
+    ``result`` and ``selector`` are re-parsed from their wire forms first: a tampered
+    object is rejected as its wire form would be, never with a bare error.
+    """
+    index = ResultIndex.of(checked_result(result))
+    selector = reparsed(selector, FactEvidenceSelector, label="fact_evidence_selector")
+    return resolve_indexed_evidence(selector, index)
 
 
 def select_indexed_evidence(index: ResultIndex, pair: MetricPairKey) -> FactEvidenceSelector:
@@ -375,7 +390,7 @@ class FactReconciliation:
         key = self.canonical_fact_key
         require_member(key, ReconciliationRowKey, label=f"{label}.canonical_fact_key")
         sha256_member(self.canonical_fact_key_digest, label=f"{label}.canonical_fact_key_digest")
-        if compute_canonical_fact_key_digest(key) != self.canonical_fact_key_digest:
+        if digest_fact_key(key) != self.canonical_fact_key_digest:
             raise Bundle7BDefectError(
                 "canonical_fact_key_digest_mismatch", f"{label}: recomputed key digest differs"
             )
@@ -442,13 +457,21 @@ class FactReconciliation:
         )
 
 
-def require_reconciliations(value: object, *, label: str) -> tuple[FactReconciliation, ...]:
-    """A non-empty array of reconciliations in strictly ascending ``RFC8785(J(x))`` order."""
+def require_reconciliations(
+    value: object, *, label: str, revalidate: bool = False
+) -> tuple[FactReconciliation, ...]:
+    """A non-empty array of reconciliations in strictly ascending ``RFC8785(J(x))`` order.
+
+    With ``revalidate`` every entry is re-parsed from its wire form first and the
+    copies are returned (a tampered entry is rejected as its wire form would be).
+    """
     items = require_collection(value, label=label)
     if not items:
         raise Bundle7BDefectError("malformed_argument", f"{label}: must not be empty")
     for item in items:
         require_type(item, FactReconciliation, label=f"{label}.entry")
+    if revalidate:
+        items = tuple(reparsed(i, FactReconciliation, label=f"{label}.entry") for i in items)
     require_strictly_ascending(
         [canonicalize_jcs(item.pair_key().kfive()) for item in items], label=label
     )
@@ -458,8 +481,17 @@ def require_reconciliations(value: object, *, label: str) -> tuple[FactReconcili
 def compute_logical_fact_reconciliation_digest(
     reconciliations: Sequence[FactReconciliation],
 ) -> str:
-    """``logical_fact_reconciliation_digest`` over the complete ``J(x)``-ordered array ``Z``."""
-    items = require_reconciliations(reconciliations, label="fact_reconciliations")
+    """``logical_fact_reconciliation_digest`` over the complete ``J(x)``-ordered array ``Z``.
+
+    Every reconciliation is re-parsed from its wire form first: a tampered one is
+    rejected as its wire form would be, never with a bare error.
+    """
+    items = require_reconciliations(reconciliations, label="fact_reconciliations", revalidate=True)
+    return logical_digest(items)
+
+
+def logical_digest(items: Sequence[FactReconciliation]) -> str:
+    """Internal digest over reconciliations that are already trusted and ordered."""
     return domain_jcs_sha256(
         ADR_DATA_DOMAIN_PREFIXES["7b_fact_reconciliations"], [item.to_dict() for item in items]
     )

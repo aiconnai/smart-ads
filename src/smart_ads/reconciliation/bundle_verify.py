@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import dataclasses
 from typing import Any, Final
 
 from smart_ads.contracts.jcs import ArtifactLocator
@@ -13,9 +14,12 @@ from smart_ads.reconciliation.bundle_common import (
     RUN_CONTEXT_SCHEMA,
     Bundle7BDefectError,
     artifact_locator_for,
+    checked_argument_locator,
+    guard_any,
     query_bytes,
-    require_argument_locator,
+    reparsed,
     require_callable,
+    require_member,
     require_type,
 )
 from smart_ads.reconciliation.bundle_evidence import (
@@ -53,29 +57,66 @@ _GATE3_STATE_FINGERPRINT_PAIRS: Final[tuple[str, ...]] = (
     "resource_mapping_contract_digest",
     "authorized_certification_scope",
 )
+# Value objects with a wire form: re-parsed at entry, and only the copies are used.
+_REPARSED_ARGUMENTS: Final[tuple[tuple[str, type], ...]] = (
+    ("gate3_certification_fingerprint", Gate3CertificationFingerprint),
+    ("driver_contract", PipeboardPhase1Contract),
+    ("candidate_admission", AdmittedCollection),
+    ("reference_admission", AdmittedCollection),
+    ("candidate_result", CollectionResult),
+    ("reference_result", CollectionResult),
+)
+_LOCATOR_ARGUMENTS: Final[tuple[tuple[str, str], ...]] = (
+    ("migration_run_context_locator", RUN_CONTEXT_SCHEMA),
+    ("candidate_effect_proof_locator", EFFECT_PROOF_SCHEMA),
+    ("reference_effect_proof_locator", EFFECT_PROOF_SCHEMA),
+    ("candidate_effect_result_locator", CollectionResult.SCHEMA),
+    ("reference_effect_result_locator", CollectionResult.SCHEMA),
+)
 
 
 def _verify_arguments(record: object, arguments: Mapping[str, Any]) -> None:
+    """Argument classes only; the content of every object is checked on its copy."""
     require_type(record, Certification7BRecord, label="record")
     for name, expected in (
         ("gate3_selection", ResolvedGate3SelectionState),
-        ("gate3_certification_fingerprint", Gate3CertificationFingerprint),
-        ("driver_contract", PipeboardPhase1Contract),
-        ("candidate_admission", AdmittedCollection),
-        ("reference_admission", AdmittedCollection),
-        ("candidate_result", CollectionResult),
-        ("reference_result", CollectionResult),
+        *_REPARSED_ARGUMENTS,
+        *((name, ArtifactLocator) for name, _ in _LOCATOR_ARGUMENTS),
     ):
         require_type(arguments[name], expected, label=name)
-    for name, artifact_type in (
-        ("migration_run_context_locator", RUN_CONTEXT_SCHEMA),
-        ("candidate_effect_proof_locator", EFFECT_PROOF_SCHEMA),
-        ("reference_effect_proof_locator", EFFECT_PROOF_SCHEMA),
-        ("candidate_effect_result_locator", CollectionResult.SCHEMA),
-        ("reference_effect_result_locator", CollectionResult.SCHEMA),
-    ):
-        require_argument_locator(arguments[name], artifact_type, label=name)
     require_callable(arguments["project_native_request"], label="project_native_request")
+
+
+def _revalidated(
+    record: Certification7BRecord, arguments: Mapping[str, Any]
+) -> tuple[Certification7BRecord, dict[str, Any]]:
+    """Fresh copies of the record and of every value object the verifier consumes.
+
+    Frozen objects validate once, at construction; a field set behind their back with
+    ``object.__setattr__`` is invisible to the checks below. Each object is re-parsed
+    from its wire form (a tampered one is rejected as that wire form would be), and only
+    the copies are used from here on. ``ResolvedGate3SelectionState`` has no wire form:
+    it is rebuilt with its own constructor around a re-parsed locator. A locator of
+    another artifact type is ``malformed_argument``.
+    """
+    fresh_record = reparsed(record, Certification7BRecord, label="record")
+    checked: dict[str, Any] = dict(arguments)
+    for name, expected in _REPARSED_ARGUMENTS:
+        checked[name] = reparsed(arguments[name], expected, label=name)
+    for name, artifact_type in _LOCATOR_ARGUMENTS:
+        checked[name] = checked_argument_locator(arguments[name], artifact_type, label=name)
+    checked["gate3_selection"] = _rebuilt_selection(arguments["gate3_selection"])
+    return fresh_record, checked
+
+
+def _rebuilt_selection(selection: ResolvedGate3SelectionState) -> ResolvedGate3SelectionState:
+    def rebuild() -> ResolvedGate3SelectionState:
+        label = "gate3_selection.locator"
+        require_member(selection.locator, ArtifactLocator, label=label)
+        locator = reparsed(selection.locator, ArtifactLocator, label=label)
+        return dataclasses.replace(selection, locator=locator)
+
+    return guard_any("malformed_member", "gate3_selection", rebuild)
 
 
 def _verify_gate3(
@@ -323,6 +364,9 @@ def verify_certification_7b_record(
     Adds the bindings to resolved evidence: run, Gate-3 selection, driver contract,
     admissions, results whose facts lie in the admitted query, effect proofs, the
     injected native projection, tolerance profiles and every reconciliation.
+    The record and every value object passed in are re-parsed from their wire forms
+    first and only the copies are used: a tampered frozen object is rejected as its
+    wire form would be (``malformed_member`` for a bare error), never accepted.
     Not verified: wheel_digest and the three reference digests (grammar only);
     the gate3_certification_fingerprint argument is trusted as the selection's
     certification_fingerprint: only five of its members are compared with
@@ -345,6 +389,7 @@ def verify_certification_7b_record(
         "project_native_request": project_native_request,
     }
     _verify_arguments(record, arguments)
+    record, arguments = _revalidated(record, arguments)
     _verify_bindings(record, arguments)
     indexes = {side: _verify_side(record, side, arguments) for side in ("candidate", "reference")}
     _verify_reconciliations(record, arguments, indexes, tolerance_profiles)

@@ -151,6 +151,24 @@ def guard(code: str, label: str, build: Callable[[], T]) -> T:
         raise Bundle7BDefectError(code, f"{label}: {exc}") from exc
 
 
+def guard_any(code: str, label: str, build: Callable[[], T]) -> T:
+    """Like ``guard``, and a bare error escaping ``build`` is coded too.
+
+    Frozen objects validate once, in ``__post_init__``; a tampered one (a field set
+    behind its back with ``object.__setattr__``) can fail in ``to_dict`` or in a
+    validator with any exception. At the seam that is a malformed object, not a bug
+    to leak: ``code`` it, keeping the cause.
+    """
+    try:
+        return build()
+    except Bundle7BDefectError:
+        raise
+    except ClosedValidationError as exc:
+        raise Bundle7BDefectError(code, f"{label}: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - a tampered object can fail in any way
+        raise Bundle7BDefectError(code, f"{label}: {type(exc).__name__}: {exc}") from exc
+
+
 def require_type(value: object, expected: type, *, label: str) -> None:
     """Argument type check (``malformed_argument``)."""
     if not isinstance(value, expected):
@@ -180,6 +198,21 @@ def require_count(value: object, *, label: str) -> int:
     if type(value) is not int or not 0 <= value <= MAX_JCS_SAFE_INT:
         raise Bundle7BDefectError("malformed_member", f"{label}: expected a non-negative int")
     return value
+
+
+def reparsed(value: T, expected: Any, *, label: str) -> T:
+    """A fresh ``expected`` rebuilt from the wire form of ``value``: ``from_dict(to_dict())``.
+
+    A frozen object that crosses a public seam is untrusted: its ``__post_init__``
+    ran once, at construction, and ``object.__setattr__`` bypasses it. The copy is
+    what the object's wire form would parse to, so a tampered object is rejected
+    exactly as that wire form would be (a coded ``Bundle7BDefectError``; a plain
+    ``ClosedValidationError`` or a bare error from ``to_dict`` or ``from_dict`` is
+    ``malformed_member``), and the caller must use the copy, never ``value``. A wrong
+    class is ``malformed_argument``. Signed ``integrity`` blocks round-trip intact.
+    """
+    require_type(value, expected, label=label)
+    return guard_any("malformed_member", label, lambda: expected.from_dict(value.to_dict()))
 
 
 def require_callable(value: object, *, label: str) -> None:
@@ -282,11 +315,19 @@ def require_locator(value: object, artifact_type: str, *, label: str) -> Artifac
     return value
 
 
-def require_argument_locator(value: object, artifact_type: str, *, label: str) -> None:
-    if not isinstance(value, ArtifactLocator) or value.artifact_type != artifact_type:
+def checked_argument_locator(value: object, artifact_type: str, *, label: str) -> ArtifactLocator:
+    """A locator argument re-parsed from its wire form; the copy is what callers use.
+
+    The class is checked first (``malformed_argument``), then the copy is built (a
+    tampered locator is ``malformed_member``), then the artifact type of the copy
+    (``malformed_argument``): a tampered ``artifact_type`` is never read raw.
+    """
+    fresh = reparsed(value, ArtifactLocator, label=label)
+    if fresh.artifact_type != artifact_type:
         raise Bundle7BDefectError(
             "malformed_argument", f"{label}: expected {artifact_type!r} locator"
         )
+    return fresh
 
 
 def member_locator(owner: Any, name: str, artifact_type: str, *, label: str) -> None:
@@ -310,15 +351,18 @@ def parse_member_locator(
 def artifact_locator_for(artifact_type: str, artifact: Any) -> ArtifactLocator:
     """Repo locator convention: ``for_canonical_bytes(type, RFC8785(artifact.to_dict()))``.
 
-    An artifact without a callable ``to_dict``, a non-JSON serialization or an
-    invalid artifact type is ``malformed_argument``.
+    An artifact without a callable ``to_dict``, a non-JSON serialization, one whose
+    ``to_dict`` fails (a tampered object) or an invalid artifact type is
+    ``malformed_argument``. This only addresses the serialization it is given: it
+    takes any artifact type, so it cannot re-parse it (the entry points that need a
+    validated object re-parse it first).
     """
     to_dict = getattr(artifact, "to_dict", None)
     if not callable(to_dict):
         raise Bundle7BDefectError(
             "malformed_argument", "artifact: expected an object with a to_dict() method"
         )
-    return guard(
+    return guard_any(
         "malformed_argument",
         "artifact_locator_for",
         lambda: ArtifactLocator.for_canonical_bytes(artifact_type, canonicalize_jcs(to_dict())),

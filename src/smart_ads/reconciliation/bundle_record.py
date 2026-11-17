@@ -33,7 +33,7 @@ from smart_ads.reconciliation.bundle_common import (
 )
 from smart_ads.reconciliation.bundle_evidence import (
     FactReconciliation,
-    compute_logical_fact_reconciliation_digest,
+    logical_digest,
     require_reconciliations,
 )
 from smart_ads.reconciliation.bundle_executions import (
@@ -45,9 +45,9 @@ from smart_ads.reconciliation.bundle_executions import (
     require_same_fingerprint,
 )
 from smart_ads.reconciliation.bundle_universe import (
-    compute_row_universe,
-    compute_row_universe_digest,
-    expected_pair_universe,
+    build_expected_pairs,
+    build_row_universe,
+    digest_row_universe,
 )
 
 _BUNDLE_OUTCOME_VERIFIED: Final[str] = "verified"
@@ -176,18 +176,18 @@ class Certification7BRecord:
                 "metric_not_verified", f"{label}: every member must be VERIFIED"
             )
         pairs = tuple(item.pair_key() for item in items)
-        if pairs != expected_pair_universe(self.row_universe):
+        if pairs != build_expected_pairs(self.row_universe):
             raise Bundle7BDefectError(
                 "pair_universe_incomplete", f"{label}: not U7 x required_metrics"
             )
-        digest = compute_logical_fact_reconciliation_digest(items)
+        digest = logical_digest(items)
         if digest != self.logical_fact_reconciliation_digest:
             raise Bundle7BDefectError(
                 "logical_digest_mismatch", "logical_fact_reconciliation_digest differs"
             )
 
     def _check_counts(self) -> None:
-        expected_digest = compute_row_universe_digest(self.row_universe)
+        expected_digest = digest_row_universe(self.row_universe)
         for name in ("candidate_execution", "reference_execution"):
             side = getattr(self, name)
             if side.row_count != len(self.fact_reconciliations):
@@ -202,7 +202,7 @@ class Certification7BRecord:
     @property
     def row_universe(self) -> tuple[ReconciliationRowKey, ...]:
         """The common ``U7`` carried by the reconciliations."""
-        return compute_row_universe(item.canonical_fact_key for item in self.fact_reconciliations)
+        return build_row_universe(item.canonical_fact_key for item in self.fact_reconciliations)
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
