@@ -12,6 +12,7 @@ import re
 from typing import Any, Final, TypeVar
 
 from smart_ads.contracts.jcs import (
+    MAX_JCS_SAFE_INT,
     ArtifactLocator,
     P1Integrity,
     canonicalize_jcs,
@@ -163,6 +164,22 @@ def require_member(value: object, expected: type, *, label: str) -> None:
     """Like ``require_type`` but for members of evidence objects (``malformed_member``)."""
     if not isinstance(value, expected):
         raise Bundle7BDefectError("malformed_member", f"{label}: expected {expected.__name__}")
+
+
+def require_tuple_of(value: object, expected: type, *, label: str) -> tuple[Any, ...]:
+    """Frozen, hashable sequence members are tuples of ``expected`` (``malformed_member``)."""
+    if not isinstance(value, tuple):
+        raise Bundle7BDefectError("malformed_member", f"{label}: expected a tuple")
+    for item in value:
+        require_member(item, expected, label=f"{label}.entry")
+    return value
+
+
+def require_count(value: object, *, label: str) -> int:
+    """A strict non-negative int within the RFC 8785 safe range (``malformed_member``)."""
+    if type(value) is not int or not 0 <= value <= MAX_JCS_SAFE_INT:
+        raise Bundle7BDefectError("malformed_member", f"{label}: expected a non-negative int")
+    return value
 
 
 def require_callable(value: object, *, label: str) -> None:

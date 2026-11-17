@@ -22,6 +22,7 @@ from smart_ads.reconciliation.bundle_common import (
     metric_ref,
     require_collection,
     require_strictly_ascending,
+    require_tuple_of,
     require_type,
 )
 
@@ -232,6 +233,10 @@ class SideUniverse:
 
     rows: tuple[ReconciliationRowKey, ...]
     pairs: tuple[MetricPairKey, ...]
+
+    def __post_init__(self) -> None:
+        require_tuple_of(self.rows, ReconciliationRowKey, label="side_universe.rows")
+        require_tuple_of(self.pairs, MetricPairKey, label="side_universe.pairs")
 
     @classmethod
     def of(cls, facts: Sequence[NormalizedCollectionFact]) -> SideUniverse:

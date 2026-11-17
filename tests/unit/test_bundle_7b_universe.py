@@ -5,13 +5,16 @@ expected digest per 7B data prefix is written out by hand.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+from typing import Any
 
 import pytest
 
 from smart_ads.contracts.jcs import canonicalize_jcs
 from smart_ads.contracts.schemas import compute_fact_projection_digest
 from smart_ads.reconciliation import bundle_7b as b7
+from smart_ads.reconciliation import bundle_universe
 from smart_ads.reconciliation.bundle_7b import (
     Bundle7BDefectError,
     MetricPairKey,
@@ -214,6 +217,24 @@ def test_digest_helpers_reject_wrongly_typed_arguments() -> None:
         with pytest.raises(Bundle7BDefectError) as excinfo:
             call()
         assert code_of(excinfo) == "malformed_argument"
+
+
+@pytest.mark.parametrize("name", ["rows", "pairs"])
+@pytest.mark.parametrize("shape", [list, iter])
+def test_side_universe_members_must_be_tuples(name: str, shape: Any) -> None:
+    side = bundle_universe.SideUniverse.of(facts_for(BASE_VALUES))
+    assert hash(side) == hash(bundle_universe.SideUniverse.of(facts_for(BASE_VALUES)))
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        dataclasses.replace(side, **{name: shape(getattr(side, name))})
+    assert code_of(excinfo) == "malformed_member"
+
+
+def test_side_universe_entries_must_have_the_right_type() -> None:
+    side = bundle_universe.SideUniverse.of(facts_for(BASE_VALUES))
+    for changes in ({"rows": (row_key().to_dict(),)}, {"pairs": (row_key(),)}):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            dataclasses.replace(side, **changes)
+        assert code_of(excinfo) == "malformed_member"
 
 
 def test_metric_pair_key_round_trips_and_rejects_bad_grammar() -> None:

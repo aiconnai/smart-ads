@@ -20,6 +20,8 @@ from smart_ads.reconciliation.bundle_common import (
     artifact_locator_for,
     guard,
     require_argument_locator,
+    require_count,
+    require_tuple_of,
     require_type,
     scope_ref,
     sha256_member,
@@ -51,6 +53,7 @@ RECONCILE_OUTCOME_CODES: Final[tuple[str, ...]] = (
     "retrieval_skew_exceeded",
     "row_universe_mismatch",
 )
+_BUNDLE_OUTCOMES: Final[frozenset[str]] = frozenset({"verified", "failed"})
 _STATUS_OUTCOME_CODES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "UNRECONCILED": "metric_unreconciled",
@@ -190,6 +193,24 @@ class Reconciliation7BResult:
     reference_row_universe_digest: str
     candidate_row_count: int
     reference_row_count: int
+
+    def __post_init__(self) -> None:
+        label = "reconciliation_7b_result"
+        if self.bundle_outcome not in _BUNDLE_OUTCOMES:
+            raise Bundle7BDefectError("malformed_member", f"{label}.bundle_outcome: closed set")
+        codes = require_tuple_of(self.defect_codes, str, label=f"{label}.defect_codes")
+        if not set(codes) <= set(RECONCILE_OUTCOME_CODES):
+            raise Bundle7BDefectError("malformed_member", f"{label}.defect_codes: closed set")
+        require_tuple_of(
+            self.fact_reconciliations, FactReconciliation, label=f"{label}.fact_reconciliations"
+        )
+        if self.logical_fact_reconciliation_digest is not None:
+            sha256_member(self.logical_fact_reconciliation_digest, label=f"{label}.logical")
+        for side in ("candidate", "reference"):
+            sha256_member(
+                getattr(self, f"{side}_row_universe_digest"), label=f"{label}.{side}_digest"
+            )
+            require_count(getattr(self, f"{side}_row_count"), label=f"{label}.{side}_row_count")
 
 
 def reconcile_7b_fact_sets(

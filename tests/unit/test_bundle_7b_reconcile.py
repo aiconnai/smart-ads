@@ -297,6 +297,29 @@ def test_reconcile_indexes_each_result_once_for_100_rows_per_side(
     assert counter.calls == 2
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"defect_codes": ["metric_blocked"]},
+        {"defect_codes": ("not_a_code",)},
+        {"fact_reconciliations": "list"},
+        {"fact_reconciliations": "generator"},
+        {"bundle_outcome": "partial"},
+        {"candidate_row_count": True},
+    ],
+)
+def test_reconcile_result_members_are_closed_and_hashable(changes: dict[str, Any]) -> None:
+    cand, ref = results()
+    result = reconcile(cand, ref)
+    assert hash(result) == hash(reconcile(cand, ref))
+    recs = result.fact_reconciliations
+    shaped = {"list": list(recs), "generator": (r for r in recs)}
+    changes = {k: shaped.get(v, v) if isinstance(v, str) else v for k, v in changes.items()}
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        dataclasses.replace(result, **changes)
+    assert code_of(excinfo) == "malformed_member"
+
+
 def test_reconcile_result_is_immutable_and_its_codes_are_closed() -> None:
     cand, ref = results()
     result = reconcile(cand, ref)

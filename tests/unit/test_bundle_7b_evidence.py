@@ -119,6 +119,19 @@ def test_public_evidence_functions_reject_a_result_index_even_a_forged_one(
         assert code_of(excinfo) == "malformed_argument"
 
 
+def test_result_index_members_are_closed(cand_result: CollectionResult) -> None:
+    index = bundle_evidence.ResultIndex.of(cand_result)
+    for changes in (
+        {"facts_by_pair": dict(index.facts_by_pair)},
+        {"result": cand_result.to_dict()},
+        {"locator": index.locator.to_dict()},
+        {"set_digest": "sha256:X"},
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            dataclasses.replace(index, **changes)
+        assert code_of(excinfo) == "malformed_member"
+
+
 def test_select_fact_evidence_rejects_a_non_addressable_pair(cand_result: CollectionResult) -> None:
     with pytest.raises(Bundle7BDefectError) as excinfo:
         b7.select_fact_evidence(cand_result, MetricPairKey(row_key(REF_C), SPEND))

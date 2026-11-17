@@ -117,6 +117,16 @@ class ResultIndex:
     set_digest: str
     facts_by_pair: Mapping[MetricPairKey, tuple[NormalizedCollectionFact, ...]]
 
+    def __post_init__(self) -> None:
+        label = "result_index"
+        require_member(self.result, CollectionResult, label=f"{label}.result")
+        require_locator(self.locator, CollectionResult.SCHEMA, label=f"{label}.locator")
+        sha256_member(self.set_digest, label=f"{label}.set_digest")
+        if not isinstance(self.facts_by_pair, MappingProxyType):
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.facts_by_pair: expected a read-only mapping"
+            )
+
     @classmethod
     def of(cls, result: CollectionResult) -> ResultIndex:
         facts = complete_facts(result)
