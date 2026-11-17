@@ -558,3 +558,46 @@ def test_duplicates_are_allowed_without_declared_uniqueness() -> None:
     schema = AnalysisResultSchema.from_dict(_schema_dict())
     rows = [REL_ROWS[0], REL_ROWS[0]]
     verify_result_projection(ResultProjection.from_dict(_projection_dict(schema, rows)), schema)
+
+
+def test_composite_unique_key_uses_every_key_column() -> None:
+    # unique_key ["day", "resource_ref"]: rows sharing only one key column are distinct
+    rows = [
+        _row("campaign:a", "2026-11-01", "1.000000"),
+        _row("campaign:b", "2026-11-01", "1.000000"),
+        _row("campaign:a", "2026-11-02", "1.000000"),
+    ]
+    verify_result_projection(ResultProjection.from_dict(_projection_dict(REL_SCHEMA, rows)), REL_SCHEMA)
+    full_duplicate = [*rows, _row("campaign:b", "2026-11-01", None)]
+    _raises(
+        "duplicate_row",
+        verify_result_projection,
+        ResultProjection.from_dict(_projection_dict(REL_SCHEMA, full_duplicate)),
+        REL_SCHEMA,
+    )
+
+
+# ---------------------------------------------------------------- mixed-type keys and helpers
+
+
+@pytest.mark.parametrize(
+    ("parse", "data", "code"),
+    [
+        (ResultColumn.from_dict, {1: 1, "name": "x"}, "alternate_wrapper"),
+        (AnalysisResultSchema.from_dict, {**_schema_dict(), 1: 1}, "alternate_wrapper"),
+        (AnalysisResultSchema.from_dict, {1: 1, "integrity": {}}, "alternate_wrapper"),
+        (ResultProjection.from_dict, {**_projection_dict(REL_SCHEMA), 1: 1}, "alternate_wrapper"),
+        (TaggedScalarCell.from_dict, {1: 1, "_type": "null", "value": None}, "cell_invalid"),
+    ],
+)
+def test_mixed_type_keys_reject_with_a_closed_code(
+    parse: Callable[[object], Any], data: object, code: str
+) -> None:
+    _raises(code, parse, data)
+
+
+def test_projection_column_index() -> None:
+    projection = ResultProjection.from_dict(_projection_dict(REL_SCHEMA))
+    assert [projection.column_index(n) for n in ("resource_ref", "day", "spend")] == [0, 1, 2]
+    _raises("unknown_column", projection.column_index, "cost")
+    _raises("unknown_column", projection.column_index, 0)

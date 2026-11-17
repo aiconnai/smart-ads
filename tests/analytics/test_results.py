@@ -88,6 +88,7 @@ REL_SCHEMA = AnalysisResultSchema.from_dict(
 SCALAR_SCHEMA = AnalysisResultSchema.from_dict(
     _schema_dict([_col("total", "int64")], kind="scalar")
 )
+SCHEMAS = [REL_SCHEMA, SCALAR_SCHEMA]
 
 
 def _projection_dict(
@@ -114,12 +115,7 @@ RUN = _loc("smart_ads/migration_run_context/v1", "3")
 OTHER_BUNDLE = _loc("smart_ads/analysis_replay_input_bundle/v1", "4")
 OTHER_SNAPSHOT = _loc("smart_ads/dataset_snapshot/v1", "5")
 LOCATOR_MEMBERS = (
-    "$schema",
-    "artifact_type",
-    "content_digest",
-    "serialization",
-    "store_kind",
-    "object_ref",
+    "$schema", "artifact_type", "content_digest", "serialization", "store_kind", "object_ref",
 )
 
 
@@ -365,18 +361,21 @@ def test_execution_rejections(mutate: Callable[[dict[str, Any]], Any], code: str
 
 def test_verifier_accepts_complete_execution_in_any_resolution_order() -> None:
     data = _execution_dict()
-    verified = verify_analysis_execution(data, [RESULT_B, RESULT_A], SNAPSHOT)
+    verified = verify_analysis_execution(data, [RESULT_B, RESULT_A], SCHEMAS, SNAPSHOT)
     assert isinstance(verified, AnalysisExecution)
     assert verified.to_dict() == data
     again = verify_analysis_execution(
-        AnalysisExecution.from_dict(data), [RESULT_A.to_dict(), RESULT_B], SNAPSHOT
+        AnalysisExecution.from_dict(data),
+        [RESULT_A.to_dict(), RESULT_B],
+        [SCALAR_SCHEMA.to_dict(), REL_SCHEMA],
+        SNAPSHOT,
     )
     assert again == verified
 
 
 def test_verifier_rejects_duplicate_result_in_set() -> None:
     data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(RESULT_A)]))
-    _raises("duplicate_result", verify_analysis_execution, data, [RESULT_A], SNAPSHOT)
+    _raises("duplicate_result", verify_analysis_execution, data, [RESULT_A], SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_rejects_duplicate_resolved_result() -> None:
@@ -385,13 +384,14 @@ def test_verifier_rejects_duplicate_resolved_result() -> None:
         verify_analysis_execution,
         _execution_dict(),
         [RESULT_A, RESULT_B, RESULT_A],
+        SCHEMAS,
         SNAPSHOT,
     )
 
 
 def test_verifier_rejects_reorder() -> None:
     data = _execution_dict(_set_dict([_entry(RESULT_B), _entry(RESULT_A)]))
-    _raises("results_unordered", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT)
+    _raises("results_unordered", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_rejects_missing_result() -> None:
@@ -400,19 +400,20 @@ def test_verifier_rejects_missing_result() -> None:
         verify_analysis_execution,
         _execution_dict(),
         [RESULT_A, RESULT_B, RESULT_C],
+        SCHEMAS,
         SNAPSHOT,
     )
 
 
 def test_verifier_rejects_extra_result() -> None:
-    _raises("extra_result", verify_analysis_execution, _execution_dict(), [RESULT_A], SNAPSHOT)
+    _raises("extra_result", verify_analysis_execution, _execution_dict(), [RESULT_A], SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_rejects_projection_mismatch() -> None:
     entry_b = _entry(RESULT_B)
     entry_b["result_projection"]["rows"][0][0]["value"] = "43"
     data = _execution_dict(_set_dict([_entry(RESULT_A), entry_b]))
-    _raises("projection_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT)
+    _raises("projection_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_rejects_result_locator_mismatch() -> None:
@@ -420,20 +421,21 @@ def test_verifier_rejects_result_locator_mismatch() -> None:
     entry_b["result_locator"] = _result_locator(RESULT_C).to_dict()
     data = _execution_dict(_set_dict([_entry(RESULT_A), entry_b]))
     _raises(
-        "result_locator_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT
+        "result_locator_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT
     )
 
 
 def test_verifier_rejects_cross_snapshot_result() -> None:
     foreign = AnalysisResult.from_dict(_result_dict("metric:b", scalar=True, snapshot=OTHER_SNAPSHOT))
     data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(foreign)]))
-    _raises("cross_snapshot_result", verify_analysis_execution, data, [RESULT_A, foreign], SNAPSHOT)
+    _raises("cross_snapshot_result", verify_analysis_execution, data, [RESULT_A, foreign], SCHEMAS, SNAPSHOT)
     # the bundle snapshot is the explicit parameter: a different one rejects everything
     _raises(
         "cross_snapshot_result",
         verify_analysis_execution,
         _execution_dict(),
         [RESULT_A, RESULT_B],
+        SCHEMAS,
         OTHER_SNAPSHOT,
     )
 
@@ -442,14 +444,14 @@ def test_verifier_rejects_result_bound_to_another_bundle() -> None:
     foreign = AnalysisResult.from_dict(_result_dict("metric:b", scalar=True, bundle=OTHER_BUNDLE))
     data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(foreign)]))
     _raises(
-        "bundle_locator_mismatch", verify_analysis_execution, data, [RESULT_A, foreign], SNAPSHOT
+        "bundle_locator_mismatch", verify_analysis_execution, data, [RESULT_A, foreign], SCHEMAS, SNAPSHOT
     )
 
 
 def test_verifier_rejects_execution_and_set_bundle_disagreement() -> None:
     data = _execution_dict(bundle=OTHER_BUNDLE)
     _raises(
-        "bundle_locator_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT
+        "bundle_locator_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT
     )
 
 
@@ -482,7 +484,7 @@ def test_verifier_rejects_bundle_locator_differing_in_any_single_member(
         raw = RESULT_B.to_dict()
         raw["replay_input_bundle_locator"] = variant
         resolved = [RESULT_A, raw]
-    _raises("invalid_locator", verify_analysis_execution, data, resolved, SNAPSHOT)
+    _raises("invalid_locator", verify_analysis_execution, data, resolved, SCHEMAS, SNAPSHOT)
 
 
 @pytest.mark.parametrize("member", LOCATOR_MEMBERS)
@@ -490,24 +492,17 @@ def test_verifier_rejects_snapshot_locator_differing_in_any_single_member(member
     variant = dict(_single_member_variants(SNAPSHOT))[member]
     raw = RESULT_B.to_dict()
     raw["dataset_snapshot_locator"] = variant
-    _raises("invalid_locator", verify_analysis_execution, _execution_dict(), [RESULT_A, raw], SNAPSHOT)
+    _raises("invalid_locator", verify_analysis_execution, _execution_dict(), [RESULT_A, raw], SCHEMAS, SNAPSHOT)
 
 
-@pytest.mark.parametrize(
-    "snapshot",
-    [
-        BUNDLE,
-        SNAPSHOT.to_dict(),
-        SNAPSHOT.content_digest,
-        None,
-    ],
-)
+@pytest.mark.parametrize("snapshot", [BUNDLE, SNAPSHOT.to_dict(), SNAPSHOT.content_digest, None])
 def test_verifier_requires_typed_bundle_snapshot_locator(snapshot: object) -> None:
     _raises(
         "invalid_locator",
         verify_analysis_execution,
         _execution_dict(),
         [RESULT_A, RESULT_B],
+        SCHEMAS,
         snapshot,
     )
 
@@ -523,7 +518,7 @@ def test_verifier_requires_typed_bundle_snapshot_locator(snapshot: object) -> No
 def test_verifier_rejects_alternate_wrapper(mutate: Callable[[dict[str, Any]], Any]) -> None:
     data = _execution_dict()
     mutate(data)
-    _raises("alternate_wrapper", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT)
+    _raises("alternate_wrapper", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_rejects_alternate_preimage_digest() -> None:
@@ -531,20 +526,12 @@ def test_verifier_rejects_alternate_preimage_digest() -> None:
     result_set = data["canonical_result_set"]
     preimage = {k: v for k, v in result_set.items() if k != "canonical_result_digest"}
     result_set["canonical_result_digest"] = _digest_of({**preimage, "canonical_result_digest": None})
-    _raises("digest_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SNAPSHOT)
+    _raises("digest_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
 
 
-@pytest.mark.parametrize(
-    "resolved",
-    [
-        {RESULT_A.locator(): RESULT_A},
-        "x",
-        None,
-        [RESULT_A, 1],
-    ],
-)
+@pytest.mark.parametrize("resolved", [{RESULT_A.locator(): RESULT_A}, "x", None, [RESULT_A, 1]])
 def test_verifier_rejects_malformed_resolved_results(resolved: object) -> None:
-    _raises("field_invalid", verify_analysis_execution, _execution_dict(), resolved, SNAPSHOT)
+    _raises("field_invalid", verify_analysis_execution, _execution_dict(), resolved, SCHEMAS, SNAPSHOT)
 
 
 def test_verifier_does_not_mutate_inputs() -> None:
@@ -552,6 +539,250 @@ def test_verifier_does_not_mutate_inputs() -> None:
     before = copy.deepcopy(data)
     resolved = [RESULT_A.to_dict(), RESULT_B.to_dict()]
     resolved_before = copy.deepcopy(resolved)
-    verify_analysis_execution(data, resolved, SNAPSHOT)
+    verify_analysis_execution(data, resolved, SCHEMAS, SNAPSHOT)
     assert data == before
     assert resolved == resolved_before
+
+
+# ---------------------------------------------------------------- resolved schemas in the verifier
+
+
+def _result_with(
+    key: str, schema: AnalysisResultSchema, rows: list[Any], *, signed: bool = False
+) -> AnalysisResult:
+    data = {**_result_dict(key), "result_projection": _projection_dict(schema, rows)}
+    return AnalysisResult.from_dict(_signed(data) if signed else data)
+
+
+def test_verifier_checks_uniqueness_against_resolved_schema() -> None:
+    dup = _result_with("metric:a", REL_SCHEMA, [REL_ROWS[0], REL_ROWS[0]])
+    data = _execution_dict(_set_dict([_entry(dup), _entry(RESULT_B)]))
+    _raises("duplicate_row", verify_analysis_execution, data, [dup, RESULT_B], SCHEMAS, SNAPSHOT)
+
+
+def test_verifier_rejects_inline_columns_differing_from_resolved_schema() -> None:
+    projection = _projection_dict(SCALAR_SCHEMA, SCALAR_ROWS)
+    projection["columns"] = [_col("total", "int64", nullable=True)]
+    drifted = AnalysisResult.from_dict({**_result_dict("metric:b"), "result_projection": projection})
+    data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(drifted)]))
+    _raises("schema_mismatch", verify_analysis_execution, data, [RESULT_A, drifted], SCHEMAS, SNAPSHOT)
+
+
+def test_verifier_rejects_result_whose_schema_was_not_supplied() -> None:
+    _raises(
+        "schema_unresolved",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        [REL_SCHEMA],
+        SNAPSHOT,
+    )
+    projection = _projection_dict(SCALAR_SCHEMA, SCALAR_ROWS)
+    projection["analysis_result_schema_locator"] = _loc(SCHEMA_TYPE, "f").to_dict()
+    ghost = AnalysisResult.from_dict({**_result_dict("metric:b"), "result_projection": projection})
+    data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(ghost)]))
+    _raises("schema_unresolved", verify_analysis_execution, data, [RESULT_A, ghost], SCHEMAS, SNAPSHOT)
+
+
+def test_verifier_rejects_duplicate_supplied_schema() -> None:
+    _raises(
+        "duplicate_schema",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        [REL_SCHEMA, SCALAR_SCHEMA, REL_SCHEMA.to_dict()],
+        SNAPSHOT,
+    )
+
+
+def test_verifier_rejects_unreferenced_schema() -> None:
+    unused = AnalysisResultSchema.from_dict(_schema_dict(REL_COLUMNS))
+    _raises(
+        "unreferenced_schema",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        [*SCHEMAS, unused],
+        SNAPSHOT,
+    )
+
+
+@pytest.mark.parametrize(
+    ("schemas", "code"),
+    [
+        ({REL_SCHEMA.locator(): REL_SCHEMA}, "field_invalid"),
+        ("x", "field_invalid"),
+        (None, "field_invalid"),
+        ([REL_SCHEMA, 1], "field_invalid"),
+        ([REL_SCHEMA, {**SCALAR_SCHEMA.to_dict(), "extra": 1}], "alternate_wrapper"),
+    ],
+)
+def test_verifier_rejects_malformed_resolved_schemas(schemas: object, code: str) -> None:
+    _raises(code, verify_analysis_execution, _execution_dict(), [RESULT_A, RESULT_B], schemas, SNAPSHOT)
+
+
+# ---------------------------------------------------------------- signed artifacts
+
+
+def _signed_world() -> tuple[dict[str, Any], list[AnalysisResult], list[AnalysisResultSchema]]:
+    rel = AnalysisResultSchema.from_dict(_signed(REL_SCHEMA.to_dict()))
+    scalar = AnalysisResultSchema.from_dict(_signed(SCALAR_SCHEMA.to_dict()))
+    result_a = _result_with("metric:a", rel, REL_ROWS, signed=True)
+    result_b = _result_with("metric:b", scalar, SCALAR_ROWS, signed=True)
+    execution = _signed(_execution_dict(_set_dict([_entry(result_a), _entry(result_b)])))
+    return execution, [result_a, result_b], [rel, scalar]
+
+
+def test_signed_result_locator_hashes_the_full_signed_bytes() -> None:
+    _, (signed_a, _), _ = _signed_world()
+    assert signed_a.integrity is not None and signed_a.integrity.is_signed
+    by_hand = "sha256:" + hashlib.sha256(canonicalize_jcs(signed_a.to_dict())).hexdigest()
+    assert signed_a.locator().content_digest == by_hand
+    assert signed_a.locator().content_digest != signed_a.integrity.content_digest
+
+
+def test_verifier_accepts_fully_signed_execution_with_require_signed() -> None:
+    execution, results, schemas = _signed_world()
+    verified = verify_analysis_execution(execution, results, schemas, SNAPSHOT, require_signed=True)
+    assert verified.integrity is not None and verified.integrity.is_signed
+    again = verify_analysis_execution(
+        verified,
+        [r.to_dict() for r in results],
+        [s.to_dict() for s in schemas],
+        SNAPSHOT,
+        require_signed=True,
+    )
+    assert again == verified
+    assert verify_analysis_execution(execution, results, schemas, SNAPSHOT) == verified
+
+
+@pytest.mark.parametrize("which", ["execution", "result", "schema", "unsigned_integrity"])
+def test_require_signed_rejects_parsed_objects_without_signature(which: str) -> None:
+    execution, results, schemas = _signed_world()
+    parsed: Any = AnalysisExecution.from_dict(execution)
+    if which == "execution":
+        parsed = AnalysisExecution(
+            parsed.analysis_replay_input_bundle_locator, parsed.canonical_result_set
+        )
+    elif which == "result":
+        results = [RESULT_A, results[1]]
+    elif which == "schema":
+        schemas = [REL_SCHEMA, schemas[1]]
+    else:
+        unsigned_integrity = P1Integrity.from_dict(
+            {k: v for k, v in execution["integrity"].items() if k in ("key_id", "key_registry_snapshot_locator")}
+        )
+        schemas = [AnalysisResultSchema(s.result_kind, s.columns, s.unique_key, unsigned_integrity) for s in schemas]
+    _raises(
+        "unsigned_artifact",
+        verify_analysis_execution,
+        parsed,
+        results,
+        schemas,
+        SNAPSHOT,
+        require_signed=True,
+    )
+
+
+@pytest.mark.parametrize("which", ["execution", "result", "schema"])
+def test_require_signed_rejects_unsigned_mappings(which: str) -> None:
+    execution, results, schemas = _signed_world()
+    raw_exec: Any = execution
+    raw_results: list[Any] = list(results)
+    raw_schemas: list[Any] = list(schemas)
+    if which == "execution":
+        raw_exec = _execution_dict()
+    elif which == "result":
+        raw_results = [RESULT_A.to_dict(), results[1]]
+    else:
+        raw_schemas = [REL_SCHEMA.to_dict(), schemas[1]]
+    _raises(
+        "alternate_wrapper",
+        verify_analysis_execution,
+        raw_exec,
+        raw_results,
+        raw_schemas,
+        SNAPSHOT,
+        require_signed=True,
+    )
+
+
+@pytest.mark.parametrize("flag", [1, "yes", None])
+def test_require_signed_flag_is_a_strict_bool(flag: object) -> None:
+    _raises(
+        "field_invalid",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        SCHEMAS,
+        SNAPSHOT,
+        require_signed=flag,
+    )
+
+
+# ---------------------------------------------------------------- additional verifier pins
+
+
+def test_verifier_rejects_row_reorder_inside_one_projection() -> None:
+    entry_a = _entry(RESULT_A)
+    entry_a["result_projection"]["rows"].reverse()
+    data = _execution_dict(_set_dict([entry_a, _entry(RESULT_B)]))
+    _raises("projection_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
+
+
+def test_verifier_rejects_alternate_wrapper_on_a_resolved_result() -> None:
+    raw = {**RESULT_B.to_dict(), "analysis_execution_locator": _loc(EXECUTION_TYPE, "9").to_dict()}
+    _raises("alternate_wrapper", verify_analysis_execution, _execution_dict(), [RESULT_A, raw], SCHEMAS, SNAPSHOT)
+
+
+def test_verifier_rejects_result_set_bundle_differing_from_expected_execution_bundle() -> None:
+    data = _execution_dict(_set_dict([_entry(RESULT_A), _entry(RESULT_B)], bundle=OTHER_BUNDLE))
+    assert data["analysis_replay_input_bundle_locator"] == BUNDLE.to_dict()
+    _raises("bundle_locator_mismatch", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
+
+
+def test_mixed_type_keys_reject_with_a_closed_code_through_the_verifier() -> None:
+    data: dict[Any, Any] = {**_execution_dict(), 1: 1}
+    _raises("alternate_wrapper", verify_analysis_execution, data, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)
+    raw: dict[Any, Any] = {**RESULT_B.to_dict(), 1: 1}
+    _raises("alternate_wrapper", verify_analysis_execution, _execution_dict(), [RESULT_A, raw], SCHEMAS, SNAPSHOT)
+    _raises("alternate_wrapper", CanonicalResultSet.from_dict, {1: 1, "results": []})
+
+
+GOLDEN_CANONICAL_RESULT_DIGEST = (
+    "sha256:66326ba01632301227aa4e1c79d0b11d1aebc6935298587d0c45acb5573f02ae"
+)
+
+
+def test_golden_canonical_result_digest_locks_the_preimage() -> None:
+    preimage = {
+        "$schema": "smart_ads/canonical_result_set/v1",
+        "analysis_replay_input_bundle_locator": _loc("smart_ads/analysis_replay_input_bundle/v1", "1").to_dict(),
+        "results": [
+            {
+                "result_key": "metric:total",
+                "result_locator": _loc("smart_ads/analysis_result/v1", "a").to_dict(),
+                "result_projection": {
+                    "result_kind": "scalar",
+                    "analysis_result_schema_locator": _loc(SCHEMA_TYPE, "d").to_dict(),
+                    "columns": [{"name": "total", "cell_type": "int64", "nullable": False}],
+                    "rows": [[{"_type": "int64", "value": "42"}]],
+                    "row_count": 1,
+                },
+            }
+        ],
+    }
+    parsed = CanonicalResultSet.from_dict(
+        {**preimage, "canonical_result_digest": GOLDEN_CANONICAL_RESULT_DIGEST}
+    )
+    assert parsed.canonical_result_digest == GOLDEN_CANONICAL_RESULT_DIGEST
+    built = CanonicalResultSet.build(BUNDLE, [CanonicalResultEntry.from_dict(preimage["results"][0])])
+    assert built.canonical_result_digest == GOLDEN_CANONICAL_RESULT_DIGEST
+
+
+def test_result_set_entry_lookup() -> None:
+    result_set = CanonicalResultSet.from_dict(_set_dict([_entry(RESULT_A), _entry(RESULT_B)]))
+    assert result_set.entry("metric:b").result_locator == RESULT_B.locator()
+    assert result_set.entry("metric:a").result_key == "metric:a"
+    _raises("unknown_result_key", result_set.entry, "metric:z")
+    _raises("unknown_result_key", result_set.entry, 1)

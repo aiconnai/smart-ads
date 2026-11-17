@@ -28,11 +28,12 @@ RESULT_SET_ERROR_CODES: Final[frozenset[str]] = frozenset(
     (
         "alternate_wrapper bundle_locator_mismatch cell_invalid cell_type_mismatch "
         "cross_snapshot_result digest_mismatch duplicate_result duplicate_row "
-        "empty_result_set extra_result field_invalid integrity_mismatch "
+        "duplicate_schema empty_result_set extra_result field_invalid integrity_mismatch "
         "invalid_integrity invalid_locator missing_result null_not_allowed "
         "projection_mismatch result_locator_mismatch results_unordered "
         "row_count_mismatch row_width_mismatch scalar_shape schema_invalid "
-        "schema_locator_mismatch schema_mismatch"
+        "schema_locator_mismatch schema_mismatch schema_unresolved unknown_column "
+        "unknown_result_key unreferenced_schema unsigned_artifact"
     ).split()
 )
 
@@ -167,7 +168,7 @@ def _locator_of(artifact_type: str, envelope: Mapping[str, Any]) -> ArtifactLoca
 
 def _closed(data: object, keys: frozenset[str], *, label: str) -> Mapping[str, Any]:
     if not isinstance(data, Mapping) or set(data) != keys:
-        found = sorted(data) if isinstance(data, Mapping) else type(data).__name__
+        found = sorted(map(repr, data)) if isinstance(data, Mapping) else type(data).__name__
         raise _fail("alternate_wrapper", f"{label}: expected members {sorted(keys)}, got {found}")
     return data
 
@@ -436,6 +437,13 @@ class ResultProjection:
             "rows": [[cell.to_dict() for cell in row] for row in self.rows],
             "row_count": self.row_count,
         }
+
+    def column_index(self, name: str) -> int:
+        """Position of the declared column `name` (rejects an undeclared name)."""
+        for index, column in enumerate(self.columns):
+            if type(name) is str and column.name == name:
+                return index
+        raise _fail("unknown_column", f"result_projection: undeclared column {name!r}")
 
 
 def verify_result_projection(

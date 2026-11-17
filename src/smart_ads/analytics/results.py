@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import hashlib
 from itertools import pairwise
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, TypeVar
 
 from smart_ads.analytics.cells import (
     ANALYSIS_EXECUTION_TYPE,
@@ -253,6 +253,13 @@ class CanonicalResultSet:
     def to_dict(self) -> dict[str, Any]:
         return {**self.preimage(), "canonical_result_digest": self.canonical_result_digest}
 
+    def entry(self, result_key: str) -> CanonicalResultEntry:
+        """The entry for `result_key` (rejects an unknown key)."""
+        for candidate in self.results:
+            if type(result_key) is str and candidate.result_key == result_key:
+                return candidate
+        raise _fail("unknown_result_key", f"canonical_result_set: no entry {result_key!r}")
+
 
 # ---------------------------------------------------------------- analysis_execution/v1
 
@@ -318,20 +325,58 @@ class AnalysisExecution:
 # ---------------------------------------------------------------- verifier
 
 
-def _index_resolved(resolved_results: object) -> dict[str, AnalysisResult]:
-    """Parse resolved results (objects or closed mappings) keyed by unique `result_key`."""
+_P1Artifact = TypeVar("_P1Artifact", AnalysisExecution, AnalysisResult, AnalysisResultSchema)
+
+
+def _resolve(item: object, cls: type[_P1Artifact], require_signed: bool) -> _P1Artifact:
+    """Accept a parsed object or a closed mapping; enforce a finalized signature if asked."""
+    if isinstance(item, cls):
+        if require_signed and (item.integrity is None or not item.integrity.is_signed):
+            raise _fail("unsigned_artifact", f"{cls.SCHEMA}: finalized P1 signature required")
+        return item
+    if isinstance(item, Mapping):
+        return cls.from_dict(item, require_signed=require_signed)
+    raise _fail("field_invalid", f"expected {cls.__name__} or mapping, got {type(item).__name__}")
+
+
+def _index_resolved(resolved_results: object, require_signed: bool) -> dict[str, AnalysisResult]:
+    """Parse resolved results keyed by unique `result_key`."""
     indexed: dict[str, AnalysisResult] = {}
     for item in _sequence(resolved_results, label="resolved_results"):
-        if isinstance(item, AnalysisResult):
-            result = item
-        elif isinstance(item, Mapping):
-            result = AnalysisResult.from_dict(item)
-        else:
-            raise _fail("field_invalid", "resolved_results: expected AnalysisResult elements")
+        result = _resolve(item, AnalysisResult, require_signed)
         if result.result_key in indexed:
             raise _fail("duplicate_result", f"resolved_results: duplicate {result.result_key!r}")
         indexed[result.result_key] = result
     return indexed
+
+
+def _index_schemas(resolved_schemas: object, require_signed: bool) -> dict[bytes, AnalysisResultSchema]:
+    """Parse resolved schemas keyed by the canonical bytes of their locator."""
+    indexed: dict[bytes, AnalysisResultSchema] = {}
+    for item in _sequence(resolved_schemas, label="resolved_schemas"):
+        schema = _resolve(item, AnalysisResultSchema, require_signed)
+        key = canonicalize_jcs(schema.locator().to_dict())
+        if key in indexed:
+            raise _fail("duplicate_schema", "resolved_schemas: the same schema is supplied twice")
+        indexed[key] = schema
+    return indexed
+
+
+def _check_projection_schemas(
+    resolved: Mapping[str, AnalysisResult], schemas: Mapping[bytes, AnalysisResultSchema]
+) -> None:
+    """Every result's projection checks against its supplied schema; no schema is unused."""
+    referenced: set[bytes] = set()
+    for key, result in resolved.items():
+        projection = result.result_projection
+        locator_key = canonicalize_jcs(projection.analysis_result_schema_locator.to_dict())
+        schema = schemas.get(locator_key)
+        if schema is None:
+            raise _fail("schema_unresolved", f"result {key!r}: result schema was not supplied")
+        verify_result_projection(projection, schema)
+        referenced.add(locator_key)
+    if set(schemas) - referenced:
+        raise _fail("unreferenced_schema", "resolved_schemas: a supplied schema is not referenced")
 
 
 def _check_resolved_identity(
@@ -359,25 +404,33 @@ def _check_entry(entry: CanonicalResultEntry, result: AnalysisResult) -> None:
 def verify_analysis_execution(
     execution: AnalysisExecution | Mapping[str, Any],
     resolved_results: tuple[AnalysisResult | Mapping[str, Any], ...] | list,
+    resolved_schemas: tuple[AnalysisResultSchema | Mapping[str, Any], ...] | list,
     bundle_dataset_snapshot_locator: ArtifactLocator,
+    *,
+    require_signed: bool = False,
 ) -> AnalysisExecution:
     """Rebuild `P` from the resolved results and require byte equality (ADR section 6.4).
 
-    `resolved_results` are the in-memory `analysis_result/v1` objects the caller
-    resolved; `bundle_dataset_snapshot_locator` is the replay bundle's exact
-    `dataset_snapshot_locator`. Returns the verified execution; never mutates input.
+    `resolved_results` / `resolved_schemas` are the in-memory `analysis_result/v1` and
+    `analysis_result_schema/v1` artifacts the caller resolved (objects or mappings);
+    every result projection is checked against its schema and every schema must be
+    referenced. `bundle_dataset_snapshot_locator` is the replay bundle's exact
+    `dataset_snapshot_locator`. With `require_signed`, every artifact must carry a
+    finalized P1 signature. Returns the verified execution; never mutates input.
     """
-    parsed = (
-        execution
-        if isinstance(execution, AnalysisExecution)
-        else AnalysisExecution.from_dict(execution)
-    )
+    if type(require_signed) is not bool:
+        raise _fail("field_invalid", "require_signed: expected bool")
+    if isinstance(execution, AnalysisExecution):
+        parsed = _resolve(execution, AnalysisExecution, require_signed)
+    else:
+        parsed = AnalysisExecution.from_dict(execution, require_signed=require_signed)
     _require_locator(
         bundle_dataset_snapshot_locator,
         DATASET_SNAPSHOT_TYPE,
         label="bundle_dataset_snapshot_locator",
     )
-    resolved = _index_resolved(resolved_results)
+    resolved = _index_resolved(resolved_results, require_signed)
+    schemas = _index_schemas(resolved_schemas, require_signed)
     bundle = parsed.analysis_replay_input_bundle_locator
     for result in resolved.values():
         _check_resolved_identity(result, bundle, bundle_dataset_snapshot_locator)
@@ -390,6 +443,7 @@ def verify_analysis_execution(
         raise _fail("extra_result", f"result set entries without a resolved result {extra}")
     for key, entry in entries.items():
         _check_entry(entry, resolved[key])
+    _check_projection_schemas(resolved, schemas)
     ordered = sorted(resolved, key=lambda k: k.encode("utf-8"))
     rebuilt = CanonicalResultSet.build(
         bundle, [CanonicalResultEntry.from_result(resolved[k]) for k in ordered]
