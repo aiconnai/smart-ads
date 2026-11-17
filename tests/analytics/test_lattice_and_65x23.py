@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from smart_ads.analytics import lattice as lattice_module
 from smart_ads.analytics.lattice import (
     AGGREGATE_CONVERSIONS_REF,
     CANONICAL_LEADS_REF,
@@ -928,6 +929,102 @@ def test_winner_selection_does_not_mutate_or_copy_the_inputs() -> None:
     winner = select_winner(rows)
     assert [row.to_dict() for row in rows] == snapshot
     assert winner is rows[1]
+
+
+# ---------------------------------------------------------------------------
+# order_by_winner: the full section 6.2 order of one fact_key, oldest first
+# ---------------------------------------------------------------------------
+def order_by_winner(candidates: Any) -> tuple[AnalyticsLandingRow, ...]:
+    # Resolved at call time so each new test fails on its own before the function exists.
+    return lattice_module.order_by_winner(candidates)
+
+
+def repeated_winner_order(rows: Any) -> tuple[AnalyticsLandingRow, ...]:
+    """Oldest-first order obtained by repeatedly taking select_winner and removing it."""
+    remaining, newest_first = list(rows), []
+    while remaining:
+        winner = select_winner(remaining)
+        newest_first.append(winner)
+        remaining = [row for row in remaining if row is not winner]
+    return tuple(reversed(newest_first))
+
+
+def test_order_by_winner_is_exported() -> None:
+    assert "order_by_winner" in lattice_module.__all__
+
+
+def test_order_by_winner_equals_repeated_select_winner_on_the_full_pool() -> None:
+    pool = _exhaustive_candidate_pool()  # 12 candidates: same-instant tombstone and digest ties
+    ordered = order_by_winner(pool)
+    assert ordered == repeated_winner_order(pool)
+    assert len(ordered) == len(pool) and {id(row) for row in ordered} == {id(row) for row in pool}
+    for index, row in enumerate(ordered):
+        assert all(beats(row, earlier) for earlier in ordered[:index])
+
+
+def test_order_by_winner_equals_repeated_select_winner_for_every_subset() -> None:
+    pool = _exhaustive_candidate_pool()
+    for size in (1, 2, 3, 4):
+        for subset in itertools.combinations(pool, size):
+            expected = repeated_winner_order(subset)
+            assert order_by_winner(subset) == expected
+            assert order_by_winner(tuple(reversed(subset))) == expected
+            assert order_by_winner(subset)[-1] is select_winner(subset)
+
+
+@pytest.mark.parametrize("tombstone_has_greater_digest", [True, False])
+def test_order_by_winner_puts_the_same_instant_tombstone_last(
+    tombstone_has_greater_digest: bool,
+) -> None:
+    tomb, obs = _same_time_pair(tombstone_has_greater_digest=tombstone_has_greater_digest)
+    for permutation in itertools.permutations((tomb, obs)):
+        assert order_by_winner(permutation) == (obs, tomb)
+
+
+def test_order_by_winner_ignores_input_order() -> None:
+    pool = _exhaustive_candidate_pool()
+    expected = order_by_winner(pool)
+    for shift in range(len(pool)):
+        rotated = pool[shift:] + pool[:shift]
+        assert order_by_winner(rotated) == expected
+        assert order_by_winner(list(reversed(rotated))) == expected
+    assert order_by_winner(iter(pool)) == expected
+    for permutation in itertools.permutations(pool[:5]):
+        assert order_by_winner(permutation) == repeated_winner_order(pool[:5])
+
+
+def test_order_by_winner_does_not_mutate_the_inputs() -> None:
+    rows = [make_row(at=T_LATE, obs="observation:o2"), make_row(at=T_EARLY, obs="observation:o1")]
+    snapshot = [row.to_dict() for row in rows]
+    assert order_by_winner(rows) == (rows[1], rows[0])
+    assert [row.to_dict() for row in rows] == snapshot
+
+
+def _rejected_candidate_sets() -> list[object]:
+    row = make_row()
+    twin = AnalyticsLandingRow.from_dict(row.to_dict())
+    return [
+        [],
+        [make_row(key=make_fact_key(resource=RESOURCE_A)), make_row(key=make_fact_key(resource=RESOURCE_B), at=T_LATE)],
+        [make_row(), make_row(key=make_fact_key(metric_date="2026-11-09"), at=T_LATE)],
+        [row, row],
+        [row, twin],
+        [row.to_dict()],
+        [row, None],
+        None,
+        "row",
+        7,
+    ]
+
+
+@pytest.mark.parametrize("bad", range(len(_rejected_candidate_sets())))
+def test_order_by_winner_rejects_what_select_winner_rejects(bad: int) -> None:
+    candidates = _rejected_candidate_sets()[bad]
+    with pytest.raises(ClosedValidationError):
+        select_winner(candidates)  # type: ignore[arg-type]
+    with pytest.raises(ClosedValidationError) as info:
+        order_by_winner(candidates)
+    assert type(info.value) is ClosedValidationError
 
 
 # ---------------------------------------------------------------------------
