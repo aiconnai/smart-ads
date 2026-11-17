@@ -11,14 +11,13 @@ import copy
 import dataclasses
 import hashlib
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 
 from smart_ads.contracts.jcs import (
     ArtifactLocator,
-    P1Integrity,
     canonicalize_jcs,
     p1_content_digest,
 )
@@ -1111,6 +1110,15 @@ def test_native_check_rejects_wrongly_typed_arguments() -> None:
         b7.check_native_request(native_dict(), **good)  # type: ignore[arg-type]
     assert code_of(excinfo) == "malformed_argument"
 
+
+# =============================================================================
+# ============================  SEAM: SECOND HALF  ============================
+# Above: value objects and digests (mirrors the first half of bundle_7b.py).
+# Below: reconcile, records and verifier (mirrors the second half). The second
+# half reuses the builders above (fact, facts_for, collection_result,
+# native_dict, fingerprint_dict, oracle_*); a mechanical split moves them to a
+# shared helper module first.
+# =============================================================================
 
 # ===========================================================================
 # Slice 5 - reconcile_7b_fact_sets (failed comparisons are values)

@@ -1,4 +1,4 @@
-"""Recomputable 7B bundle: row universes, fact reconciliations, and the sealed certification record (ADR-0001 section 5.4).
+"""Recomputable 7B bundle and sealed ``certification_7b_record/v1`` (ADR-0001 section 5.4).
 
 The module is organised in two halves separated by a marked seam so that it can
 be split mechanically:
@@ -178,6 +178,12 @@ def _require_type(value: object, expected: type, *, label: str) -> None:
         )
 
 
+def _require_member(value: object, expected: type, *, label: str) -> None:
+    """Like ``_require_type`` but for members of evidence objects (``malformed_member``)."""
+    if not isinstance(value, expected):
+        raise Bundle7BDefectError("malformed_member", f"{label}: expected {expected.__name__}")
+
+
 def _closed(data: object, keys: frozenset[str], *, label: str) -> Mapping[str, Any]:
     """Require a str-keyed mapping with exactly ``keys`` (this module's closed objects)."""
     mapping = _guard("malformed_member", label, lambda: require_mapping(data, label=label))
@@ -321,7 +327,9 @@ class MetricPairKey:
     canonical_metric_ref: str
 
     def __post_init__(self) -> None:
-        _require_type(self.canonical_fact_key, ReconciliationRowKey, label="pair.canonical_fact_key")
+        _require_type(
+            self.canonical_fact_key, ReconciliationRowKey, label="pair.canonical_fact_key"
+        )
         _metric_ref(self.canonical_metric_ref, label="pair.canonical_metric_ref")
 
     def kfive(self) -> list[str]:
@@ -348,16 +356,24 @@ class MetricPairKey:
 def _pair_entry(item: object) -> tuple[bytes, bytes, object]:
     label = "pair_universe.entry"
     if isinstance(item, NormalizedCollectionFact):
-        item = MetricPairKey(item.fact_key.reconciliation_row_key, item.fact_key.metric_semantic_ref)
+        item = _pair_of(item)
     if isinstance(item, MetricPairKey):
         return canonicalize_jcs(item.kfive()), canonicalize_jcs(item.to_dict()), item
     if isinstance(item, Mapping):
-        key, metric = _raw_members(item, ("canonical_fact_key", "canonical_metric_ref"), label=label)
+        key, metric = _raw_members(
+            item, ("canonical_fact_key", "canonical_metric_ref"), label=label
+        )
         k = _raw_members(key, _ROW_KEY_MEMBERS, label=f"{label}.canonical_fact_key")
         return _jcs([*k, metric], label=label), _jcs(item, label=label), item
     raise Bundle7BDefectError(
-        "malformed_argument", f"{label}: expected NormalizedCollectionFact, MetricPairKey or mapping"
+        "malformed_argument",
+        f"{label}: expected NormalizedCollectionFact, MetricPairKey or mapping",
     )
+
+
+def _pair_of(fact: NormalizedCollectionFact) -> MetricPairKey:
+    """The ``U7M`` entry of a fact (``canonical_metric_ref`` is ``metric_semantic_ref``)."""
+    return MetricPairKey(fact.fact_key.reconciliation_row_key, fact.fact_key.metric_semantic_ref)
 
 
 def compute_pair_universe(
@@ -439,7 +455,7 @@ def _scope_ref(value: object, *, label: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Gate3CertificationFingerprint:
-    """The complete eleven-member ``certification_fingerprint`` of a certification-role selection."""
+    """The complete eleven-member ``certification_fingerprint`` of a certification selection."""
 
     selected_meta_api_version: str
     reference_client_identity_digest: str
@@ -462,7 +478,9 @@ class Gate3CertificationFingerprint:
             )
         for name in _FINGERPRINT_DIGEST_MEMBERS:
             _sha256(getattr(self, name), label=f"{label}.{name}")
-        _scope_ref(self.authorized_certification_scope, label=f"{label}.authorized_certification_scope")
+        _scope_ref(
+            self.authorized_certification_scope, label=f"{label}.authorized_certification_scope"
+        )
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -497,6 +515,10 @@ def require_same_fingerprint(
 # fact_evidence_selector/v1 (embedded closed value object)
 # ---------------------------------------------------------------------------
 
+# Embedded closed value objects (ADR section 12.7): validated as subobjects of the
+# record, so their serialized form carries no `$schema` member.
+FACT_EVIDENCE_SELECTOR_SCHEMA: Final[str] = "smart_ads/fact_evidence_selector/v1"
+FACT_RECONCILIATION_SCHEMA: Final[str] = "smart_ads/fact_reconciliation/v1"
 _SELECTOR_KEYS: Final[frozenset[str]] = frozenset(
     {
         "collection_result_locator",
@@ -512,18 +534,24 @@ def _parse_integrity(mapping: Mapping[str, Any], *, label: str) -> P1Integrity |
     if "integrity" not in mapping:
         return None
     return _guard(
-        "malformed_member", f"{label}.integrity", lambda: P1Integrity.from_dict(mapping["integrity"])
+        "malformed_member",
+        f"{label}.integrity",
+        lambda: P1Integrity.from_dict(mapping["integrity"]),
     )
 
 
-def _check_integrity(integrity: object, envelope: Callable[[], dict[str, Any]], *, label: str) -> None:
-    """A signed P1 block must carry the recomputed preimage digest (the wheel never verifies Ed25519)."""
+def _check_integrity(
+    integrity: object, envelope: Callable[[], dict[str, Any]], *, label: str
+) -> None:
+    """A signed P1 block must carry the recomputed preimage digest (Ed25519 is never verified)."""
     if integrity is None:
         return
     if not isinstance(integrity, P1Integrity):
         raise Bundle7BDefectError("malformed_member", f"{label}.integrity: expected P1Integrity")
     if integrity.is_signed and integrity.content_digest != p1_content_digest(envelope()):
-        raise Bundle7BDefectError("integrity_digest_mismatch", f"{label}.integrity: digest differs")
+        raise Bundle7BDefectError(
+            "integrity_digest_mismatch", f"{label}.integrity: digest differs"
+        )
 
 
 def _locator(value: object, artifact_type: str, *, label: str) -> ArtifactLocator:
@@ -562,10 +590,6 @@ def _complete_facts(result: CollectionResult) -> tuple[NormalizedCollectionFact,
     return result.normalized_fact_set
 
 
-def _pair_of(fact: NormalizedCollectionFact) -> MetricPairKey:
-    return MetricPairKey(fact.fact_key.reconciliation_row_key, fact.fact_key.metric_semantic_ref)
-
-
 def _addressed_fact(result: CollectionResult, pair: MetricPairKey) -> NormalizedCollectionFact:
     matches = [fact for fact in _complete_facts(result) if _pair_of(fact) == pair]
     if len(matches) != 1:
@@ -578,7 +602,9 @@ def _addressed_fact(result: CollectionResult, pair: MetricPairKey) -> Normalized
 
 @dataclass(frozen=True, slots=True)
 class FactEvidenceSelector:
-    """Closed ``fact_evidence_selector/v1``: exactly one fact inside one side's result container."""
+    """Closed ``fact_evidence_selector/v1``: exactly one fact inside one side's result."""
+
+    SCHEMA: ClassVar[str] = FACT_EVIDENCE_SELECTOR_SCHEMA
 
     collection_result_locator: ArtifactLocator
     normalized_fact_set_digest: str
@@ -588,10 +614,17 @@ class FactEvidenceSelector:
 
     def __post_init__(self) -> None:
         label = "fact_evidence_selector"
-        _locator(self.collection_result_locator, CollectionResult.SCHEMA, label=f"{label}.collection_result_locator")
+        _locator(
+            self.collection_result_locator,
+            CollectionResult.SCHEMA,
+            label=f"{label}.collection_result_locator",
+        )
         _sha256(self.normalized_fact_set_digest, label=f"{label}.normalized_fact_set_digest")
-        if not isinstance(self.reconciliation_row_key, ReconciliationRowKey):
-            raise Bundle7BDefectError("malformed_member", f"{label}.reconciliation_row_key: expected ReconciliationRowKey")
+        _require_member(
+            self.reconciliation_row_key,
+            ReconciliationRowKey,
+            label=f"{label}.reconciliation_row_key",
+        )
         _metric_ref(self.canonical_metric_ref, label=f"{label}.canonical_metric_ref")
         _sha256(self.fact_projection_digest, label=f"{label}.fact_projection_digest")
 
@@ -613,10 +646,14 @@ class FactEvidenceSelector:
         mapping = _closed(data, _SELECTOR_KEYS, label=label)
         return cls(
             collection_result_locator=_parse_locator(
-                mapping["collection_result_locator"], CollectionResult.SCHEMA, label=f"{label}.collection_result_locator"
+                mapping["collection_result_locator"],
+                CollectionResult.SCHEMA,
+                label=f"{label}.collection_result_locator",
             ),
             normalized_fact_set_digest=mapping["normalized_fact_set_digest"],
-            reconciliation_row_key=_as_row_key(mapping["reconciliation_row_key"], label=f"{label}.reconciliation_row_key"),
+            reconciliation_row_key=_as_row_key(
+                mapping["reconciliation_row_key"], label=f"{label}.reconciliation_row_key"
+            ),
             canonical_metric_ref=mapping["canonical_metric_ref"],
             fact_projection_digest=mapping["fact_projection_digest"],
         )
@@ -639,7 +676,9 @@ def _require_digest_present(result: CollectionResult) -> str:
     _complete_facts(result)
     digest = result.normalized_fact_set_digest
     if digest is None:
-        raise Bundle7BDefectError("collection_result_incomplete", "collection_result: no set digest")
+        raise Bundle7BDefectError(
+            "collection_result_incomplete", "collection_result: no set digest"
+        )
     return digest
 
 
@@ -713,22 +752,23 @@ class ReconciliationSide:
 
     def __post_init__(self) -> None:
         label = "reconciliation_side"
+        field = f"{label}.source_metric_ref"
         _guard(
             "malformed_member",
-            f"{label}.source_metric_ref",
-            lambda: validate_source_metric_ref(self.source_metric_ref, field_name=f"{label}.source_metric_ref"),
+            field,
+            lambda: validate_source_metric_ref(self.source_metric_ref, field_name=field),
         )
-        if not isinstance(self.fact_evidence_selector, FactEvidenceSelector):
-            raise Bundle7BDefectError("malformed_member", f"{label}.fact_evidence_selector: expected selector")
+        _require_member(
+            self.fact_evidence_selector,
+            FactEvidenceSelector,
+            label=f"{label}.fact_evidence_selector",
+        )
         self.comparison_side()
 
     def comparison_side(self) -> ComparisonSide:
         """The tolerance comparator input carried by this side (validated on construction)."""
-        return _guard(
-            "malformed_member",
-            "reconciliation_side",
-            lambda: ComparisonSide(**{name: getattr(self, name) for name in _SIDE_VALUE_MEMBERS}),
-        )
+        values = {name: getattr(self, name) for name in _SIDE_VALUE_MEMBERS}
+        return _guard("malformed_member", "reconciliation_side", lambda: ComparisonSide(**values))
 
     @classmethod
     def for_fact(
@@ -752,9 +792,10 @@ class ReconciliationSide:
     @classmethod
     def from_dict(cls, data: object) -> ReconciliationSide:
         mapping = _closed(data, _SIDE_KEYS, label="reconciliation_side")
+        selector = FactEvidenceSelector.from_dict(mapping["fact_evidence_selector"])
         return cls(
             source_metric_ref=mapping["source_metric_ref"],
-            fact_evidence_selector=FactEvidenceSelector.from_dict(mapping["fact_evidence_selector"]),
+            fact_evidence_selector=selector,
             **{name: mapping[name] for name in _SIDE_VALUE_MEMBERS},
         )
 
@@ -768,6 +809,8 @@ def _parse_side(value: object, *, label: str) -> ReconciliationSide:
 @dataclass(frozen=True, slots=True)
 class FactReconciliation:
     """Closed ``fact_reconciliation/v1``; asserted comparison members are never trusted."""
+
+    SCHEMA: ClassVar[str] = FACT_RECONCILIATION_SCHEMA
 
     canonical_fact_key: ReconciliationRowKey
     canonical_fact_key_digest: str
@@ -783,30 +826,37 @@ class FactReconciliation:
 
     def __post_init__(self) -> None:
         label = "fact_reconciliation"
-        _require_type(self.canonical_fact_key, ReconciliationRowKey, label=f"{label}.canonical_fact_key")
+        key = self.canonical_fact_key
+        _require_member(key, ReconciliationRowKey, label=f"{label}.canonical_fact_key")
         _sha256(self.canonical_fact_key_digest, label=f"{label}.canonical_fact_key_digest")
-        if compute_canonical_fact_key_digest(self.canonical_fact_key) != self.canonical_fact_key_digest:
+        if compute_canonical_fact_key_digest(key) != self.canonical_fact_key_digest:
             raise Bundle7BDefectError(
                 "canonical_fact_key_digest_mismatch", f"{label}: recomputed key digest differs"
             )
-        pair = MetricPairKey(self.canonical_fact_key, self.canonical_metric_ref)
+        pair = MetricPairKey(key, self.canonical_metric_ref)
         for name in ("candidate", "reference"):
             side = getattr(self, name)
-            _require_type(side, ReconciliationSide, label=f"{label}.{name}")
+            _require_member(side, ReconciliationSide, label=f"{label}.{name}")
             if side.fact_evidence_selector.pair_key() != pair:
                 raise Bundle7BDefectError(
-                    "evidence_selector_mismatch", f"{label}.{name}: selector addresses another identity"
+                    "evidence_selector_mismatch",
+                    f"{label}.{name}: selector addresses another identity",
                 )
-        _locator(self.tolerance_profile_locator, ToleranceProfile.SCHEMA, label=f"{label}.tolerance_profile_locator")
+        _locator(
+            self.tolerance_profile_locator,
+            ToleranceProfile.SCHEMA,
+            label=f"{label}.tolerance_profile_locator",
+        )
         _ = self.asserted_comparison
 
     @property
     def asserted_comparison(self) -> ToleranceComparison:
         """The five asserted members as a legal truth-table row (malformed rows are defects)."""
+        members = {name: getattr(self, name) for name in _COMPARISON_MEMBERS}
         return _guard(
             "asserted_comparison_malformed",
             "fact_reconciliation",
-            lambda: ToleranceComparison.from_dict({n: getattr(self, n) for n in _COMPARISON_MEMBERS}),
+            lambda: ToleranceComparison.from_dict(members),
         )
 
     def pair_key(self) -> MetricPairKey:
@@ -828,13 +878,19 @@ class FactReconciliation:
         label = "fact_reconciliation"
         mapping = _closed(data, _RECONCILIATION_KEYS, label=label)
         return cls(
-            canonical_fact_key=_as_row_key(mapping["canonical_fact_key"], label=f"{label}.canonical_fact_key"),
+            canonical_fact_key=_as_row_key(
+                mapping["canonical_fact_key"], label=f"{label}.canonical_fact_key"
+            ),
             canonical_fact_key_digest=mapping["canonical_fact_key_digest"],
-            canonical_metric_ref=_metric_ref(mapping["canonical_metric_ref"], label=f"{label}.canonical_metric_ref"),
+            canonical_metric_ref=_metric_ref(
+                mapping["canonical_metric_ref"], label=f"{label}.canonical_metric_ref"
+            ),
             candidate=_parse_side(mapping["candidate"], label=f"{label}.candidate"),
             reference=_parse_side(mapping["reference"], label=f"{label}.reference"),
             tolerance_profile_locator=_parse_locator(
-                mapping["tolerance_profile_locator"], ToleranceProfile.SCHEMA, label=f"{label}.tolerance_profile_locator"
+                mapping["tolerance_profile_locator"],
+                ToleranceProfile.SCHEMA,
+                label=f"{label}.tolerance_profile_locator",
             ),
             **{name: mapping[name] for name in _COMPARISON_MEMBERS},
         )
@@ -924,12 +980,13 @@ def _sorted_native_array(
 
 
 def _canonical_resource_ref(value: object) -> str:
+    label = "native_request_projection.resource_refs"
     try:
-        return validate_resource_ref(value, field_name="native_request_projection.resource_refs")
+        return validate_resource_ref(value, field_name=label)
     except ClosedValidationError as exc:
         raise Bundle7BDefectError(
             "native_projection_forbidden_content",
-            "native_request_projection.resource_refs: only tenant-scoped resource refs are allowed",
+            f"{label}: only tenant-scoped resource refs are allowed",
         ) from exc
 
 
@@ -940,7 +997,7 @@ def _check_endpoint(endpoint: object) -> None:
     if _ENDPOINT_PATH_RE.fullmatch(endpoint) is None:
         raise Bundle7BDefectError(
             "native_projection_forbidden_content",
-            f"{label}: only an authority-free, query-free path without raw identifiers is allowed",
+            f"{label}: only an authority-free, query-free path without raw ids is allowed",
         )
 
 
@@ -967,12 +1024,37 @@ class NativeRequestProjection:
         label = "native_request_projection"
         _check_endpoint(self.endpoint)
         if not isinstance(self.http_method, str) or self.http_method not in _HTTP_METHODS:
-            raise Bundle7BDefectError("malformed_member", f"{label}.http_method: expected GET or POST")
-        self._check_version_ref()
-        _sorted_native_array(self.resource_refs, label=f"{label}.resource_refs", check=_canonical_resource_ref, allow_empty=False)
-        if not isinstance(self.date_range, DateRange):
-            raise Bundle7BDefectError("malformed_member", f"{label}.date_range: expected DateRange")
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.http_method: expected GET or POST"
+            )
+        _hyphen_ref(
+            self.endpoint_version_ref,
+            prefixes=_ENDPOINT_VERSION_PREFIXES,
+            label=f"{label}.endpoint_version_ref",
+        )
+        self._check_arrays(label)
+        _require_member(self.date_range, DateRange, label=f"{label}.date_range")
         _native_name(self.resource_level, label=f"{label}.resource_level")
+        _native_name(self.pagination, label=f"{label}.pagination")
+        field = f"{label}.currency"
+        _guard(
+            "malformed_member",
+            field,
+            lambda: validate_currency_iso4217(self.currency, field_name=field),
+        )
+        if self.attribution_omission_state != _ATTRIBUTION_OMITTED:
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", f"{label}.attribution_omission_state: must be 'omitted'"
+            )
+        _check_integrity(self.integrity, self.to_dict, label=label)
+
+    def _check_arrays(self, label: str) -> None:
+        _sorted_native_array(
+            self.resource_refs,
+            label=f"{label}.resource_refs",
+            check=_canonical_resource_ref,
+            allow_empty=False,
+        )
         for name, allow_empty in (("metrics", False), ("breakdowns", True)):
             _sorted_native_array(
                 getattr(self, name),
@@ -980,18 +1062,6 @@ class NativeRequestProjection:
                 check=_native_name_checker(f"{label}.{name}"),
                 allow_empty=allow_empty,
             )
-        _native_name(self.pagination, label=f"{label}.pagination")
-        _guard("malformed_member", f"{label}.currency", lambda: validate_currency_iso4217(self.currency, field_name=f"{label}.currency"))
-        if self.attribution_omission_state != _ATTRIBUTION_OMITTED:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.attribution_omission_state: must be 'omitted'")
-        _check_integrity(self.integrity, self.to_dict, label=label)
-
-    def _check_version_ref(self) -> None:
-        _hyphen_ref(
-            self.endpoint_version_ref,
-            prefixes=_ENDPOINT_VERSION_PREFIXES,
-            label="native_request_projection.endpoint_version_ref",
-        )
 
     @property
     def native_request_digest(self) -> str:
@@ -1022,20 +1092,31 @@ class NativeRequestProjection:
         label = "native_request_projection"
         mapping = _guard("malformed_member", label, lambda: require_mapping(data, label=label))
         keys = _NATIVE_CORE_KEYS | ({"integrity"} if "integrity" in mapping else set())
-        if set(mapping) != keys:
+        actual = set(mapping)
+        if actual != keys:
             raise Bundle7BDefectError(
                 "native_projection_not_closed",
-                f"{label}: missing={sorted(keys - set(mapping))} extra={sorted(set(mapping) - keys)}",
+                f"{label}: missing={sorted(keys - actual)} extra={sorted(actual - keys)}",
             )
         if mapping["$schema"] != cls.SCHEMA:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}")
-        arrays = {name: _json_array(mapping[name], label=f"{label}.{name}") for name in _NATIVE_ARRAY_MEMBERS}
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}"
+            )
+        arrays = {
+            name: _json_array(mapping[name], label=f"{label}.{name}")
+            for name in _NATIVE_ARRAY_MEMBERS
+        }
         scalars = {
             name: mapping[name]
             for name in _NATIVE_CORE_KEYS - {"$schema", "date_range", *_NATIVE_ARRAY_MEMBERS}
         }
+        date_range = _guard(
+            "malformed_member",
+            f"{label}.date_range",
+            lambda: DateRange.from_dict(mapping["date_range"]),
+        )
         return cls(
-            date_range=_guard("malformed_member", f"{label}.date_range", lambda: DateRange.from_dict(mapping["date_range"])),
+            date_range=date_range,
             integrity=_parse_integrity(mapping, label=label),
             **arrays,
             **scalars,
@@ -1069,20 +1150,32 @@ def check_native_request(
     _require_type(canonical_query, CanonicalQueryContract, label="canonical_query")
     _sha256(native_request_digest, label="native_request_digest")
     _sha256(algorithm_digest, label="native_to_canonical_projection_algorithm_digest")
-    if not callable(project_native_request):
-        raise Bundle7BDefectError("malformed_argument", "project_native_request: expected a callable")
+    _require_callable(project_native_request, label="project_native_request")
     if projection.native_request_digest != native_request_digest:
-        raise Bundle7BDefectError("native_request_digest_mismatch", "native_request_digest differs")
+        raise Bundle7BDefectError(
+            "native_request_digest_mismatch", "native_request_digest differs"
+        )
     try:
         projected = project_native_request(projection, algorithm_digest)
     except ClosedValidationError as exc:
-        raise Bundle7BDefectError("native_projection_mismatch", f"algorithm rejected: {exc}") from exc
-    if not isinstance(projected, CanonicalQueryContract) or canonicalize_jcs(
-        projected.to_dict()
-    ) != canonicalize_jcs(canonical_query.to_dict()):
+        raise Bundle7BDefectError(
+            "native_projection_mismatch", f"algorithm rejected: {exc}"
+        ) from exc
+    if not isinstance(projected, CanonicalQueryContract) or _query_bytes(
+        projected
+    ) != _query_bytes(canonical_query):
         raise Bundle7BDefectError(
             "native_projection_mismatch", "projected canonical query is not byte-identical"
         )
+
+
+def _require_callable(value: object, *, label: str) -> None:
+    if not callable(value):
+        raise Bundle7BDefectError("malformed_argument", f"{label}: expected a callable")
+
+
+def _query_bytes(query: CanonicalQueryContract) -> bytes:
+    return canonicalize_jcs(query.to_dict())
 
 
 # =============================================================================
@@ -1132,8 +1225,7 @@ def _binding_members(
         ("migration_run_context_locator", migration_run_context_locator, _RUN_CONTEXT_SCHEMA),
     )
     for name, value, artifact_type in checks:
-        if not isinstance(value, ArtifactLocator) or value.artifact_type != artifact_type:
-            raise Bundle7BDefectError("malformed_argument", f"{name}: expected {artifact_type!r} locator")
+        _require_argument_locator(value, artifact_type, label=name)
     try:
         _sha256(canonical_query_digest, label="canonical_query_digest")
         _scope_ref(authorized_certification_scope, label="authorized_certification_scope")
@@ -1153,12 +1245,18 @@ def _resolve_profile(
     label = f"tolerance_profiles[{metric}]"
     parsed = _guard("tolerance_profile_malformed", label, lambda: ToleranceProfile.from_dict(raw))
     if parsed.integrity is None or not parsed.integrity.is_signed:
-        raise Bundle7BDefectError("tolerance_profile_unsigned", f"{label}: protected profile must be signed")
+        raise Bundle7BDefectError(
+            "tolerance_profile_unsigned", f"{label}: protected profile must be signed"
+        )
     profile = _guard(
-        "tolerance_profile_malformed", label, lambda: ToleranceProfile.from_dict(raw, require_signed=True)
+        "tolerance_profile_malformed",
+        label,
+        lambda: ToleranceProfile.from_dict(raw, require_signed=True),
     )
     if profile.canonical_metric_ref != metric:
-        raise Bundle7BDefectError("tolerance_profile_metric_mismatch", f"{label}: profile closes another metric")
+        raise Bundle7BDefectError(
+            "tolerance_profile_metric_mismatch", f"{label}: profile closes another metric"
+        )
     _guard("tolerance_profile_unbound", label, lambda: profile.require_bound_to(**binding))
     return profile, located(ToleranceProfile.SCHEMA, profile)
 
@@ -1209,14 +1307,22 @@ def _side_facts(result: object, call_side: str) -> tuple[NormalizedCollectionFac
     label = f"{call_side}_result"
     _require_type(result, CollectionResult, label=label)
     if result.call_side != call_side:
-        raise Bundle7BDefectError("collection_result_mismatch", f"{label}: call_side must be {call_side!r}")
+        raise Bundle7BDefectError(
+            "collection_result_mismatch", f"{label}: call_side must be {call_side!r}"
+        )
     return _complete_facts(result)
 
 
+def _utc_micros(value: str) -> int:
+    return _guard(
+        "malformed_member", "retrieved_at_utc", lambda: parse_timestamp_utc_micros(value)
+    )
+
+
 def _within_skew(candidate_at: str, reference_at: str) -> bool:
-    cand = _guard("malformed_member", "retrieved_at_utc", lambda: parse_timestamp_utc_micros(candidate_at))
-    ref = _guard("malformed_member", "retrieved_at_utc", lambda: parse_timestamp_utc_micros(reference_at))
-    return abs(cand - ref) <= MAXIMUM_RETRIEVAL_SKEW_SECONDS * _MICROS_PER_SECOND
+    """Both retrieval timestamps at most ``MAXIMUM_RETRIEVAL_SKEW_SECONDS`` apart (inclusive)."""
+    skew = abs(_utc_micros(candidate_at) - _utc_micros(reference_at))
+    return skew <= MAXIMUM_RETRIEVAL_SKEW_SECONDS * _MICROS_PER_SECOND
 
 
 def _universe_codes(cand: _SideUniverse, ref: _SideUniverse) -> set[str]:
@@ -1231,7 +1337,8 @@ def _universe_codes(cand: _SideUniverse, ref: _SideUniverse) -> set[str]:
 
 
 def _evidence_side(result: CollectionResult, pair: MetricPairKey) -> ReconciliationSide:
-    return ReconciliationSide.for_fact(_addressed_fact(result, pair), select_fact_evidence(result, pair))
+    selector = select_fact_evidence(result, pair)
+    return ReconciliationSide.for_fact(_addressed_fact(result, pair), selector)
 
 
 def _reconcile_pair(
@@ -1310,22 +1417,34 @@ def reconcile_7b_fact_sets(
         codes.add("retrieval_skew_exceeded")
     common = set(ref.pairs)
     reconciliations = tuple(
-        _reconcile_pair(pair, candidate_result, reference_result, profiles[pair.canonical_metric_ref])
+        _reconcile_pair(
+            pair, candidate_result, reference_result, profiles[pair.canonical_metric_ref]
+        )
         for pair in cand.pairs
         if pair in common and pair.canonical_metric_ref in profiles
     )
-    codes |= {
+    return _reconciliation_result(cand, ref, reconciliations, codes)
+
+
+def _reconciliation_result(
+    cand: _SideUniverse,
+    ref: _SideUniverse,
+    reconciliations: tuple[FactReconciliation, ...],
+    set_codes: set[str],
+) -> Reconciliation7BResult:
+    codes = set_codes | {
         _STATUS_OUTCOME_CODES[rec.metric_verification_status]
         for rec in reconciliations
         if rec.metric_verification_status != "VERIFIED"
     }
+    digest = (
+        compute_logical_fact_reconciliation_digest(reconciliations) if reconciliations else None
+    )
     return Reconciliation7BResult(
         bundle_outcome="failed" if codes or not reconciliations else "verified",
         defect_codes=tuple(sorted(codes)),
         fact_reconciliations=reconciliations,
-        logical_fact_reconciliation_digest=(
-            compute_logical_fact_reconciliation_digest(reconciliations) if reconciliations else None
-        ),
+        logical_fact_reconciliation_digest=digest,
         candidate_row_universe_digest=cand.row_universe_digest,
         reference_row_universe_digest=ref.row_universe_digest,
         candidate_row_count=len(cand.pairs),
@@ -1411,6 +1530,18 @@ _REFERENCE_ORDER: Final[tuple[str, ...]] = (
     "gate3_certification_fingerprint",
 )
 # Fingerprint members repeated in the candidate execution record (ADR L1097-1101).
+_CANDIDATE_DIGESTS: Final[tuple[str, ...]] = (
+    "driver_contract_digest",
+    "wheel_digest",
+    "adapter_code_digest",
+    "parser_code_digest",
+    "mapping_rules_digest",
+)
+_REFERENCE_DIGESTS: Final[tuple[str, ...]] = (
+    "reference_workload_binary_digest",
+    "reference_code_digest",
+    "reference_run_digest",
+)
 _CANDIDATE_FINGERPRINT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
     ("driver_contract_digest", "candidate_driver_contract_digest"),
     ("adapter_code_digest", "adapter_code_digest"),
@@ -1419,12 +1550,26 @@ _CANDIDATE_FINGERPRINT_PAIRS: Final[tuple[tuple[str, str], ...]] = (
 )
 
 
+def _member_locator(owner: Any, name: str, artifact_type: str, *, label: str) -> None:
+    _locator(getattr(owner, name), artifact_type, label=f"{label}.{name}")
+
+
+def _parse_member_locator(
+    mapping: Mapping[str, Any], name: str, artifact_type: str, *, label: str
+) -> ArtifactLocator:
+    return _parse_locator(mapping[name], artifact_type, label=f"{label}.{name}")
+
+
+def _parse_query(value: object, *, label: str) -> CanonicalQueryContract:
+    return _guard("malformed_member", label, lambda: CanonicalQueryContract.from_dict(value))
+
+
 def _check_query_projection(execution: Any, *, label: str) -> None:
     query = execution.canonical_query_projection
-    if not isinstance(query, CanonicalQueryContract):
-        raise Bundle7BDefectError("malformed_member", f"{label}.canonical_query_projection: expected query")
-    _sha256(execution.canonical_query_projection_digest, label=f"{label}.canonical_query_projection_digest")
-    if query.canonical_query_digest != execution.canonical_query_projection_digest:
+    digest = execution.canonical_query_projection_digest
+    _require_member(query, CanonicalQueryContract, label=f"{label}.canonical_query_projection")
+    _sha256(digest, label=f"{label}.canonical_query_projection_digest")
+    if query.canonical_query_digest != digest:
         raise Bundle7BDefectError(
             "canonical_query_digest_mismatch", f"{label}.canonical_query_projection_digest differs"
         )
@@ -1432,54 +1577,72 @@ def _check_query_projection(execution: Any, *, label: str) -> None:
 
 def _check_native(execution: Any, *, label: str) -> None:
     projection = execution.native_request_projection
-    if not isinstance(projection, NativeRequestProjection):
-        raise Bundle7BDefectError("malformed_member", f"{label}.native_request_projection: expected projection")
+    _require_member(
+        projection, NativeRequestProjection, label=f"{label}.native_request_projection"
+    )
     if projection.endpoint_version_ref != execution.source_contract_ref:
         raise Bundle7BDefectError(
-            "native_version_mismatch", f"{label}: native endpoint/version identity differs from source_contract_ref"
+            "native_version_mismatch",
+            f"{label}: native endpoint/version identity differs from source_contract_ref",
         )
     _sha256(execution.native_request_digest, label=f"{label}.native_request_digest")
     if projection.native_request_digest != execution.native_request_digest:
-        raise Bundle7BDefectError("native_request_digest_mismatch", f"{label}.native_request_digest differs")
+        raise Bundle7BDefectError(
+            "native_request_digest_mismatch", f"{label}.native_request_digest differs"
+        )
 
 
 def _check_common_execution(execution: Any, *, label: str) -> None:
     """Members shared by both execution records (validated after the side-specific ones)."""
-    _hyphen_ref(execution.provider_target_ref, prefixes=frozenset({"provider-target"}), label=f"{label}.provider_target_ref")
-    _locator(execution.admitted_collection_locator, _ADMITTED_COLLECTION_SCHEMA, label=f"{label}.admitted_collection_locator")
-    _locator(execution.effect_proof_locator, _EFFECT_PROOF_SCHEMA, label=f"{label}.effect_proof_locator")
+    _hyphen_ref(
+        execution.provider_target_ref,
+        prefixes=frozenset({"provider-target"}),
+        label=f"{label}.provider_target_ref",
+    )
+    _member_locator(
+        execution, "admitted_collection_locator", _ADMITTED_COLLECTION_SCHEMA, label=label
+    )
+    _member_locator(execution, "effect_proof_locator", _EFFECT_PROOF_SCHEMA, label=label)
     _check_native(execution, label=label)
     _check_query_projection(execution, label=label)
     for name in _COMMON_EXECUTION_DIGESTS:
         _sha256(getattr(execution, name), label=f"{label}.{name}")
-    _guard("malformed_member", f"{label}.retrieved_at_utc", lambda: validate_timestamp_utc6(execution.retrieved_at_utc, field_name="retrieved_at_utc"))
+    field = f"{label}.retrieved_at_utc"
+    _guard(
+        "malformed_member",
+        field,
+        lambda: validate_timestamp_utc6(execution.retrieved_at_utc, field_name=field),
+    )
     if execution.result_status != _RESULT_STATUS_COMPLETE:
-        raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.result_status: must be 'complete'")
+        raise Bundle7BDefectError(
+            "fixed_member_mismatch", f"{label}.result_status: must be 'complete'"
+        )
     count = execution.row_count
     if type(count) is not int or not 0 <= count <= MAX_JCS_SAFE_INT:
-        raise Bundle7BDefectError("malformed_member", f"{label}.row_count: expected a non-negative int")
-    _require_member(execution.gate3_certification_fingerprint, Gate3CertificationFingerprint, label=f"{label}.gate3_certification_fingerprint")
-
-
-def _require_member(value: object, expected: type, *, label: str) -> None:
-    if not isinstance(value, expected):
-        raise Bundle7BDefectError("malformed_member", f"{label}: expected {expected.__name__}")
+        raise Bundle7BDefectError(
+            "malformed_member", f"{label}.row_count: expected a non-negative int"
+        )
+    _require_member(
+        execution.gate3_certification_fingerprint,
+        Gate3CertificationFingerprint,
+        label=f"{label}.gate3_certification_fingerprint",
+    )
 
 
 def _parse_common_execution(mapping: Mapping[str, Any], *, label: str) -> dict[str, Any]:
     return {
         **{name: mapping[name] for name in _COMMON_EXECUTION_RAW},
-        "admitted_collection_locator": _parse_locator(
-            mapping["admitted_collection_locator"], _ADMITTED_COLLECTION_SCHEMA, label=f"{label}.admitted_collection_locator"
+        "admitted_collection_locator": _parse_member_locator(
+            mapping, "admitted_collection_locator", _ADMITTED_COLLECTION_SCHEMA, label=label
         ),
-        "effect_proof_locator": _parse_locator(
-            mapping["effect_proof_locator"], _EFFECT_PROOF_SCHEMA, label=f"{label}.effect_proof_locator"
+        "effect_proof_locator": _parse_member_locator(
+            mapping, "effect_proof_locator", _EFFECT_PROOF_SCHEMA, label=label
         ),
-        "native_request_projection": NativeRequestProjection.from_dict(mapping["native_request_projection"]),
-        "canonical_query_projection": _guard(
-            "malformed_member",
-            f"{label}.canonical_query_projection",
-            lambda: CanonicalQueryContract.from_dict(mapping["canonical_query_projection"]),
+        "native_request_projection": NativeRequestProjection.from_dict(
+            mapping["native_request_projection"]
+        ),
+        "canonical_query_projection": _parse_query(
+            mapping["canonical_query_projection"], label=f"{label}.canonical_query_projection"
         ),
         "gate3_certification_fingerprint": Gate3CertificationFingerprint.from_dict(
             mapping["gate3_certification_fingerprint"]
@@ -1497,7 +1660,7 @@ def _execution_dict(execution: Any, order: tuple[str, ...]) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class CandidateExecution:
-    """``candidate_execution``: the Pipeboard hosted call, version-opaque, with its contract identity."""
+    """``candidate_execution``: the version-opaque Pipeboard hosted call and its contract."""
 
     driver_id: str
     provider_target_ref: str
@@ -1526,21 +1689,33 @@ class CandidateExecution:
     def __post_init__(self) -> None:
         label = "candidate_execution"
         if self.driver_id != CANDIDATE_DRIVER_ID:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.driver_id: must be {CANDIDATE_DRIVER_ID!r}")
-        _locator(self.registry_snapshot_locator, _REGISTRY_SNAPSHOT_SCHEMA, label=f"{label}.registry_snapshot_locator")
-        _locator(self.driver_contract_locator, _DRIVER_CONTRACT_SCHEMA, label=f"{label}.driver_contract_locator")
-        for name in ("driver_contract_digest", "wheel_digest", "adapter_code_digest", "parser_code_digest", "mapping_rules_digest"):
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", f"{label}.driver_id: must be {CANDIDATE_DRIVER_ID!r}"
+            )
+        _member_locator(self, "registry_snapshot_locator", _REGISTRY_SNAPSHOT_SCHEMA, label=label)
+        _member_locator(self, "driver_contract_locator", _DRIVER_CONTRACT_SCHEMA, label=label)
+        for name in _CANDIDATE_DIGESTS:
             _sha256(getattr(self, name), label=f"{label}.{name}")
         if self.driver_contract_digest != self.driver_contract_locator.content_digest:
-            raise Bundle7BDefectError("driver_contract_digest_mismatch", f"{label}: digest differs from its locator")
-        _hyphen_ref(self.source_contract_ref, prefixes=frozenset({"opaque-driver-contract"}), label=f"{label}.source_contract_ref")
+            raise Bundle7BDefectError(
+                "driver_contract_digest_mismatch", f"{label}: digest differs from its locator"
+            )
+        _hyphen_ref(
+            self.source_contract_ref,
+            prefixes=frozenset({"opaque-driver-contract"}),
+            label=f"{label}.source_contract_ref",
+        )
         if self.source_contract_ref != "opaque-driver-contract:" + self.driver_contract_digest:
-            raise Bundle7BDefectError("source_contract_mismatch", f"{label}.source_contract_ref: must name the contract digest")
+            raise Bundle7BDefectError(
+                "source_contract_mismatch", f"{label}.source_contract_ref: must name the contract"
+            )
         _check_common_execution(self, label=label)
         fingerprint = self.gate3_certification_fingerprint
         for own, member in _CANDIDATE_FINGERPRINT_PAIRS:
             if getattr(self, own) != getattr(fingerprint, member):
-                raise Bundle7BDefectError("fingerprint_member_mismatch", f"{label}.{own} differs from fingerprint {member}")
+                raise Bundle7BDefectError(
+                    "fingerprint_member_mismatch", f"{label}.{own} differs from {member}"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return _execution_dict(self, _CANDIDATE_ORDER)
@@ -1549,15 +1724,14 @@ class CandidateExecution:
     def from_dict(cls, data: object) -> CandidateExecution:
         label = "candidate_execution"
         mapping = _closed(data, frozenset(_CANDIDATE_ORDER), label=label)
-        own = ("driver_id", "driver_contract_digest", "source_contract_ref", "wheel_digest",
-               "adapter_code_digest", "parser_code_digest", "mapping_rules_digest")
+        own = ("driver_id", "source_contract_ref", *_CANDIDATE_DIGESTS)
         return cls(
             **{name: mapping[name] for name in own},
-            registry_snapshot_locator=_parse_locator(
-                mapping["registry_snapshot_locator"], _REGISTRY_SNAPSHOT_SCHEMA, label=f"{label}.registry_snapshot_locator"
+            registry_snapshot_locator=_parse_member_locator(
+                mapping, "registry_snapshot_locator", _REGISTRY_SNAPSHOT_SCHEMA, label=label
             ),
-            driver_contract_locator=_parse_locator(
-                mapping["driver_contract_locator"], _DRIVER_CONTRACT_SCHEMA, label=f"{label}.driver_contract_locator"
+            driver_contract_locator=_parse_member_locator(
+                mapping, "driver_contract_locator", _DRIVER_CONTRACT_SCHEMA, label=label
             ),
             **_parse_common_execution(mapping, label=label),
         )
@@ -1591,16 +1765,32 @@ class ReferenceExecution:
     def __post_init__(self) -> None:
         label = "reference_execution"
         if self.reference_workload_ref != REFERENCE_WORKLOAD_REF:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.reference_workload_ref: must be {REFERENCE_WORKLOAD_REF!r}")
-        for name in ("reference_workload_binary_digest", "reference_code_digest", "reference_run_digest"):
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch",
+                f"{label}.reference_workload_ref: must be {REFERENCE_WORKLOAD_REF!r}",
+            )
+        for name in _REFERENCE_DIGESTS:
             _sha256(getattr(self, name), label=f"{label}.{name}")
-        if not isinstance(self.implementation_kind, str) or self.implementation_kind not in _IMPLEMENTATION_KINDS:
-            raise Bundle7BDefectError("malformed_member", f"{label}.implementation_kind: official_sdk or direct_rest")
-        _hyphen_ref(self.source_contract_ref, prefixes=frozenset({"api-version"}), label=f"{label}.source_contract_ref")
-        _require_member(self.gate3_certification_fingerprint, Gate3CertificationFingerprint, label=f"{label}.gate3_certification_fingerprint")
-        selected = self.gate3_certification_fingerprint.selected_meta_api_version
-        if self.source_contract_ref != "api-version:" + selected:
-            raise Bundle7BDefectError("source_contract_mismatch", f"{label}.source_contract_ref: must copy the Gate-3 version")
+        kind = self.implementation_kind
+        if not isinstance(kind, str) or kind not in _IMPLEMENTATION_KINDS:
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.implementation_kind: official_sdk or direct_rest"
+            )
+        _hyphen_ref(
+            self.source_contract_ref,
+            prefixes=frozenset({"api-version"}),
+            label=f"{label}.source_contract_ref",
+        )
+        fingerprint = self.gate3_certification_fingerprint
+        _require_member(
+            fingerprint,
+            Gate3CertificationFingerprint,
+            label=f"{label}.gate3_certification_fingerprint",
+        )
+        if self.source_contract_ref != "api-version:" + fingerprint.selected_meta_api_version:
+            raise Bundle7BDefectError(
+                "source_contract_mismatch", f"{label}.source_contract_ref: must copy the version"
+            )
         _check_common_execution(self, label=label)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1608,18 +1798,20 @@ class ReferenceExecution:
 
     @classmethod
     def from_dict(cls, data: object) -> ReferenceExecution:
-        mapping = _closed(data, frozenset(_REFERENCE_ORDER), label="reference_execution")
-        own = ("reference_workload_ref", "reference_workload_binary_digest", "reference_code_digest",
-               "source_contract_ref", "implementation_kind", "reference_run_digest")
+        label = "reference_execution"
+        mapping = _closed(data, frozenset(_REFERENCE_ORDER), label=label)
+        own = ("reference_workload_ref", "source_contract_ref", "implementation_kind")
         return cls(
-            **{name: mapping[name] for name in own},
-            **_parse_common_execution(mapping, label="reference_execution"),
+            **{name: mapping[name] for name in (*own, *_REFERENCE_DIGESTS)},
+            **_parse_common_execution(mapping, label=label),
         )
 
 
 _ROW_PAIRING_LITERALS: Final[Mapping[str, object]] = MappingProxyType(
     {
-        "canonical_key": "resource_ref,metric_date,resource_level,breakdown_signature,canonical_metric_ref",
+        "canonical_key": (
+            "resource_ref,metric_date,resource_level,breakdown_signature,canonical_metric_ref"
+        ),
         "aggregation_rule": "sum_by_canonical_fact_key_and_metric",
         "deduplication_rule": "canonical_fact_key_and_metric_unique",
         "maximum_retrieval_skew_seconds": MAXIMUM_RETRIEVAL_SKEW_SECONDS,
@@ -1640,7 +1832,9 @@ class RowPairing:
         for name, literal in _ROW_PAIRING_LITERALS.items():
             value = getattr(self, name)
             if type(value) is not type(literal) or value != literal:
-                raise Bundle7BDefectError("fixed_member_mismatch", f"row_pairing.{name}: must be {literal!r}")
+                raise Bundle7BDefectError(
+                    "fixed_member_mismatch", f"row_pairing.{name}: must be {literal!r}"
+                )
 
     def to_dict(self) -> dict[str, Any]:
         return {name: getattr(self, name) for name in _ROW_PAIRING_LITERALS}
@@ -1673,10 +1867,6 @@ _RECORD_ORDER: Final[tuple[str, ...]] = (
 )
 
 
-def _query_bytes(query: CanonicalQueryContract) -> bytes:
-    return canonicalize_jcs(query.to_dict())
-
-
 @dataclass(frozen=True, slots=True)
 class Certification7BRecord:
     """Complete ``certification_7b_record/v1``; only a verified, complete 7B is representable."""
@@ -1701,16 +1891,19 @@ class Certification7BRecord:
         self._check_query()
         self._check_effect_chain()
         self._check_fingerprints()
-        if not _within_skew(self.candidate_execution.retrieved_at_utc, self.reference_execution.retrieved_at_utc):
-            raise Bundle7BDefectError("retrieval_skew_exceeded", "certification_7b_record: retrieval skew > 300 s")
+        cand, ref = self.candidate_execution, self.reference_execution
+        if not _within_skew(cand.retrieved_at_utc, ref.retrieved_at_utc):
+            raise Bundle7BDefectError(
+                "retrieval_skew_exceeded", "certification_7b_record: retrieval skew > 300 s"
+            )
         self._check_reconciliations()
         self._check_counts()
         _check_integrity(self.integrity, self.to_dict, label="certification_7b_record")
 
     def _check_types(self) -> None:
         label = "certification_7b_record"
-        _locator(self.migration_run_context_locator, _RUN_CONTEXT_SCHEMA, label=f"{label}.migration_run_context_locator")
-        _locator(self.gate3_selection_locator, _GATE3_SELECTION_SCHEMA, label=f"{label}.gate3_selection_locator")
+        _member_locator(self, "migration_run_context_locator", _RUN_CONTEXT_SCHEMA, label=label)
+        _member_locator(self, "gate3_selection_locator", _GATE3_SELECTION_SCHEMA, label=label)
         for name, expected in (
             ("canonical_query_contract", CanonicalQueryContract),
             ("candidate_execution", CandidateExecution),
@@ -1718,41 +1911,57 @@ class Certification7BRecord:
             ("row_pairing", RowPairing),
         ):
             _require_member(getattr(self, name), expected, label=f"{label}.{name}")
-        if self.required_metrics != REQUIRED_7B_METRICS:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.required_metrics: must be {list(REQUIRED_7B_METRICS)}")
+        _require_required_metrics(self.required_metrics, label=label)
         if self.bundle_outcome != _BUNDLE_OUTCOME_VERIFIED:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.bundle_outcome: only 'verified' is recordable")
-        _sha256(self.canonical_query_digest, label=f"{label}.canonical_query_digest")
-        _sha256(self.logical_fact_reconciliation_digest, label=f"{label}.logical_fact_reconciliation_digest")
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", f"{label}.bundle_outcome: only 'verified' is recordable"
+            )
+        for name in ("canonical_query_digest", "logical_fact_reconciliation_digest"):
+            _sha256(getattr(self, name), label=f"{label}.{name}")
 
     def _check_query(self) -> None:
         label = "certification_7b_record"
         query = self.canonical_query_contract
         if query.canonical_query_digest != self.canonical_query_digest:
-            raise Bundle7BDefectError("canonical_query_digest_mismatch", f"{label}.canonical_query_digest differs")
+            raise Bundle7BDefectError(
+                "canonical_query_digest_mismatch", f"{label}.canonical_query_digest differs"
+            )
         if set(query.metric_semantic_refs) != set(REQUIRED_7B_METRICS):
-            raise Bundle7BDefectError("canonical_query_mismatch", f"{label}: query must request exactly the sealed metrics")
+            raise Bundle7BDefectError(
+                "canonical_query_mismatch", f"{label}: query must request the sealed metrics"
+            )
         for side in (self.candidate_execution, self.reference_execution):
             if _query_bytes(side.canonical_query_projection) != _query_bytes(query):
-                raise Bundle7BDefectError("canonical_query_mismatch", f"{label}: side projection differs from the query")
+                raise Bundle7BDefectError(
+                    "canonical_query_mismatch", f"{label}: side projection differs from query"
+                )
 
     def _check_effect_chain(self) -> None:
         cand, ref = self.candidate_execution, self.reference_execution
         if cand.effect_proof_locator == ref.effect_proof_locator:
-            raise Bundle7BDefectError("effect_proof_not_distinct", "one effect proof cannot satisfy both sides")
+            raise Bundle7BDefectError(
+                "effect_proof_not_distinct", "one effect proof cannot satisfy both sides"
+            )
         if cand.provider_target_ref == ref.provider_target_ref:
-            raise Bundle7BDefectError("provider_target_not_distinct", "both sides name one provider target")
+            raise Bundle7BDefectError(
+                "provider_target_not_distinct", "both sides name one provider target"
+            )
         if (cand.provider_target_ref, ref.provider_target_ref) != (
             CANDIDATE_PROVIDER_TARGET_REF,
             REFERENCE_PROVIDER_TARGET_REF,
         ):
-            raise Bundle7BDefectError("fixed_member_mismatch", "provider_target_ref: ADR literals required")
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", "provider_target_ref: ADR literals required"
+            )
 
     def _check_fingerprints(self) -> None:
         cand = self.candidate_execution.gate3_certification_fingerprint
-        require_same_fingerprint(cand, self.reference_execution.gate3_certification_fingerprint, label="execution fingerprints")
+        ref = self.reference_execution.gate3_certification_fingerprint
+        require_same_fingerprint(cand, ref, label="execution fingerprints")
         if cand.canonical_query_digest != self.canonical_query_digest:
-            raise Bundle7BDefectError("fingerprint_member_mismatch", "fingerprint canonical_query_digest differs")
+            raise Bundle7BDefectError(
+                "fingerprint_member_mismatch", "fingerprint canonical_query_digest differs"
+            )
 
     def _check_reconciliations(self) -> None:
         label = "certification_7b_record.fact_reconciliations"
@@ -1761,21 +1970,32 @@ class Certification7BRecord:
             raise Bundle7BDefectError("malformed_member", f"{label}: non-empty array required")
         _require_reconciliations(items, label=label)
         if any(item.metric_verification_status != "VERIFIED" for item in items):
-            raise Bundle7BDefectError("metric_not_verified", f"{label}: every member must be VERIFIED")
+            raise Bundle7BDefectError(
+                "metric_not_verified", f"{label}: every member must be VERIFIED"
+            )
         pairs = tuple(item.pair_key() for item in items)
         if pairs != expected_pair_universe(self.row_universe):
-            raise Bundle7BDefectError("pair_universe_incomplete", f"{label}: not U7 x required_metrics")
-        if compute_logical_fact_reconciliation_digest(items) != self.logical_fact_reconciliation_digest:
-            raise Bundle7BDefectError("logical_digest_mismatch", "logical_fact_reconciliation_digest differs")
+            raise Bundle7BDefectError(
+                "pair_universe_incomplete", f"{label}: not U7 x required_metrics"
+            )
+        digest = compute_logical_fact_reconciliation_digest(items)
+        if digest != self.logical_fact_reconciliation_digest:
+            raise Bundle7BDefectError(
+                "logical_digest_mismatch", "logical_fact_reconciliation_digest differs"
+            )
 
     def _check_counts(self) -> None:
         expected_digest = compute_row_universe_digest(self.row_universe)
         for name in ("candidate_execution", "reference_execution"):
             side = getattr(self, name)
             if side.row_count != len(self.fact_reconciliations):
-                raise Bundle7BDefectError("row_count_mismatch", f"{name}.row_count: must equal length(U7M)")
+                raise Bundle7BDefectError(
+                    "row_count_mismatch", f"{name}.row_count: must equal length(U7M)"
+                )
             if side.row_universe_digest != expected_digest:
-                raise Bundle7BDefectError("row_universe_digest_mismatch", f"{name}.row_universe_digest differs")
+                raise Bundle7BDefectError(
+                    "row_universe_digest_mismatch", f"{name}.row_universe_digest differs"
+                )
 
     @property
     def row_universe(self) -> tuple[ReconciliationRowKey, ...]:
@@ -1808,43 +2028,58 @@ class Certification7BRecord:
         label = "certification_7b_record"
         mapping = _guard("malformed_member", label, lambda: require_mapping(data, label=label))
         has_integrity = require_signed or "integrity" in mapping
-        mapping = _closed(mapping, frozenset(_RECORD_ORDER) | ({"integrity"} if has_integrity else set()), label=label)
+        keys = frozenset(_RECORD_ORDER) | ({"integrity"} if has_integrity else set())
+        mapping = _closed(mapping, keys, label=label)
         if mapping["$schema"] != cls.SCHEMA:
-            raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}")
-        return cls(
-            **_parse_record_members(mapping, label=label),
-            integrity=(
-                _guard("malformed_member", f"{label}.integrity", lambda: P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed))
-                if has_integrity
-                else None
-            ),
+            raise Bundle7BDefectError(
+                "fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}"
+            )
+        integrity = (
+            _guard(
+                "malformed_member",
+                f"{label}.integrity",
+                lambda: P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed),
+            )
+            if has_integrity
+            else None
+        )
+        return cls(**_parse_record_members(mapping, label=label), integrity=integrity)
+
+
+def _require_required_metrics(value: object, *, label: str) -> None:
+    if not isinstance(value, (list, tuple)) or tuple(value) != REQUIRED_7B_METRICS:
+        raise Bundle7BDefectError(
+            "fixed_member_mismatch",
+            f"{label}.required_metrics: must be {list(REQUIRED_7B_METRICS)}",
         )
 
 
 def _parse_record_members(mapping: Mapping[str, Any], *, label: str) -> dict[str, Any]:
     metrics = mapping["required_metrics"]
-    if not isinstance(metrics, list) or tuple(metrics) != REQUIRED_7B_METRICS:
-        raise Bundle7BDefectError("fixed_member_mismatch", f"{label}.required_metrics: must be {list(REQUIRED_7B_METRICS)}")
+    _require_required_metrics(metrics if isinstance(metrics, list) else None, label=label)
     reconciliations = mapping["fact_reconciliations"]
     if not isinstance(reconciliations, list) or not reconciliations:
-        raise Bundle7BDefectError("malformed_member", f"{label}.fact_reconciliations: non-empty array required")
+        raise Bundle7BDefectError(
+            "malformed_member", f"{label}.fact_reconciliations: non-empty array required"
+        )
     return {
-        "migration_run_context_locator": _parse_locator(
-            mapping["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA, label=f"{label}.migration_run_context_locator"
+        "migration_run_context_locator": _parse_member_locator(
+            mapping, "migration_run_context_locator", _RUN_CONTEXT_SCHEMA, label=label
         ),
-        "gate3_selection_locator": _parse_locator(
-            mapping["gate3_selection_locator"], _GATE3_SELECTION_SCHEMA, label=f"{label}.gate3_selection_locator"
+        "gate3_selection_locator": _parse_member_locator(
+            mapping, "gate3_selection_locator", _GATE3_SELECTION_SCHEMA, label=label
         ),
-        "canonical_query_contract": _guard(
-            "malformed_member", f"{label}.canonical_query_contract",
-            lambda: CanonicalQueryContract.from_dict(mapping["canonical_query_contract"]),
+        "canonical_query_contract": _parse_query(
+            mapping["canonical_query_contract"], label=f"{label}.canonical_query_contract"
         ),
         "canonical_query_digest": mapping["canonical_query_digest"],
         "required_metrics": tuple(metrics),
         "candidate_execution": CandidateExecution.from_dict(mapping["candidate_execution"]),
         "reference_execution": ReferenceExecution.from_dict(mapping["reference_execution"]),
         "row_pairing": RowPairing.from_dict(mapping["row_pairing"]),
-        "fact_reconciliations": tuple(FactReconciliation.from_dict(item) for item in reconciliations),
+        "fact_reconciliations": tuple(
+            FactReconciliation.from_dict(item) for item in reconciliations
+        ),
         "logical_fact_reconciliation_digest": mapping["logical_fact_reconciliation_digest"],
         "bundle_outcome": mapping["bundle_outcome"],
     }
@@ -1867,7 +2102,9 @@ _GATE3_STATE_FINGERPRINT_PAIRS: Final[tuple[str, ...]] = (
 
 def _require_argument_locator(value: object, artifact_type: str, *, label: str) -> None:
     if not isinstance(value, ArtifactLocator) or value.artifact_type != artifact_type:
-        raise Bundle7BDefectError("malformed_argument", f"{label}: expected {artifact_type!r} locator")
+        raise Bundle7BDefectError(
+            "malformed_argument", f"{label}: expected {artifact_type!r} locator"
+        )
 
 
 def _verify_arguments(record: object, arguments: Mapping[str, Any]) -> None:
@@ -1890,8 +2127,7 @@ def _verify_arguments(record: object, arguments: Mapping[str, Any]) -> None:
         ("reference_effect_result_locator", CollectionResult.SCHEMA),
     ):
         _require_argument_locator(arguments[name], artifact_type, label=name)
-    if not callable(arguments["project_native_request"]):
-        raise Bundle7BDefectError("malformed_argument", "project_native_request: expected a callable")
+    _require_callable(arguments["project_native_request"], label="project_native_request")
 
 
 def _verify_gate3(
@@ -1901,60 +2137,109 @@ def _verify_gate3(
 ) -> None:
     """Same fresh certification-role selection; whole-object fingerprint equality on both sides."""
     if selection.locator != record.gate3_selection_locator:
-        raise Bundle7BDefectError("gate3_selection_mismatch", "record names another Gate-3 selection")
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch", "record names another Gate-3 selection"
+        )
     if selection.selection_role != "certification":
-        raise Bundle7BDefectError("gate3_selection_mismatch", "only a certification-role selection may appear in 7B")
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch", "only a certification-role selection may appear in 7B"
+        )
     for name in ("candidate_execution", "reference_execution"):
         own = getattr(record, name).gate3_certification_fingerprint
         require_same_fingerprint(own, resolved, label=f"{name} vs resolved Gate-3 selection")
     for member in _GATE3_STATE_FINGERPRINT_PAIRS:
         if getattr(selection, member) != getattr(resolved, member):
-            raise Bundle7BDefectError("gate3_selection_mismatch", f"selection {member} differs from its fingerprint")
+            raise Bundle7BDefectError(
+                "gate3_selection_mismatch", f"selection {member} differs from its fingerprint"
+            )
 
 
 def _verify_effect_locators(record: Certification7BRecord, arguments: Mapping[str, Any]) -> None:
     for side in ("candidate", "reference"):
-        if getattr(record, f"{side}_execution").effect_proof_locator != arguments[f"{side}_effect_proof_locator"]:
-            raise Bundle7BDefectError("effect_proof_mismatch", f"{side}: record names another effect proof")
-    if arguments["candidate_effect_result_locator"] == arguments["reference_effect_result_locator"]:
-        raise Bundle7BDefectError("effect_proof_not_distinct", "one action result cannot satisfy both sides")
+        recorded = getattr(record, f"{side}_execution").effect_proof_locator
+        if recorded != arguments[f"{side}_effect_proof_locator"]:
+            raise Bundle7BDefectError(
+                "effect_proof_mismatch", f"{side}: record names another effect proof"
+            )
+    candidate_result = arguments["candidate_effect_result_locator"]
+    if candidate_result == arguments["reference_effect_result_locator"]:
+        raise Bundle7BDefectError(
+            "effect_proof_not_distinct", "one action result cannot satisfy both sides"
+        )
 
 
-def _verify_admission(record: Certification7BRecord, execution: Any, admission: AdmittedCollection) -> None:
+def _verify_admission(
+    record: Certification7BRecord, execution: Any, admission: AdmittedCollection
+) -> None:
     label = "admission"
     if located(AdmittedCollection.SCHEMA, admission) != execution.admitted_collection_locator:
-        raise Bundle7BDefectError("admission_mismatch", f"{label}: does not resolve the side's locator")
+        raise Bundle7BDefectError(
+            "admission_mismatch", f"{label}: does not resolve the side's locator"
+        )
     if admission.collection_purpose != _LIVE_7B_PURPOSE:
-        raise Bundle7BDefectError("admission_mismatch", f"{label}: purpose must be {_LIVE_7B_PURPOSE!r}")
-    if _query_bytes(admission.canonical_query_contract) != _query_bytes(record.canonical_query_contract):
-        raise Bundle7BDefectError("admission_mismatch", f"{label}: admitted another canonical query")
-    if isinstance(execution, CandidateExecution) and (
+        raise Bundle7BDefectError(
+            "admission_mismatch", f"{label}: purpose must be {_LIVE_7B_PURPOSE!r}"
+        )
+    admitted_query = _query_bytes(admission.canonical_query_contract)
+    if admitted_query != _query_bytes(record.canonical_query_contract):
+        raise Bundle7BDefectError("admission_mismatch", f"{label}: admitted another query")
+    if not isinstance(execution, CandidateExecution):
+        return
+    admitted = (
         admission.driver_id,
         admission.driver_contract_locator,
         admission.registry_snapshot_locator,
-    ) != (execution.driver_id, execution.driver_contract_locator, execution.registry_snapshot_locator):
+    )
+    recorded = (
+        execution.driver_id,
+        execution.driver_contract_locator,
+        execution.registry_snapshot_locator,
+    )
+    if admitted != recorded:
         raise Bundle7BDefectError("admission_mismatch", f"{label}: driver or registry differs")
 
 
-def _verify_result(execution: Any, result: CollectionResult, call_side: str, effect_result: ArtifactLocator) -> _SideUniverse:
-    facts = _side_facts(result, call_side)
+def _verify_result_binding(execution: Any, result: CollectionResult, call_side: str) -> None:
     if result.admitted_collection_locator != execution.admitted_collection_locator or (
         result.retrieval_context.retrieved_at_utc != execution.retrieved_at_utc
     ):
-        raise Bundle7BDefectError("collection_result_mismatch", f"{call_side}: result admission or retrieval time differs")
-    if isinstance(execution, CandidateExecution) and result.registry_snapshot_locator != execution.registry_snapshot_locator:
-        raise Bundle7BDefectError("collection_result_mismatch", f"{call_side}: result registry snapshot differs")
+        raise Bundle7BDefectError(
+            "collection_result_mismatch", f"{call_side}: admission or retrieval time differs"
+        )
+    if isinstance(execution, CandidateExecution) and (
+        result.registry_snapshot_locator != execution.registry_snapshot_locator
+    ):
+        raise Bundle7BDefectError(
+            "collection_result_mismatch", f"{call_side}: result registry snapshot differs"
+        )
     if result.normalized_fact_set_digest != execution.normalized_fact_set_digest:
-        raise Bundle7BDefectError("normalized_fact_set_digest_mismatch", f"{call_side}: set digest differs")
+        raise Bundle7BDefectError(
+            "normalized_fact_set_digest_mismatch", f"{call_side}: set digest differs"
+        )
+
+
+def _verify_result(
+    execution: Any, result: CollectionResult, call_side: str, effect_result: ArtifactLocator
+) -> _SideUniverse:
+    facts = _side_facts(result, call_side)
+    _verify_result_binding(execution, result, call_side)
     if collection_result_locator(result) != effect_result:
-        raise Bundle7BDefectError("effect_result_mismatch", f"{call_side}: effect proof result is another result")
+        raise Bundle7BDefectError(
+            "effect_result_mismatch", f"{call_side}: effect proof result is another result"
+        )
     universe = _SideUniverse.of(facts)
     if universe.row_universe_digest != execution.row_universe_digest:
-        raise Bundle7BDefectError("row_universe_digest_mismatch", f"{call_side}: recomputed U7 digest differs")
+        raise Bundle7BDefectError(
+            "row_universe_digest_mismatch", f"{call_side}: recomputed U7 digest differs"
+        )
     if not universe.is_complete:
-        raise Bundle7BDefectError("pair_universe_incomplete", f"{call_side}: U7M is not U7 x required_metrics")
+        raise Bundle7BDefectError(
+            "pair_universe_incomplete", f"{call_side}: U7M is not U7 x required_metrics"
+        )
     if len(universe.pairs) != execution.row_count:
-        raise Bundle7BDefectError("row_count_mismatch", f"{call_side}: row_count must equal length(U7M)")
+        raise Bundle7BDefectError(
+            "row_count_mismatch", f"{call_side}: row_count must equal length(U7M)"
+        )
     return universe
 
 
@@ -1964,7 +2249,10 @@ def _verify_side(
     execution = getattr(record, f"{call_side}_execution")
     _verify_admission(record, execution, arguments[f"{call_side}_admission"])
     universe = _verify_result(
-        execution, arguments[f"{call_side}_result"], call_side, arguments[f"{call_side}_effect_result_locator"]
+        execution,
+        arguments[f"{call_side}_result"],
+        call_side,
+        arguments[f"{call_side}_effect_result_locator"],
     )
     check_native_request(
         execution.native_request_projection,
@@ -1976,21 +2264,33 @@ def _verify_side(
     return universe
 
 
-def _verify_universes(record: Certification7BRecord, cand: _SideUniverse, ref: _SideUniverse) -> None:
+def _verify_universes(
+    record: Certification7BRecord, cand: _SideUniverse, ref: _SideUniverse
+) -> None:
     if cand.rows != ref.rows:
         raise Bundle7BDefectError("row_universe_mismatch", "candidate and reference U7 differ")
-    if cand.pairs != ref.pairs or tuple(item.pair_key() for item in record.fact_reconciliations) != cand.pairs:
-        raise Bundle7BDefectError("pair_universe_mismatch", "U7M differs across sides or from the reconciliations")
+    recorded = tuple(item.pair_key() for item in record.fact_reconciliations)
+    if cand.pairs != ref.pairs or recorded != cand.pairs:
+        raise Bundle7BDefectError(
+            "pair_universe_mismatch", "U7M differs across sides or from the reconciliations"
+        )
 
 
-def _verify_side_evidence(item: FactReconciliation, side_name: str, result: CollectionResult) -> ComparisonSide:
+def _verify_side_evidence(
+    item: FactReconciliation, side_name: str, result: CollectionResult
+) -> ComparisonSide:
     side = getattr(item, side_name)
     fact = resolve_fact_evidence(side.fact_evidence_selector, result)
     if _pair_of(fact) != item.pair_key():
-        raise Bundle7BDefectError("evidence_selector_mismatch", f"{side_name}: fact metric is not the compared metric")
-    if ReconciliationSide.for_fact(fact, side.fact_evidence_selector) != side:
-        raise Bundle7BDefectError("evidence_value_mismatch", f"{side_name}: copied fields differ from the fact")
-    return side.comparison_side()
+        raise Bundle7BDefectError(
+            "evidence_selector_mismatch", f"{side_name}: fact metric is not the compared metric"
+        )
+    resolved = ReconciliationSide.for_fact(fact, side.fact_evidence_selector)
+    if resolved != side:
+        raise Bundle7BDefectError(
+            "evidence_value_mismatch", f"{side_name}: copied fields differ from the fact"
+        )
+    return resolved.comparison_side()
 
 
 def _verify_reconciliation(
@@ -2000,12 +2300,17 @@ def _verify_reconciliation(
 ) -> None:
     candidate = _verify_side_evidence(item, "candidate", arguments["candidate_result"])
     reference = _verify_side_evidence(item, "reference", arguments["reference_result"])
-    profile, profile_locator = profiles[item.canonical_metric_ref]
+    metric = item.canonical_metric_ref
+    profile, profile_locator = profiles[metric]
     if item.tolerance_profile_locator != profile_locator:
-        raise Bundle7BDefectError("tolerance_profile_locator_mismatch", "reconciliation names another profile")
-    recomputed = compare_sides(candidate, reference, profile, canonical_metric_ref=item.canonical_metric_ref)
+        raise Bundle7BDefectError(
+            "tolerance_profile_locator_mismatch", "reconciliation names another profile"
+        )
+    recomputed = compare_sides(candidate, reference, profile, canonical_metric_ref=metric)
     if recomputed != item.asserted_comparison:
-        raise Bundle7BDefectError("asserted_comparison_mismatch", f"{item.pair_key().kfive()}: asserted members differ")
+        raise Bundle7BDefectError(
+            "asserted_comparison_mismatch", f"{item.pair_key().kfive()}: asserted members differ"
+        )
 
 
 def verify_certification_7b_record(
@@ -2028,14 +2333,11 @@ def verify_certification_7b_record(
 ) -> None:
     """Recompute the whole 7B record from in-memory resolved evidence; any failure raises.
 
-    The record constructor already recomputed every intrinsic member (query and
-    projection digests, distinct effect proofs and provider targets, the
-    cross-side fingerprint, skew, ordering, counts, row-universe and logical
-    digests). This adds the bindings to resolved evidence: run, certification
-    role Gate-3 selection and its fingerprint, the Phase-1 driver contract, both
-    admissions, both complete results and effect-proof result locators, the
-    injected native-to-canonical projection, the protected tolerance profiles
-    and, per reconciliation, the resolved facts and the recomputed comparison.
+    The record constructor already recomputed every intrinsic member. This adds
+    the bindings to resolved evidence (run, certification-role Gate-3 selection
+    and fingerprint, driver contract, admissions, complete results, effect-proof
+    locators, injected native projection, protected tolerance profiles) and, per
+    reconciliation, the resolved facts and the recomputed comparison.
     """
     arguments: dict[str, Any] = {
         "migration_run_context_locator": migration_run_context_locator,
@@ -2057,10 +2359,18 @@ def verify_certification_7b_record(
     cand = _verify_side(record, "candidate", arguments)
     ref = _verify_side(record, "reference", arguments)
     _verify_universes(record, cand, ref)
+    _verify_reconciliations(record, arguments, tolerance_profiles)
+
+
+def _verify_reconciliations(
+    record: Certification7BRecord, arguments: Mapping[str, Any], tolerance_profiles: object
+) -> None:
+    """Resolve the protected profiles under the record's run, query, scope and selection."""
+    fingerprint = arguments["gate3_certification_fingerprint"]
     binding = _binding_members(
         gate3_selection_locator=record.gate3_selection_locator,
         canonical_query_digest=record.canonical_query_digest,
-        authorized_certification_scope=gate3_certification_fingerprint.authorized_certification_scope,
+        authorized_certification_scope=fingerprint.authorized_certification_scope,
         migration_run_context_locator=record.migration_run_context_locator,
     )
     profiles = _resolve_profiles(tolerance_profiles, binding)
@@ -2070,9 +2380,58 @@ def verify_certification_7b_record(
 
 def _verify_bindings(record: Certification7BRecord, arguments: Mapping[str, Any]) -> None:
     if record.migration_run_context_locator != arguments["migration_run_context_locator"]:
-        raise Bundle7BDefectError("run_context_mismatch", "record belongs to another migration run")
-    _verify_gate3(record, arguments["gate3_selection"], arguments["gate3_certification_fingerprint"])
+        raise Bundle7BDefectError(
+            "run_context_mismatch", "record belongs to another migration run"
+        )
+    _verify_gate3(
+        record, arguments["gate3_selection"], arguments["gate3_certification_fingerprint"]
+    )
     _verify_effect_locators(record, arguments)
     contract_locator = located(PipeboardPhase1Contract.SCHEMA, arguments["driver_contract"])
     if contract_locator != record.candidate_execution.driver_contract_locator:
-        raise Bundle7BDefectError("driver_contract_unresolved", "candidate contract locator does not resolve")
+        raise Bundle7BDefectError(
+            "driver_contract_unresolved", "candidate contract locator does not resolve"
+        )
+
+
+__all__ = [
+    "Bundle7BDefectError",
+    "CANDIDATE_DRIVER_ID",
+    "CANDIDATE_PROVIDER_TARGET_REF",
+    "CERTIFICATION_7B_RECORD_SCHEMA",
+    "CandidateExecution",
+    "Certification7BRecord",
+    "DEFECT_CODES",
+    "FACT_EVIDENCE_SELECTOR_SCHEMA",
+    "FACT_RECONCILIATION_SCHEMA",
+    "FactEvidenceSelector",
+    "FactReconciliation",
+    "Gate3CertificationFingerprint",
+    "MAXIMUM_RETRIEVAL_SKEW_SECONDS",
+    "MetricPairKey",
+    "NATIVE_REQUEST_PROJECTION_SCHEMA",
+    "NativeRequestProjection",
+    "NativeToCanonicalAlgorithm",
+    "RECONCILE_OUTCOME_CODES",
+    "REFERENCE_PROVIDER_TARGET_REF",
+    "REFERENCE_WORKLOAD_REF",
+    "REQUIRED_7B_METRICS",
+    "Reconciliation7BResult",
+    "ReconciliationSide",
+    "ReferenceExecution",
+    "RowPairing",
+    "check_native_request",
+    "collection_result_locator",
+    "compute_canonical_fact_key_digest",
+    "compute_logical_fact_reconciliation_digest",
+    "compute_pair_universe",
+    "compute_row_universe",
+    "compute_row_universe_digest",
+    "expected_pair_universe",
+    "located",
+    "reconcile_7b_fact_sets",
+    "require_same_fingerprint",
+    "resolve_fact_evidence",
+    "select_fact_evidence",
+    "verify_certification_7b_record",
+]
