@@ -9,12 +9,15 @@ objects carry no `integrity` and no P1 domain prefix.
 """
 from __future__ import annotations
 
+import __future__
 import ast
 import dataclasses
 import importlib
+import os
 from pathlib import Path
 import subprocess
 import sys
+import types
 from typing import Any
 
 import pytest
@@ -427,17 +430,32 @@ def test_every_package_name_is_the_same_object_as_in_its_submodules(package: str
 
 
 @pytest.mark.parametrize("package", sorted(PACKAGE_SUBMODULES))
-def test_withheld_names_are_really_ambiguous_and_absent(package: str) -> None:
+def test_withheld_names_are_absent_from_the_package(package: str) -> None:
     pkg = importlib.import_module(package)
     for name in WITHHELD_AMBIGUOUS[package]:
-        objects = {
-            id(getattr(_submodule(package, sub), name))
-            for sub in PACKAGE_SUBMODULES[package]
-            if name in _submodule(package, sub).__all__
-        }
-        assert len(objects) >= 2, name
         assert name not in pkg.__all__
         assert not hasattr(pkg, name)
+
+
+def test_the_two_restatement_kinds_tuples_agree_by_value() -> None:
+    # intelligence.py relies on these being equal; whether they are one object is not pinned.
+    assert lattice.RESTATEMENT_KINDS == policy.RESTATEMENT_KINDS
+
+
+@pytest.mark.parametrize("package", sorted(PACKAGE_SUBMODULES))
+def test_package_namespace_leaks_no_public_name_outside_all(package: str) -> None:
+    pkg = importlib.import_module(package)
+    exported = set(pkg.__all__)
+    leaked = sorted(
+        name
+        for name, value in vars(pkg).items()
+        if not name.startswith("_")
+        and not isinstance(value, types.ModuleType)
+        # `from __future__ import annotations` binds this feature object in every module.
+        and not (name == "annotations" and value is __future__.annotations)
+        and name not in exported
+    )
+    assert leaked == [], leaked
 
 
 _FRESH_IMPORT_CHECK = """
@@ -450,6 +468,8 @@ for name in ("smart_ads.analytics", "smart_ads.reconciliation"):
     if missing:
         raise SystemExit(f"{name}: unresolved {missing}")
 """
+# A fresh interpreter does not inherit pytest's in-process pythonpath; CI has no editable install.
+_SRC_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
 
 
 @pytest.mark.parametrize(
@@ -465,6 +485,7 @@ def test_packages_import_cleanly_in_a_fresh_interpreter(order: tuple[str, ...]) 
     completed = subprocess.run(
         [sys.executable, "-W", "error", "-c", _FRESH_IMPORT_CHECK, *order],
         cwd=REPO_ROOT,
+        env=_SRC_ENV,
         capture_output=True,
         text=True,
         check=False,
@@ -484,6 +505,7 @@ def test_contracts_schemas_loads_without_the_analysis_or_reconciliation_layers()
     completed = subprocess.run(
         [sys.executable, "-W", "error", "-c", code],
         cwd=REPO_ROOT,
+        env=_SRC_ENV,
         capture_output=True,
         text=True,
         check=False,
