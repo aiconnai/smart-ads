@@ -342,6 +342,19 @@ FINDING_SETS: dict[str, tuple[dict[str, Any], list[tuple[str, str]]]] = {
         {},
         [("restatement", "detected"), ("stalled_delivery", "inconclusive"), ("waste", "detected")],
     ),
+    "inconclusive_not_first": (
+        {"rules": sorted([{**RULES[1], "rule_id": "rule:s"}, RULES[2]], key=lambda r: r["rule_id"].encode())},
+        [("stalled_delivery", "inconclusive"), ("waste", "detected")],
+    ),
+}
+# Evaluator (finding_key) order of each set's statuses: a cap that only looked at the first
+# finding would miss "inconclusive_not_first".
+FINDING_ORDER: dict[str, list[str]] = {
+    "none": [],
+    "detected": ["detected"],
+    "inconclusive": ["inconclusive", "inconclusive"],
+    "mixed": ["inconclusive", "detected", "detected"],
+    "inconclusive_not_first": ["detected", "inconclusive"],
 }
 
 
@@ -502,6 +515,8 @@ def test_signed_certification_path() -> None:
     assert record.to_dict()["finding_locators"] == sorted(
         (_locator_dict(FINDING_TYPE, f.to_dict()) for f in sealed), key=_jcs
     )
+    # VERIFIED inputs, capped: the signed mixed scenario has an inconclusive stalled finding.
+    assert record.to_dict()["derived_certification_status"] == "UNAVAILABLE"
     final = _sign(record)
     assert AnalyticalCertificationRecord.from_dict(final.to_dict(), require_signed=True) == final
     assert verify_certification_record(final, context, evidence, sealed, VERIFIED_INPUTS) == final
@@ -643,7 +658,10 @@ def test_finding_sets_come_from_the_evaluator() -> None:
     for name, (_, verdicts) in FINDING_SETS.items():
         findings = _set_scenario(name)[2]
         assert sorted((f.finding_type, f.finding_status) for f in findings) == verdicts, name
-    assert [_oracle_blocked(FINDING_SETS[name][1]) for name in FINDING_SETS] == [False, False, True, True]
+        assert [f.finding_status for f in findings] == FINDING_ORDER[name], name
+    assert FINDING_ORDER.keys() == FINDING_SETS.keys()
+    blocked = [_oracle_blocked(FINDING_SETS[name][1]) for name in FINDING_SETS]
+    assert blocked == [False, False, True, True, True]
 
 
 @pytest.mark.parametrize(("attested", "finding_set"), CAP_CASES)
@@ -700,7 +718,7 @@ def test_verify_admits_only_the_capped_status(attested: str, finding_set: str, c
     assert build_certification_record(context, evidence, findings, inputs).to_dict() != unsigned_forged
 
 
-@pytest.mark.parametrize("finding_set", ["inconclusive", "mixed"])
+@pytest.mark.parametrize("finding_set", ["inconclusive", "mixed", "inconclusive_not_first"])
 def test_degraded_admission_still_raises_when_the_cap_would_lower_the_status(finding_set: str) -> None:
     context, evidence, findings = _set_scenario(finding_set)
     capped = _certify(finding_set, ATTESTED_STATUSES["UNAVAILABLE"])
