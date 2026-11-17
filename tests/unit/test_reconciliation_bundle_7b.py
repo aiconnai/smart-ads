@@ -1411,3 +1411,658 @@ def test_reconcile_result_is_immutable_and_its_codes_are_closed() -> None:
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.bundle_outcome = "failed"  # type: ignore[misc]
     assert set(b7.RECONCILE_OUTCOME_CODES) <= b7.DEFECT_CODES
+
+
+# ===========================================================================
+# Shared 7B world: every artifact resolved in memory, consistent end to end
+# ===========================================================================
+
+CANDIDATE_PROVIDER = "provider-target:pipeboard-hosted"
+REFERENCE_PROVIDER = "provider-target:independent-meta-reference"
+CAND_EFFECT = _loc("smart_ads/effect_proof/v1", "5")
+REF_EFFECT = _loc("smart_ads/effect_proof/v1", "6")
+CAND_ALGO = _sha("a")
+REF_ALGO = _sha("b")
+RECORD_KEYS = (
+    "$schema",
+    "migration_run_context_locator",
+    "gate3_selection_locator",
+    "canonical_query_contract",
+    "canonical_query_digest",
+    "required_metrics",
+    "candidate_execution",
+    "reference_execution",
+    "row_pairing",
+    "fact_reconciliations",
+    "logical_fact_reconciliation_digest",
+    "bundle_outcome",
+)
+CANDIDATE_KEYS = (
+    "driver_id",
+    "provider_target_ref",
+    "admitted_collection_locator",
+    "effect_proof_locator",
+    "registry_snapshot_locator",
+    "driver_contract_locator",
+    "driver_contract_digest",
+    "source_contract_ref",
+    "wheel_digest",
+    "adapter_code_digest",
+    "parser_code_digest",
+    "mapping_rules_digest",
+    "native_request_projection",
+    "native_request_digest",
+    "native_to_canonical_projection_algorithm_digest",
+    "canonical_query_projection",
+    "canonical_query_projection_digest",
+    "retrieved_at_utc",
+    "result_status",
+    "row_count",
+    "row_universe_digest",
+    "normalized_fact_set_digest",
+    "gate3_certification_fingerprint",
+)
+REFERENCE_KEYS = (
+    "reference_workload_ref",
+    "provider_target_ref",
+    "admitted_collection_locator",
+    "effect_proof_locator",
+    "reference_workload_binary_digest",
+    "reference_code_digest",
+    "source_contract_ref",
+    "implementation_kind",
+    "native_request_projection",
+    "native_request_digest",
+    "native_to_canonical_projection_algorithm_digest",
+    "canonical_query_projection",
+    "canonical_query_projection_digest",
+    "retrieved_at_utc",
+    "result_status",
+    "row_count",
+    "row_universe_digest",
+    "normalized_fact_set_digest",
+    "reference_run_digest",
+    "gate3_certification_fingerprint",
+)
+ROW_PAIRING = {
+    "canonical_key": "resource_ref,metric_date,resource_level,breakdown_signature,canonical_metric_ref",
+    "aggregation_rule": "sum_by_canonical_fact_key_and_metric",
+    "deduplication_rule": "canonical_fact_key_and_metric_unique",
+    "maximum_retrieval_skew_seconds": 300,
+}
+
+
+def make_pipeboard_contract() -> PipeboardPhase1Contract:
+    members = tuple(
+        PinnedGitArtifactMember(
+            role=role,
+            repository=PINNED_LEGACY_REPO,
+            commit_sha=PINNED_LEGACY_COMMIT,
+            path=path,
+            git_blob_oid=blob_oid,
+            file_content_sha256=file_sha,
+            git_artifact_provenance_locator=_loc("smart_ads/git_artifact_provenance/v1", fill),
+        )
+        for (role, path, blob_oid, file_sha), fill in zip(
+            PINNED_PIPEBOARD_D26_SPECS, ("1", "2", "3", "4", "5"), strict=True
+        )
+    )
+    return PipeboardPhase1Contract(
+        contract_id="driver-contract:pipeboard-phase1-v1",
+        driver_id="pipeboard_hosted",
+        legacy_source_packet=LegacySourcePacket(
+            repository=PINNED_LEGACY_REPO, commit_sha=PINNED_LEGACY_COMMIT, members=members
+        ),
+        upstream_reference=PinnedUpstreamReference(
+            repository="pipeboard-co/meta-ads-mcp",
+            commit_sha="2ef198e266ca6a37b6dc2c42335f0a0885002771",
+            path="meta_ads_mcp/core/insights.py",
+            symbol="get_insights",
+            hosted_parity_proven=False,
+        ),
+        transport_limits=PipeboardTransportLimits(
+            endpoint_url="https://meta-ads.mcp.pipeboard.co/",
+            http_method="POST",
+            connect_timeout_seconds=5,
+            wall_deadline_seconds=60,
+            request_content_type="application/json",
+            request_accept="application/json, text/event-stream",
+            request_accept_encoding="identity",
+            read_chunk_bytes=65536,
+            max_streamed_bytes=2_097_152,
+            max_decoded_text_bytes=2_097_152,
+            jsonrpc_method="tools/call",
+            tool_name="get_insights",
+            level="campaign",
+            limit=100,
+            compact=True,
+            max_campaign_rows=100,
+            forbidden_arguments=FORBIDDEN_PIPEBOARD_ARGUMENTS,
+        ),
+        metric_source_mappings=dict(PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS),
+    )
+
+
+def locate(artifact_type: str, artifact: Any) -> ArtifactLocator:
+    digest = "sha256:" + hashlib.sha256(canonicalize_jcs(artifact.to_dict())).hexdigest()
+    return ArtifactLocator.from_digest(artifact_type, digest)
+
+
+def make_admission(
+    query: CanonicalQueryContract,
+    driver_locator: ArtifactLocator,
+    registry_locator: ArtifactLocator,
+    *,
+    admission_id: str = "admission:adm-7b-001",
+    purpose: str = "live_verification_7b",
+) -> AdmittedCollection:
+    prereq = PurposePrerequisiteLocators(
+        purpose="live_verification_7b",
+        legacy_step2_evidence_locator=_loc("smart_ads/legacy_step2_implementation_evidence/v1", "1"),
+        live_read_activation_receipt_locator=_loc("smart_ads/smart_ads_live_read_activation_receipt/v1", "2"),
+        gate3_selection_receipt_locator=GATE3_LOC,
+        workload_identity_effect_proof_locator=_loc("smart_ads/effect_proof/v1", "3"),
+        deployment_effect_proof_locator=_loc("smart_ads/effect_proof/v1", "4"),
+    )
+    if purpose != "live_verification_7b":
+        prereq = PurposePrerequisiteLocators(
+            purpose="fixture_7a",
+            sealed_sandbox_profile_locator=_loc("smart_ads/sealed_sandbox_profile/v1", "1"),
+            regression_fixture_locator=_loc("smart_ads/regression_fixture/v1", "2"),
+        )
+    return AdmittedCollection(
+        admission_id=admission_id,
+        collection_purpose=purpose,  # type: ignore[arg-type]
+        external_request_digest=_sha("2"),
+        tenant_ref=query.tenant_ref,
+        binding_ref=query.binding_ref,
+        account_ref=query.account_ref,
+        resource_scope_ref=query.resource_scope_ref,
+        resource_level="campaign",
+        requested_capabilities=query.requested_capabilities,
+        admitted_at_utc="2026-11-11T04:05:00Z",
+        clock_attestation_locator=_loc("smart_ads/clock_attestation/v1", "0"),
+        maximum_clock_uncertainty_ms=1000,
+        tzdb_version=query.tzdb_version,
+        reporting_timezone=query.reporting_timezone,
+        computed_date_range=query.date_range,
+        registry_snapshot_locator=registry_locator,
+        registry_snapshot_digest=registry_locator.content_digest,
+        currency="BRL",
+        driver_id="pipeboard_hosted",
+        driver_contract_locator=driver_locator,
+        driver_contract_digest=driver_locator.content_digest,
+        driver_capability_snapshot_digest=_sha("3"),
+        canonical_query_contract=query,
+        canonical_query_digest=query.canonical_query_digest,
+        purpose_prerequisite_locators=prereq,
+        required_effect_roles=(
+            ("candidate_7b_call", "reference_7b_call") if purpose == "live_verification_7b" else ()
+        ),
+    )
+
+
+def pinned_algorithm(projection: b7.NativeRequestProjection, digest: str) -> CanonicalQueryContract:
+    expected = CAND_ALGO if projection.endpoint_version_ref.startswith("opaque-") else REF_ALGO
+    if digest != expected:
+        raise ClosedValidationError("unpinned native-to-canonical algorithm")
+    return canonical_query()
+
+
+def reseal(record: dict[str, Any]) -> dict[str, Any]:
+    """Recompute the aggregate digest after tampering a reconciliation (oracle, not helper)."""
+    return dict(
+        record,
+        logical_fact_reconciliation_digest=oracle_domain_digest(
+            "SMART-ADS:7B-FACT-RECONCILIATIONS:V1\n", record["fact_reconciliations"]
+        ),
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class World:
+    record: dict[str, Any]
+    kwargs: dict[str, Any]
+
+    def parsed(self) -> b7.Certification7BRecord:
+        return b7.Certification7BRecord.from_dict(self.record)
+
+    def verify(self, record: dict[str, Any] | None = None, **overrides: Any) -> None:
+        parsed = b7.Certification7BRecord.from_dict(self.record if record is None else record)
+        b7.verify_certification_7b_record(parsed, **dict(self.kwargs, **overrides))
+
+
+def _execution_dicts(
+    *,
+    drv_loc: ArtifactLocator,
+    adm_loc: ArtifactLocator,
+    reg_loc: ArtifactLocator,
+    cand: CollectionResult,
+    ref: CollectionResult,
+    rec: b7.Reconciliation7BResult,
+    fp: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    cand_native = native_dict(
+        endpoint="/mcp/tools/get_insights",
+        http_method="POST",
+        endpoint_version_ref="opaque-driver-contract:" + drv_loc.content_digest,
+    )
+    ref_native = native_dict()
+    shared = {
+        "admitted_collection_locator": adm_loc.to_dict(),
+        "canonical_query_projection": canonical_query().to_dict(),
+        "canonical_query_projection_digest": QUERY_DIGEST,
+        "result_status": "complete",
+        "gate3_certification_fingerprint": fp,
+    }
+    candidate = {
+        **shared,
+        "driver_id": "pipeboard_hosted",
+        "provider_target_ref": CANDIDATE_PROVIDER,
+        "effect_proof_locator": CAND_EFFECT.to_dict(),
+        "registry_snapshot_locator": reg_loc.to_dict(),
+        "driver_contract_locator": drv_loc.to_dict(),
+        "driver_contract_digest": drv_loc.content_digest,
+        "source_contract_ref": "opaque-driver-contract:" + drv_loc.content_digest,
+        "wheel_digest": _sha("b"),
+        "adapter_code_digest": fp["adapter_code_digest"],
+        "parser_code_digest": fp["parser_code_digest"],
+        "mapping_rules_digest": fp["mapping_rules_digest"],
+        "native_request_projection": cand_native,
+        "native_request_digest": "sha256:" + hashlib.sha256(oracle_jcs(cand_native)).hexdigest(),
+        "native_to_canonical_projection_algorithm_digest": CAND_ALGO,
+        "retrieved_at_utc": cand.retrieval_context.retrieved_at_utc,
+        "row_count": rec.candidate_row_count,
+        "row_universe_digest": rec.candidate_row_universe_digest,
+        "normalized_fact_set_digest": cand.normalized_fact_set_digest,
+    }
+    reference = {
+        **shared,
+        "reference_workload_ref": "workload:independent_meta_reference_harness",
+        "provider_target_ref": REFERENCE_PROVIDER,
+        "effect_proof_locator": REF_EFFECT.to_dict(),
+        "reference_workload_binary_digest": _sha("c"),
+        "reference_code_digest": _sha("d"),
+        "source_contract_ref": "api-version:" + fp["selected_meta_api_version"],
+        "implementation_kind": "official_sdk",
+        "native_request_projection": ref_native,
+        "native_request_digest": "sha256:" + hashlib.sha256(oracle_jcs(ref_native)).hexdigest(),
+        "native_to_canonical_projection_algorithm_digest": REF_ALGO,
+        "retrieved_at_utc": ref.retrieval_context.retrieved_at_utc,
+        "row_count": rec.reference_row_count,
+        "row_universe_digest": rec.reference_row_universe_digest,
+        "normalized_fact_set_digest": ref.normalized_fact_set_digest,
+        "reference_run_digest": _sha("0"),
+    }
+    return (
+        copy.deepcopy({key: candidate[key] for key in CANDIDATE_KEYS}),
+        copy.deepcopy({key: reference[key] for key in REFERENCE_KEYS}),
+    )
+
+
+def build_world(
+    cand_values: dict[tuple[str, str], str] = CANDIDATE_VALUES,
+    ref_values: dict[tuple[str, str], str] = BASE_VALUES,
+    *,
+    ref_at: str = REFERENCE_AT,
+) -> World:
+    contract = make_pipeboard_contract()
+    drv_loc = locate(PipeboardPhase1Contract.SCHEMA, contract)
+    reg_loc = _loc("smart_ads/private_registry_snapshot/v1", "e")
+    admission = make_admission(canonical_query(), drv_loc, reg_loc)
+    adm_loc = locate(AdmittedCollection.SCHEMA, admission)
+    cand = collection_result(facts_for(cand_values), side="candidate", retrieved_at=CANDIDATE_AT,
+                             admitted_locator=adm_loc, registry_locator=reg_loc)
+    ref = collection_result(facts_for(ref_values, side="reference"), side="reference",
+                            retrieved_at=ref_at, admitted_locator=adm_loc, registry_locator=reg_loc)
+    fp = fingerprint_dict(candidate_driver_contract_digest=drv_loc.content_digest,
+                          canonical_query_digest=QUERY_DIGEST)
+    rec = reconcile(cand, ref)
+    assert rec.bundle_outcome == "verified", rec.defect_codes
+    candidate, reference = _execution_dicts(
+        drv_loc=drv_loc, adm_loc=adm_loc, reg_loc=reg_loc, cand=cand, ref=ref, rec=rec, fp=fp
+    )
+    record = {
+        "$schema": "smart_ads/certification_7b_record/v1",
+        "migration_run_context_locator": RUN_LOC.to_dict(),
+        "gate3_selection_locator": GATE3_LOC.to_dict(),
+        "canonical_query_contract": canonical_query().to_dict(),
+        "canonical_query_digest": QUERY_DIGEST,
+        "required_metrics": [IMPRESSIONS, CLICKS, SPEND],
+        "candidate_execution": candidate,
+        "reference_execution": reference,
+        "row_pairing": dict(ROW_PAIRING),
+        "fact_reconciliations": [r.to_dict() for r in rec.fact_reconciliations],
+        "logical_fact_reconciliation_digest": rec.logical_fact_reconciliation_digest,
+        "bundle_outcome": "verified",
+    }
+    gate3 = ResolvedGate3SelectionState(
+        locator=GATE3_LOC,
+        selection_role="certification",
+        revalidated_at_utc="2026-11-11T04:00:00Z",
+        valid_until_utc="2026-11-11T04:15:00Z",
+        candidate_driver_contract_digest=drv_loc.content_digest,
+        canonical_query_digest=QUERY_DIGEST,
+        schema_bundle_digest=fp["schema_bundle_digest"],
+        resource_mapping_contract_digest=fp["resource_mapping_contract_digest"],
+        authorized_certification_scope=SCOPE,
+        certification_fingerprint_digest=_sha("c"),
+    )
+    kwargs = {
+        "migration_run_context_locator": RUN_LOC,
+        "gate3_selection": gate3,
+        "gate3_certification_fingerprint": b7.Gate3CertificationFingerprint.from_dict(fp),
+        "driver_contract": contract,
+        "candidate_admission": admission,
+        "reference_admission": admission,
+        "candidate_result": cand,
+        "reference_result": ref,
+        "candidate_effect_proof_locator": CAND_EFFECT,
+        "candidate_effect_result_locator": oracle_result_locator(cand),
+        "reference_effect_proof_locator": REF_EFFECT,
+        "reference_effect_result_locator": oracle_result_locator(ref),
+        "tolerance_profiles": default_profiles(),
+        "project_native_request": pinned_algorithm,
+    }
+    return World(record=record, kwargs=kwargs)
+
+
+@pytest.fixture(scope="module")
+def world() -> World:
+    return build_world()
+
+
+def tampered(record: dict[str, Any], path: tuple[Any, ...], value: Any) -> dict[str, Any]:
+    out = copy.deepcopy(record)
+    target = out
+    for step in path[:-1]:
+        target = target[step]
+    if value is DELETE:
+        del target[path[-1]]
+    else:
+        target[path[-1]] = value
+    return out
+
+
+DELETE = object()
+
+
+def record_defect(record: dict[str, Any]) -> str:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.Certification7BRecord.from_dict(record)
+    return code_of(excinfo)
+
+
+# ===========================================================================
+# Slice 6 - execution records, row pairing and the certification_7b_record/v1
+# ===========================================================================
+
+
+def test_record_round_trips_with_every_yaml_member(world: World) -> None:
+    parsed = world.parsed()
+    assert tuple(parsed.to_dict()) == RECORD_KEYS
+    assert parsed.to_dict() == world.record
+    assert tuple(parsed.candidate_execution.to_dict()) == CANDIDATE_KEYS
+    assert tuple(parsed.reference_execution.to_dict()) == REFERENCE_KEYS
+    assert parsed.row_pairing.to_dict() == ROW_PAIRING
+    assert b7.Certification7BRecord.SCHEMA == "smart_ads/certification_7b_record/v1"
+
+
+def test_record_types_are_immutable(world: World) -> None:
+    parsed = world.parsed()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        parsed.bundle_outcome = "failed"  # type: ignore[misc]
+    assert isinstance(parsed.fact_reconciliations, tuple)
+    assert isinstance(parsed.required_metrics, tuple)
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "code"),
+    [
+        (("$schema",), "smart_ads/certification_7b_record/v2", "fixed_member_mismatch"),
+        (("extra",), 1, "closed_member_set"),
+        (("bundle_outcome",), DELETE, "closed_member_set"),
+        (("bundle_outcome",), "failed", "fixed_member_mismatch"),
+        (("required_metrics",), [CLICKS, IMPRESSIONS, SPEND], "fixed_member_mismatch"),
+        (("required_metrics",), [IMPRESSIONS, CLICKS], "fixed_member_mismatch"),
+        (("required_metrics",), "metric:impressions_v1", "fixed_member_mismatch"),
+        (("migration_run_context_locator",), GATE3_LOC.to_dict(), "malformed_member"),
+        (("gate3_selection_locator",), RUN_LOC.to_dict(), "malformed_member"),
+        (("canonical_query_digest",), _sha("e"), "canonical_query_digest_mismatch"),
+        (("canonical_query_contract", "tzdb_version"), "2026b", "canonical_query_digest_mismatch"),
+        (("canonical_query_contract", "extra"), 1, "malformed_member"),
+        (("logical_fact_reconciliation_digest",), _sha("e"), "logical_digest_mismatch"),
+        (("fact_reconciliations",), [], "malformed_member"),
+        (("fact_reconciliations",), "x", "malformed_member"),
+        (("fact_reconciliations", 0, "candidate", "raw_numeric_value"), "102",
+         "logical_digest_mismatch"),
+        (("row_pairing", "canonical_key"), "resource_ref,metric_date", "fixed_member_mismatch"),
+        (("row_pairing", "aggregation_rule"), "sum", "fixed_member_mismatch"),
+        (("row_pairing", "deduplication_rule"), "none", "fixed_member_mismatch"),
+        (("row_pairing", "maximum_retrieval_skew_seconds"), 301, "fixed_member_mismatch"),
+        (("row_pairing", "maximum_retrieval_skew_seconds"), "300", "fixed_member_mismatch"),
+        (("row_pairing", "maximum_retrieval_skew_seconds"), True, "fixed_member_mismatch"),
+        (("row_pairing", "extra"), 1, "closed_member_set"),
+    ],
+)
+def test_record_top_level_members_are_closed_and_recomputed(
+    world: World, path: tuple[Any, ...], value: Any, code: str
+) -> None:
+    assert record_defect(tampered(world.record, path, value)) == code
+
+
+@pytest.mark.parametrize(
+    ("member", "value", "code"),
+    [
+        ("driver_id", "pipeboard_mcp", "fixed_member_mismatch"),
+        ("provider_target_ref", "provider-target:other", "fixed_member_mismatch"),
+        ("provider_target_ref", "provider:pipeboard-hosted", "malformed_member"),
+        ("admitted_collection_locator", RUN_LOC.to_dict(), "malformed_member"),
+        ("effect_proof_locator", GATE3_LOC.to_dict(), "malformed_member"),
+        ("registry_snapshot_locator", GATE3_LOC.to_dict(), "malformed_member"),
+        ("driver_contract_locator", _loc("smart_ads/pipeboard_phase1_contract/v1", "e").to_dict(),
+         "driver_contract_digest_mismatch"),
+        ("driver_contract_digest", _sha("e"), "driver_contract_digest_mismatch"),
+        ("source_contract_ref", "opaque-driver-contract:" + _sha("e"), "source_contract_mismatch"),
+        ("source_contract_ref", _sha("e"), "malformed_member"),
+        ("wheel_digest", "sha256:XYZ", "malformed_member"),
+        ("adapter_code_digest", _sha("e"), "fingerprint_member_mismatch"),
+        ("parser_code_digest", _sha("e"), "fingerprint_member_mismatch"),
+        ("mapping_rules_digest", _sha("e"), "fingerprint_member_mismatch"),
+        ("native_request_projection", native_dict(), "native_version_mismatch"),
+        ("native_request_digest", _sha("e"), "native_request_digest_mismatch"),
+        ("native_to_canonical_projection_algorithm_digest", "x", "malformed_member"),
+        ("canonical_query_projection", dict(canonical_query().to_dict(), tzdb_version="2026b"),
+         "canonical_query_digest_mismatch"),
+        ("canonical_query_projection_digest", _sha("e"), "canonical_query_digest_mismatch"),
+        ("retrieved_at_utc", "2026-11-11T04:15:00Z", "malformed_member"),
+        ("result_status", "partial", "fixed_member_mismatch"),
+        ("row_count", 5, "row_count_mismatch"),
+        ("row_count", "6", "malformed_member"),
+        ("row_count", True, "malformed_member"),
+        ("row_count", -1, "malformed_member"),
+        ("row_universe_digest", _sha("e"), "row_universe_digest_mismatch"),
+        ("normalized_fact_set_digest", "sha256:", "malformed_member"),
+        ("gate3_certification_fingerprint", {"selected_meta_api_version": "v21.0"},
+         "closed_member_set"),
+        ("extra", 1, "closed_member_set"),
+    ],
+)
+def test_candidate_execution_members_are_closed_and_cross_checked(
+    world: World, member: str, value: Any, code: str
+) -> None:
+    assert record_defect(tampered(world.record, ("candidate_execution", member), value)) == code
+
+
+@pytest.mark.parametrize(
+    ("member", "value", "code"),
+    [
+        ("reference_workload_ref", "workload:other", "fixed_member_mismatch"),
+        ("provider_target_ref", "provider-target:other", "fixed_member_mismatch"),
+        ("admitted_collection_locator", RUN_LOC.to_dict(), "malformed_member"),
+        ("effect_proof_locator", RUN_LOC.to_dict(), "malformed_member"),
+        ("reference_workload_binary_digest", "x", "malformed_member"),
+        ("reference_code_digest", None, "malformed_member"),
+        ("source_contract_ref", "api-version:v22.0", "source_contract_mismatch"),
+        ("source_contract_ref", "version:v21.0", "malformed_member"),
+        ("implementation_kind", "custom_client", "malformed_member"),
+        ("native_request_projection", native_dict(endpoint_version_ref="api-version:v22.0"),
+         "native_version_mismatch"),
+        ("native_request_digest", _sha("e"), "native_request_digest_mismatch"),
+        ("canonical_query_projection_digest", _sha("e"), "canonical_query_digest_mismatch"),
+        ("result_status", "complete ", "fixed_member_mismatch"),
+        ("row_count", 7, "row_count_mismatch"),
+        ("row_universe_digest", _sha("e"), "row_universe_digest_mismatch"),
+        ("reference_run_digest", "sha256:" + "A" * 64, "malformed_member"),
+        ("extra", 1, "closed_member_set"),
+    ],
+)
+def test_reference_execution_members_are_closed_and_cross_checked(
+    world: World, member: str, value: Any, code: str
+) -> None:
+    assert record_defect(tampered(world.record, ("reference_execution", member), value)) == code
+
+
+def test_record_requires_distinct_effect_proofs_and_provider_targets(world: World) -> None:
+    same_proof = tampered(world.record, ("reference_execution", "effect_proof_locator"),
+                          CAND_EFFECT.to_dict())
+    assert record_defect(same_proof) == "effect_proof_not_distinct"
+    same_target = tampered(world.record, ("reference_execution", "provider_target_ref"),
+                           CANDIDATE_PROVIDER)
+    assert record_defect(same_target) == "provider_target_not_distinct"
+    swapped = tampered(
+        tampered(world.record, ("reference_execution", "provider_target_ref"), CANDIDATE_PROVIDER),
+        ("candidate_execution", "provider_target_ref"), REFERENCE_PROVIDER,
+    )
+    assert record_defect(swapped) == "fixed_member_mismatch"
+
+
+@pytest.mark.parametrize("member", FINGERPRINT_MEMBERS)
+def test_record_fingerprints_must_be_byte_identical_across_sides(world: World, member: str) -> None:
+    current = world.record["reference_execution"]["gate3_certification_fingerprint"][member]
+    record = tampered(
+        world.record,
+        ("reference_execution", "gate3_certification_fingerprint", member),
+        _different_value(member, current),
+    )
+    expected = "source_contract_mismatch" if member == "selected_meta_api_version" else (
+        "fingerprint_mismatch"
+    )
+    assert record_defect(record) == expected
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["candidate_driver_contract_digest", "parser_code_digest", "adapter_code_digest",
+     "mapping_rules_digest"],
+)
+def test_record_per_member_digests_must_equal_the_candidate_fingerprint(
+    world: World, member: str
+) -> None:
+    record = tampered(
+        world.record, ("candidate_execution", "gate3_certification_fingerprint", member), _sha("e")
+    )
+    assert record_defect(record) == "fingerprint_member_mismatch"
+
+
+def test_record_fingerprint_query_digest_must_equal_the_record_query(world: World) -> None:
+    record = world.record
+    for side in ("candidate_execution", "reference_execution"):
+        record = tampered(record, (side, "gate3_certification_fingerprint", "canonical_query_digest"),
+                          _sha("e"))
+    assert record_defect(record) == "fingerprint_member_mismatch"
+
+
+@pytest.mark.parametrize(
+    ("ref_at", "code"),
+    [
+        ("2026-11-11T04:20:00.000000Z", None),
+        ("2026-11-11T04:10:00.000000Z", None),
+        ("2026-11-11T04:20:01.000000Z", "retrieval_skew_exceeded"),
+        ("2026-11-11T04:09:59.999999Z", "retrieval_skew_exceeded"),
+    ],
+)
+def test_record_retrieval_skew_is_at_most_300_seconds(
+    world: World, ref_at: str, code: str | None
+) -> None:
+    record = tampered(world.record, ("reference_execution", "retrieved_at_utc"), ref_at)
+    if code is None:
+        b7.Certification7BRecord.from_dict(record)
+    else:
+        assert record_defect(record) == code
+
+
+def test_record_reconciliations_must_be_complete_ordered_and_unique(world: World) -> None:
+    recs = world.record["fact_reconciliations"]
+    for bad, code in (
+        ([recs[1], recs[0], *recs[2:]], "wrong_order"),
+        ([recs[0], *recs], "duplicate_identity"),
+        (recs[:-1], "pair_universe_incomplete"),
+        ([r for r in recs if r["canonical_metric_ref"] != SPEND], "pair_universe_incomplete"),
+    ):
+        assert record_defect(reseal(dict(world.record, fact_reconciliations=bad))) == code
+
+
+def test_record_requires_every_asserted_member_to_be_verified(world: World) -> None:
+    unreconciled = dict(
+        WITHIN_TOLERANCE_ROW,
+        reconciliation_outcome="mismatch",
+        metric_verification_status="UNRECONCILED",
+    )
+    recs = copy.deepcopy(world.record["fact_reconciliations"])
+    recs[0].update(unreconciled)
+    assert record_defect(reseal(dict(world.record, fact_reconciliations=recs))) == (
+        "metric_not_verified"
+    )
+
+
+def test_record_counts_and_row_universe_digests_follow_the_reconciliations(world: World) -> None:
+    rows = [row_key(REF_A).to_dict(), row_key(REF_B).to_dict()]
+    expected = oracle_domain_digest("SMART-ADS:7B-ROW-UNIVERSE:V1\n", rows)
+    assert world.record["candidate_execution"]["row_universe_digest"] == expected
+    assert world.record["reference_execution"]["row_count"] == 6
+
+
+def test_record_requires_the_canonical_query_to_request_exactly_the_sealed_metrics(
+    world: World,
+) -> None:
+    narrower = dataclasses.replace(canonical_query(), metric_semantic_refs=(CLICKS, IMPRESSIONS))
+    record = dict(
+        world.record,
+        canonical_query_contract=narrower.to_dict(),
+        canonical_query_digest=narrower.canonical_query_digest,
+    )
+    assert record_defect(record) == "canonical_query_mismatch"
+
+
+def test_record_side_projection_must_equal_the_record_query(world: World) -> None:
+    other = dataclasses.replace(canonical_query(), tzdb_version="2026b")
+    record = tampered(world.record, ("reference_execution", "canonical_query_projection"),
+                      other.to_dict())
+    record = tampered(record, ("reference_execution", "canonical_query_projection_digest"),
+                      other.canonical_query_digest)
+    assert record_defect(record) == "canonical_query_mismatch"
+
+
+def test_record_p1_integrity_is_recomputed_and_can_be_required(world: World) -> None:
+    unsigned = dict(world.record, integrity={
+        "key_id": KEY_ID, "key_registry_snapshot_locator": _registry_loc().to_dict()
+    })
+    parsed = b7.Certification7BRecord.from_dict(unsigned)
+    assert parsed.to_dict() == unsigned
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.Certification7BRecord.from_dict(unsigned, require_signed=True)
+    assert code_of(excinfo) == "malformed_member"
+    signed = copy.deepcopy(unsigned)
+    signed["integrity"].update(content_digest=p1_content_digest(unsigned), signature_base64=_signature())
+    assert b7.Certification7BRecord.from_dict(signed, require_signed=True).to_dict() == signed
+    signed["integrity"]["content_digest"] = _sha("0")
+    assert record_defect(signed) == "integrity_digest_mismatch"
+
+
+def test_record_from_dict_rejects_non_mappings_and_bad_flags(world: World) -> None:
+    for bad in ("record", None, {1: 2}):
+        assert record_defect(bad) == "malformed_member"  # type: ignore[arg-type]
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.Certification7BRecord.from_dict(world.record, require_signed="yes")  # type: ignore[arg-type]
+    assert code_of(excinfo) == "malformed_argument"
