@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, Final
 
 from smart_ads.contracts.jcs import ADR_DATA_DOMAIN_PREFIXES, canonicalize_jcs, domain_jcs_sha256
-from smart_ads.contracts.schemas import NormalizedCollectionFact, ReconciliationRowKey
+from smart_ads.contracts.schemas import (
+    CanonicalQueryContract,
+    NormalizedCollectionFact,
+    ReconciliationRowKey,
+)
 from smart_ads.contracts.scalars import require_mapping
 from smart_ads.reconciliation.bundle_common import (
     REQUIRED_7B_METRICS,
@@ -200,6 +204,26 @@ def expected_pair_universe(
     return compute_pair_universe(
         MetricPairKey(row, metric) for row in rows for metric in REQUIRED_7B_METRICS
     )
+
+
+def require_facts_in_query(
+    facts: Sequence[NormalizedCollectionFact], query: CanonicalQueryContract, *, label: str
+) -> None:
+    """Every fact belongs to the admitted query window, binding and account (ADR L1078-1079,
+    L1117-1118); ``C(f)`` drops binding and account, so they are checked here explicitly."""
+    require_type(query, CanonicalQueryContract, label="canonical_query_contract")
+    window = query.date_range
+    for fact in facts:
+        key = fact.fact_key
+        # Validated `YYYY-MM-DD` strings order chronologically.
+        if not window.start_date <= key.metric_date <= window.end_date:
+            raise Bundle7BDefectError(
+                "fact_outside_query_window", f"{label}: metric_date {key.metric_date} outside"
+            )
+        if key.binding_ref != query.binding_ref:
+            raise Bundle7BDefectError("fact_binding_mismatch", f"{label}: another binding_ref")
+        if key.account_ref != query.account_ref:
+            raise Bundle7BDefectError("fact_account_mismatch", f"{label}: another account_ref")
 
 
 @dataclass(frozen=True, slots=True)

@@ -69,6 +69,10 @@ DEFECT_CODES: Final[frozenset[str]] = frozenset(
         "row_universe_digest_mismatch",
         "row_count_mismatch",
         "retrieval_skew_exceeded",
+        # facts outside the admitted canonical query
+        "fact_outside_query_window",
+        "fact_binding_mismatch",
+        "fact_account_mismatch",
         # Gate-3 fingerprint
         "fingerprint_mismatch",
         # fact evidence and reconciliations

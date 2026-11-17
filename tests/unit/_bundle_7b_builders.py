@@ -434,7 +434,7 @@ def reconcile(
         "reference_result": ref,
         "tolerance_profiles": default_profiles() if profiles is None else profiles,
         "gate3_selection_locator": GATE3_LOC,
-        "canonical_query_digest": QUERY_DIGEST,
+        "canonical_query_contract": canonical_query(),
         "authorized_certification_scope": SCOPE,
         "migration_run_context_locator": RUN_LOC,
     }

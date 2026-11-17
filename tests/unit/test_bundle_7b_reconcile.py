@@ -22,7 +22,9 @@ from tests.unit._bundle_7b_builders import (
     REF_B,
     REF_C,
     SPEND,
+    QUERY_DIGEST,
     WITHIN_TOLERANCE_ROW,
+    canonical_query,
     code_of,
     default_profiles,
     fact,
@@ -225,7 +227,8 @@ def test_reconcile_rejects_a_non_zero_profile_bound_elsewhere(binding: dict[str,
 def test_reconcile_rejects_malformed_binding_arguments() -> None:
     cand, ref = results()
     for name, bad in (
-        ("canonical_query_digest", "sha256:X"),
+        ("canonical_query_contract", canonical_query().to_dict()),
+        ("canonical_query_contract", QUERY_DIGEST),
         ("authorized_certification_scope", "campaigns"),
         ("gate3_selection_locator", GATE3_LOC.to_dict()),
         ("migration_run_context_locator", None),
@@ -233,6 +236,38 @@ def test_reconcile_rejects_malformed_binding_arguments() -> None:
         with pytest.raises(Bundle7BDefectError) as excinfo:
             reconcile(cand, ref, **{name: bad})
         assert code_of(excinfo) == "malformed_argument"
+
+
+OUT_OF_QUERY_CASES = [
+    ({"metric_date": "2026-11-01"}, "fact_outside_query_window"),
+    ({"metric_date": "2026-11-11"}, "fact_outside_query_window"),
+    ({"binding_ref": "binding:other"}, "fact_binding_mismatch"),
+    ({"account_ref": "account:someone-else"}, "fact_account_mismatch"),
+]
+
+
+@pytest.mark.parametrize(("overrides", "code"), OUT_OF_QUERY_CASES)
+@pytest.mark.parametrize("side", ["candidate", "reference"])
+def test_reconcile_requires_every_fact_inside_the_admitted_query(
+    side: str, overrides: dict[str, str], code: str
+) -> None:
+    cand_extra = overrides if side == "candidate" else {}
+    ref_extra = overrides if side == "reference" else {}
+    cand, ref = results(
+        cand_facts=facts_for(CANDIDATE_VALUES, **cand_extra),
+        ref_facts=facts_for(BASE_VALUES, side="reference", **ref_extra),
+    )
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        reconcile(cand, ref)
+    assert code_of(excinfo) == code
+
+
+def test_reconcile_binds_profiles_to_the_digest_of_the_supplied_query() -> None:
+    cand, ref = results()
+    other = dataclasses.replace(canonical_query(), tzdb_version="2026b")
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        reconcile(cand, ref, canonical_query_contract=other)
+    assert code_of(excinfo) == "tolerance_profile_unbound"
 
 
 def test_reconcile_result_is_immutable_and_its_codes_are_closed() -> None:

@@ -7,7 +7,11 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from smart_ads.contracts.jcs import ArtifactLocator
-from smart_ads.contracts.schemas import CollectionResult, NormalizedCollectionFact
+from smart_ads.contracts.schemas import (
+    CanonicalQueryContract,
+    CollectionResult,
+    NormalizedCollectionFact,
+)
 from smart_ads.reconciliation.bundle_common import (
     GATE3_SELECTION_SCHEMA,
     REQUIRED_7B_METRICS,
@@ -33,6 +37,7 @@ from smart_ads.reconciliation.bundle_universe import (
     MetricPairKey,
     SideUniverse,
     compute_canonical_fact_key_digest,
+    require_facts_in_query,
 )
 from smart_ads.reconciliation.tolerance import ToleranceProfile, compare_sides
 
@@ -192,23 +197,28 @@ def reconcile_7b_fact_sets(
     reference_result: CollectionResult,
     tolerance_profiles: Mapping[str, Mapping[str, Any]],
     gate3_selection_locator: ArtifactLocator,
-    canonical_query_digest: str,
+    canonical_query_contract: CanonicalQueryContract,
     authorized_certification_scope: str,
     migration_run_context_locator: ArtifactLocator,
 ) -> Reconciliation7BResult:
     """Build every ``fact_reconciliation/v1`` from two complete normalized fact sets.
 
-    Malformed evidence or an unresolved, unsigned or unbound tolerance profile
-    raises ``Bundle7BDefectError``. Set defects, retrieval skew and comparisons
+    Malformed evidence, a fact outside the admitted query (window, binding or
+    account) or an unresolved, unsigned or unbound tolerance profile raises
+    ``Bundle7BDefectError``; profiles are bound to the digest of
+    ``canonical_query_contract``. Set defects, retrieval skew and comparisons
     that are not ``VERIFIED`` are returned as sorted ``defect_codes`` with
     ``bundle_outcome == "failed"``. Reconciliations cover the required pairs
     present on both sides.
     """
     cand_facts = side_facts(candidate_result, "candidate")
     ref_facts = side_facts(reference_result, "reference")
+    require_type(canonical_query_contract, CanonicalQueryContract, label="canonical_query")
+    require_facts_in_query(cand_facts, canonical_query_contract, label="candidate_result")
+    require_facts_in_query(ref_facts, canonical_query_contract, label="reference_result")
     binding = binding_members(
         gate3_selection_locator=gate3_selection_locator,
-        canonical_query_digest=canonical_query_digest,
+        canonical_query_digest=canonical_query_contract.canonical_query_digest,
         authorized_certification_scope=authorized_certification_scope,
         migration_run_context_locator=migration_run_context_locator,
     )

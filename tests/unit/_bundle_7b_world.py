@@ -31,6 +31,7 @@ from smart_ads.domain.pipeboard_contract import (
 )
 from smart_ads.ports.cell_runtime import ResolvedGate3SelectionState
 from smart_ads.reconciliation import bundle_7b as b7
+from smart_ads.reconciliation import bundle_reconcile
 from smart_ads.reconciliation.bundle_7b import Bundle7BDefectError
 from tests.unit._bundle_7b_builders import (
     BASE_VALUES,
@@ -429,10 +430,14 @@ def build_world(
     *,
     ref_at: str = REFERENCE_AT,
     cand_facts: list[NormalizedCollectionFact] | None = None,
+    ref_facts: list[NormalizedCollectionFact] | None = None,
     require_verified: bool = True,
     separate_reference_admission: bool = False,
     scope: str = SCOPE,
+    query_checked: bool = True,
 ) -> World:
+    """Build a consistent world; ``query_checked=False`` lets reconcile accept facts outside
+    the admitted query so that the verifier's own check can be reached."""
     contract = make_pipeboard_contract()
     drv_loc = locate(PipeboardPhase1Contract.SCHEMA, contract)
     reg_loc = loc("smart_ads/private_registry_snapshot/v1", "e")
@@ -449,14 +454,18 @@ def build_world(
         admitted_locator=locators["candidate_admission"], registry_locator=reg_loc,
     )
     ref = collection_result(
-        facts_for(ref_values, side="reference"), side="reference", retrieved_at=ref_at,
+        ref_facts if ref_facts is not None else facts_for(ref_values, side="reference"),
+        side="reference", retrieved_at=ref_at,
         admitted_locator=locators["reference_admission"], registry_locator=reg_loc,
     )
     fp = fingerprint_dict(candidate_driver_contract_digest=drv_loc.content_digest,
                           canonical_query_digest=QUERY_DIGEST,
                           authorized_certification_scope=scope)
     profiles = default_profiles(scope)
-    rec = reconcile(cand, ref, profiles, authorized_certification_scope=scope)
+    with pytest.MonkeyPatch.context() as patch:
+        if not query_checked:
+            patch.setattr(bundle_reconcile, "require_facts_in_query", lambda *a, **k: None)
+        rec = reconcile(cand, ref, profiles, authorized_certification_scope=scope)
     if require_verified and rec.bundle_outcome != "verified":
         raise AssertionError(f"world is not verified: {rec.defect_codes}")
     candidate, reference = _execution_dicts(

@@ -14,6 +14,7 @@ from smart_ads.ports.cell_runtime import ResolvedGate3SelectionState
 from smart_ads.reconciliation import bundle_7b as b7
 from smart_ads.reconciliation.bundle_7b import Bundle7BDefectError
 from tests.unit._bundle_7b_builders import (
+    BASE_VALUES,
     CANDIDATE_AT,
     CANDIDATE_VALUES,
     CLICKS,
@@ -402,6 +403,29 @@ def test_verifier_binds_each_evidence_member_of_the_record(
     world: World, path: tuple[Any, ...], value: Any, code: str
 ) -> None:
     assert verify_defect(world, tampered(world.record, path, value)) == code
+
+
+@pytest.mark.parametrize(
+    ("cand_extra", "ref_extra", "code"),
+    [
+        # A date outside the query window must hold on both sides for a consistent record.
+        ({"metric_date": "2026-11-01"}, {"metric_date": "2026-11-01"},
+         "fact_outside_query_window"),
+        ({"binding_ref": "binding:other"}, {}, "fact_binding_mismatch"),
+        ({}, {"binding_ref": "binding:other"}, "fact_binding_mismatch"),
+        ({"account_ref": "account:someone-else"}, {}, "fact_account_mismatch"),
+        ({}, {"account_ref": "account:someone-else"}, "fact_account_mismatch"),
+    ],
+)
+def test_verifier_requires_every_fact_inside_the_admitted_query(
+    cand_extra: dict[str, str], ref_extra: dict[str, str], code: str
+) -> None:
+    outside = build_world(
+        cand_facts=facts_for(CANDIDATE_VALUES, **cand_extra),
+        ref_facts=facts_for(BASE_VALUES, side="reference", **ref_extra),
+        query_checked=False,
+    )
+    assert verify_defect(outside) == code
 
 
 def test_verifier_never_mutates_its_inputs(world: World) -> None:

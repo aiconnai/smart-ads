@@ -37,7 +37,11 @@ from smart_ads.reconciliation.bundle_reconcile import (
     side_facts,
 )
 from smart_ads.reconciliation.bundle_record import Certification7BRecord
-from smart_ads.reconciliation.bundle_universe import SideUniverse, pair_of
+from smart_ads.reconciliation.bundle_universe import (
+    SideUniverse,
+    pair_of,
+    require_facts_in_query,
+)
 from smart_ads.reconciliation.tolerance import ComparisonSide, compare_sides
 
 _LIVE_7B_PURPOSE: Final[str] = "live_verification_7b"
@@ -179,10 +183,15 @@ def _verify_result_binding(execution: Any, result: CollectionResult, call_side: 
 
 
 def _verify_result(
-    execution: Any, result: CollectionResult, call_side: str, effect_result: ArtifactLocator
+    record: Certification7BRecord,
+    execution: Any,
+    result: CollectionResult,
+    call_side: str,
+    effect_result: ArtifactLocator,
 ) -> SideUniverse:
     facts = side_facts(result, call_side)
     _verify_result_binding(execution, result, call_side)
+    require_facts_in_query(facts, record.canonical_query_contract, label=f"{call_side}_result")
     if collection_result_locator(result) != effect_result:
         raise Bundle7BDefectError(
             "effect_result_mismatch", f"{call_side}: effect proof result is another result"
@@ -209,6 +218,7 @@ def _verify_side(
     execution = getattr(record, f"{call_side}_execution")
     _verify_admission(record, execution, arguments[f"{call_side}_admission"])
     universe = _verify_result(
+        record,
         execution,
         arguments[f"{call_side}_result"],
         call_side,
