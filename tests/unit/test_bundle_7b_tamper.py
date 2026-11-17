@@ -296,7 +296,9 @@ VERIFY_ROOTS = (
     "gate3_selection",
     "driver_contract",
     "candidate_admission",
+    "reference_admission",
     "candidate_result",
+    "reference_result",
     "migration_run_context_locator",
     "candidate_effect_proof_locator",
     "candidate_effect_result_locator",
@@ -309,7 +311,7 @@ VERIFY_ROOTS = (
 def test_verify_sweep_every_field_of_every_reachable_object(
     world: World, record: b7.Certification7BRecord, name: str
 ) -> None:
-    """The reference result and admission are the same code path as the candidate's."""
+    """Each argument is swept under its own name: dropping one re-parse must fail a case."""
     if name == "record":
         root, entry = record, lambda obj: _verify(world, obj)
     else:
