@@ -10,9 +10,14 @@ The endpoint must be an authority-free, query-free path whose segments are an
 API version (``v21.0``) or a lowercase name without digits. The reference side's
 version segments must equal its ``api-version:<v>``; the version-opaque
 candidate (``opaque-driver-contract:sha256:<hex>``) carries no version segment.
-This path grammar is an open decision with two known limits: it rejects the
-bare path ``/`` and digit-bearing segments such as ``/oauth2/token``, and it
-admits a raw provider identifier made only of letters.
+This path grammar and version rule are an open decision with these known limits:
+
+* the bare path ``/`` and digit-bearing segments such as ``/oauth2/token`` are
+  rejected;
+* a raw provider identifier made only of letters is admitted;
+* a candidate endpoint with any ``v<digits>`` segment, such as ``/mcp/v1/tools``,
+  is rejected as ``native_version_mismatch``;
+* an ``api-version`` reference whose path has no version segment is accepted.
 """
 from __future__ import annotations
 
@@ -52,10 +57,8 @@ _ENDPOINT_VERSION_PREFIXES: Final[frozenset[str]] = frozenset(
 _ATTRIBUTION_OMITTED: Final[str] = "omitted"
 # Path only: no scheme, authority, userinfo, query or fragment. A segment is either an
 # API version (`v21.0`) or a lowercase name without digits, so raw numeric provider
-# identifiers (`act_123`, `1234`) cannot appear in the endpoint. Known limits of this
-# grammar (an open decision, not fixed by the ADR): it rejects the bare path "/" and
-# legitimate digit-bearing segments such as `/oauth2/token`, and it admits a raw
-# provider identifier made only of letters.
+# identifiers (`act_123`, `1234`) cannot appear in the endpoint. Its known limits are
+# listed in the module docstring (an open decision, not fixed by the ADR).
 _ENDPOINT_PATH_RE: Final[re.Pattern[str]] = re.compile(
     r"\A(?:/(?:v[0-9]+(?:\.[0-9]+)*|[a-z][a-z_-]*))+\Z"
 )
@@ -281,6 +284,12 @@ class NativeRequestProjection:
 
 
 NativeToCanonicalAlgorithm = Callable[[NativeRequestProjection, str], CanonicalQueryContract]
+"""The injected, digest-pinned native-to-canonical projection ``(projection, digest) -> query``.
+
+It must signal a rejected projection only by raising ``ClosedValidationError``
+(reported as ``native_projection_mismatch``). Any other exception is a bug in
+the caller's algorithm and propagates unchanged.
+"""
 
 
 def check_native_request(
@@ -295,7 +304,10 @@ def check_native_request(
 
     The resulting complete canonical projection must equal ``canonical_query``
     byte-for-byte; any other result (including a rejection by the algorithm of
-    an extra or default-valued native parameter) fails 7B.
+    an extra or default-valued native parameter) fails 7B. The algorithm must
+    reject only by raising ``ClosedValidationError``; any other exception
+    (``ValueError``, ``KeyError``, ``TypeError`` ...) is the caller's bug and
+    propagates unchanged, deliberately not caught here.
     """
     require_type(projection, NativeRequestProjection, label="native_request_projection")
     require_type(canonical_query, CanonicalQueryContract, label="canonical_query")

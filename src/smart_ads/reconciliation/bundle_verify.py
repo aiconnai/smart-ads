@@ -218,6 +218,12 @@ def _verify_result(
 def _verify_side(
     record: Certification7BRecord, call_side: str, arguments: Mapping[str, Any]
 ) -> ResultIndex:
+    """Bind one side's admission, result and native projection; return its index.
+
+    Each side's recomputed U7 digest equals the record's (which the constructor
+    recomputed from the reconciliations) and each U7M is complete, so the two
+    sides and the reconciliation set necessarily share one universe.
+    """
     execution = getattr(record, f"{call_side}_execution")
     _verify_admission(record, execution, arguments[f"{call_side}_admission"])
     index = ResultIndex.of(arguments[f"{call_side}_result"])
@@ -314,27 +320,31 @@ def verify_certification_7b_record(
 ) -> None:
     """Recompute the whole 7B record from in-memory resolved evidence; any failure raises.
 
-    Adds to the record's intrinsic checks the bindings to resolved evidence: run,
-    certification-role Gate-3 selection and fingerprint, driver contract,
-    admissions, complete results whose facts lie in the admitted query window,
-    binding and account, effect-proof locators, the injected native projection,
-    protected tolerance profiles and, per reconciliation, the resolved facts and
-    the recomputed comparison. Not verified (no resolved evidence is supplied):
-    ``wheel_digest``, ``reference_workload_binary_digest``, ``reference_code_digest``
-    and ``reference_run_digest`` are checked for grammar only; the
-    ``gate3_certification_fingerprint`` argument is trusted as the selection's
-    fingerprint, only five members being compared with ``gate3_selection`` and the
-    other six (selected_meta_api_version, reference_client_identity_digest,
-    official_source_locators_digest, parser_code_digest, adapter_code_digest,
-    mapping_rules_digest) and ``certification_fingerprint_digest`` not, since the
-    ADR gives no formula; ``effect_proof/v1`` contents are not modelled.
+    Adds the bindings to resolved evidence: run, Gate-3 selection, driver contract,
+    admissions, results whose facts lie in the admitted query, effect proofs, the
+    injected native projection, tolerance profiles and every reconciliation.
+    Not verified: wheel_digest and the three reference digests (grammar only);
+    the gate3_certification_fingerprint argument is trusted as the selection's
+    certification_fingerprint: only five of its members are compared with
+    ResolvedGate3SelectionState; the other six (selected_meta_api_version,
+    reference_client_identity_digest, official_source_locators_digest,
+    parser_code_digest, adapter_code_digest, mapping_rules_digest) and
+    certification_fingerprint_digest are not, since the ADR gives no formula for
+    that digest; effect_proof/v1 contents are not modelled.
     """
-    # Snapshot of the keyword arguments by name (taken before any other local exists).
-    arguments: dict[str, Any] = dict(locals())
+    arguments: dict[str, Any] = {
+        "migration_run_context_locator": migration_run_context_locator,
+        "gate3_selection": gate3_selection, "driver_contract": driver_contract,
+        "gate3_certification_fingerprint": gate3_certification_fingerprint,
+        "candidate_admission": candidate_admission, "reference_admission": reference_admission,
+        "candidate_result": candidate_result, "reference_result": reference_result,
+        "candidate_effect_proof_locator": candidate_effect_proof_locator,
+        "candidate_effect_result_locator": candidate_effect_result_locator,
+        "reference_effect_proof_locator": reference_effect_proof_locator,
+        "reference_effect_result_locator": reference_effect_result_locator,
+        "project_native_request": project_native_request,
+    }
     _verify_arguments(record, arguments)
     _verify_bindings(record, arguments)
-    # Each side's recomputed U7 digest equals the record's (which the constructor
-    # recomputed from the reconciliations) and each U7M is complete, so the two
-    # sides and the reconciliation set necessarily share one universe.
     indexes = {side: _verify_side(record, side, arguments) for side in ("candidate", "reference")}
     _verify_reconciliations(record, arguments, indexes, tolerance_profiles)

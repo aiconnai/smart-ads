@@ -210,8 +210,15 @@ def expected_pair_universe(
 def require_facts_in_query(
     facts: Sequence[NormalizedCollectionFact], query: CanonicalQueryContract, *, label: str
 ) -> None:
-    """Every fact belongs to the admitted query window, binding and account (ADR L1078-1079,
-    L1117-1118); ``C(f)`` drops binding and account, so they are checked here explicitly."""
+    """Every fact lies in the admitted query's date window and has its binding and account.
+
+    This per-fact check is DERIVED FROM ADR L1078-1079 ("belong to the same
+    admitted query window") and L1117-1118 (effect proofs bind "binding, and
+    scope"); the ADR does not state it per fact. ``C(f)`` drops binding and
+    account, so they are checked here explicitly. The ADR's "retrieval
+    timestamps ... belong to the same admitted query window" is otherwise only
+    enforced as a retrieval skew of at most 300 s between the two sides.
+    """
     require_type(query, CanonicalQueryContract, label="canonical_query_contract")
     window = query.date_range
     for fact in facts:
