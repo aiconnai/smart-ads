@@ -1836,6 +1836,30 @@ def test_tampered_dependency_raises_its_own_coded_error(
     _expect(error, code, context, evidence)
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(lambda schema: _tamper(schema, "result_kind", _Str("relation")), id="result-kind"),
+        pytest.param(
+            lambda schema: _tamper(schema.columns[0], "cell_type", _Str(schema.columns[0].cell_type)),
+            id="column-cell-type",
+        ),
+    ],
+)
+def test_resolved_schema_rebound_to_a_str_subclass_is_rejected_like_its_wire_form(
+    tamper: Callable[[AnalysisResultSchema], None]
+) -> None:
+    # Equal content, so the locator and projection bytes still match; only the re-parse sees it.
+    context, evidence = _seam_scenario()
+    metrics_schema = evidence.resolved_schemas[1]  # a fresh object; [0] is the shared EXTRA_SCHEMA
+    assert metrics_schema.result_kind == "relation"
+    tamper(metrics_schema)
+    with pytest.raises(ResultSetMismatchError) as wire:
+        AnalysisResultSchema.from_dict(metrics_schema.to_dict())
+    assert wire.value.code == "schema_invalid"
+    _expect(ResultSetMismatchError, "schema_invalid", context, evidence)
+
+
 def test_curation_window_dates_are_parsed_with_a_code() -> None:
     context, _ = _seam_scenario()
     _tamper(context, "curation_anchor_date", "2026-02-30")
