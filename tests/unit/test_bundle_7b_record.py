@@ -125,6 +125,15 @@ def test_record_types_are_immutable(world: World) -> None:
     assert isinstance(parsed.required_metrics, tuple)
 
 
+@pytest.mark.parametrize("name", ["required_metrics", "fact_reconciliations"])
+def test_record_sequence_members_must_be_tuples(world: World, name: str) -> None:
+    parsed = world.parsed()
+    assert hash(parsed) == hash(world.parsed())
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        dataclasses.replace(parsed, **{name: list(getattr(parsed, name))})
+    assert code_of(excinfo) == "malformed_member"
+
+
 @pytest.mark.parametrize(
     ("path", "value", "code"),
     [

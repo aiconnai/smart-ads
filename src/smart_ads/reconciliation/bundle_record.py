@@ -111,6 +111,8 @@ class Certification7BRecord:
             ("row_pairing", RowPairing),
         ):
             require_member(getattr(self, name), expected, label=f"{label}.{name}")
+        # Frozen and hashable: sequence members are tuples, never lists.
+        require_member(self.required_metrics, tuple, label=f"{label}.required_metrics")
         _require_required_metrics(self.required_metrics, label=label)
         if self.bundle_outcome != _BUNDLE_OUTCOME_VERIFIED:
             raise Bundle7BDefectError(

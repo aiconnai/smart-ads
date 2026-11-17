@@ -171,6 +171,15 @@ def test_native_endpoint_version_accepts_matching_identities(
     assert b7.NativeRequestProjection.from_dict(data).endpoint == endpoint
 
 
+@pytest.mark.parametrize("name", ["resource_refs", "metrics", "breakdowns"])
+def test_native_projection_sequence_members_must_be_tuples(name: str) -> None:
+    projection = b7.NativeRequestProjection.from_dict(native_dict())
+    assert hash(projection) == hash(b7.NativeRequestProjection.from_dict(native_dict()))
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        dataclasses.replace(projection, **{name: list(getattr(projection, name))})
+    assert code_of(excinfo) == "malformed_member"
+
+
 def test_native_projection_rejects_non_mapping_input() -> None:
     for bad in ("x", None, {1: "x"}):
         assert native_defect(bad) == "malformed_member"
