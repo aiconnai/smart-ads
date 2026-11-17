@@ -106,7 +106,10 @@ class ResultIndex:
     """A complete result with its locator, set digest and facts indexed by pair, built once.
 
     Canonicalizing a whole ``collection_result/v1`` per pair is quadratic; every
-    caller resolving many selectors against one result shares one index.
+    caller resolving many selectors against one result shares one index. This is
+    an internal type: the public selector functions accept only a
+    ``CollectionResult`` and build their own index, so a forged index can never
+    reach them.
     """
 
     result: CollectionResult
@@ -115,9 +118,7 @@ class ResultIndex:
     facts_by_pair: Mapping[MetricPairKey, tuple[NormalizedCollectionFact, ...]]
 
     @classmethod
-    def of(cls, result: CollectionResult | ResultIndex) -> ResultIndex:
-        if isinstance(result, ResultIndex):
-            return result
+    def of(cls, result: CollectionResult) -> ResultIndex:
         facts = complete_facts(result)
         grouped: dict[MetricPairKey, list[NormalizedCollectionFact]] = {}
         for fact in facts:
@@ -130,10 +131,8 @@ class ResultIndex:
         )
 
 
-def addressed_fact(
-    result: CollectionResult | ResultIndex, pair: MetricPairKey
-) -> NormalizedCollectionFact:
-    matches = ResultIndex.of(result).facts_by_pair.get(pair, ())
+def addressed_fact(index: ResultIndex, pair: MetricPairKey) -> NormalizedCollectionFact:
+    matches = index.facts_by_pair.get(pair, ())
     if len(matches) != 1:
         raise Bundle7BDefectError(
             "evidence_not_addressable",
@@ -210,12 +209,24 @@ class FactEvidenceSelector:
         )
 
 
-def select_fact_evidence(
-    result: CollectionResult | ResultIndex, pair: MetricPairKey
-) -> FactEvidenceSelector:
+def select_fact_evidence(result: CollectionResult, pair: MetricPairKey) -> FactEvidenceSelector:
     """Build the selector addressing exactly one fact of ``pair`` inside ``result``."""
+    require_type(result, CollectionResult, label="collection_result")
+    return select_indexed_evidence(ResultIndex.of(result), pair)
+
+
+def resolve_fact_evidence(
+    selector: FactEvidenceSelector, result: CollectionResult
+) -> NormalizedCollectionFact:
+    """Resolve a selector against the side's resolved result; every member is recomputed."""
+    require_type(result, CollectionResult, label="collection_result")
+    return resolve_indexed_evidence(selector, ResultIndex.of(result))
+
+
+def select_indexed_evidence(index: ResultIndex, pair: MetricPairKey) -> FactEvidenceSelector:
+    """Internal: ``select_fact_evidence`` over an index built once by the caller."""
+    require_type(index, ResultIndex, label="result_index")
     require_type(pair, MetricPairKey, label="pair")
-    index = ResultIndex.of(result)
     target = addressed_fact(index, pair)
     return FactEvidenceSelector(
         collection_result_locator=index.locator,
@@ -226,12 +237,12 @@ def select_fact_evidence(
     )
 
 
-def resolve_fact_evidence(
-    selector: FactEvidenceSelector, result: CollectionResult | ResultIndex
+def resolve_indexed_evidence(
+    selector: FactEvidenceSelector, index: ResultIndex
 ) -> NormalizedCollectionFact:
-    """Resolve a selector against the side's resolved result; every member is recomputed."""
+    """Internal: ``resolve_fact_evidence`` over an index built once by the caller."""
     require_type(selector, FactEvidenceSelector, label="fact_evidence_selector")
-    index = ResultIndex.of(result)
+    require_type(index, ResultIndex, label="result_index")
     if selector.collection_result_locator != index.locator:
         raise Bundle7BDefectError(
             "evidence_container_mismatch", "fact_evidence_selector: container is another result"

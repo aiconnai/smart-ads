@@ -22,7 +22,7 @@ from smart_ads.reconciliation.bundle_evidence import (
     FactReconciliation,
     ReconciliationSide,
     ResultIndex,
-    resolve_fact_evidence,
+    resolve_indexed_evidence,
 )
 from smart_ads.reconciliation.bundle_executions import (
     CandidateExecution,
@@ -242,7 +242,7 @@ def _verify_side_evidence(
     item: FactReconciliation, side_name: str, result: ResultIndex
 ) -> ComparisonSide:
     side = getattr(item, side_name)
-    fact = resolve_fact_evidence(side.fact_evidence_selector, result)
+    fact = resolve_indexed_evidence(side.fact_evidence_selector, result)
     if pair_of(fact) != item.pair_key():
         raise Bundle7BDefectError(
             "evidence_selector_mismatch", f"{side_name}: fact metric is not the compared metric"

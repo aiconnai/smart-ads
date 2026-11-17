@@ -32,7 +32,7 @@ from smart_ads.reconciliation.bundle_evidence import (
     addressed_fact,
     complete_facts,
     compute_logical_fact_reconciliation_digest,
-    select_fact_evidence,
+    select_indexed_evidence,
 )
 from smart_ads.reconciliation.bundle_universe import (
     MetricPairKey,
@@ -148,7 +148,7 @@ def _universe_codes(cand: SideUniverse, ref: SideUniverse) -> set[str]:
 
 
 def _evidence_side(index: ResultIndex, pair: MetricPairKey) -> ReconciliationSide:
-    selector = select_fact_evidence(index, pair)
+    selector = select_indexed_evidence(index, pair)
     return ReconciliationSide.for_fact(addressed_fact(index, pair), selector)
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from smart_ads.contracts.jcs import canonicalize_jcs
 from smart_ads.contracts.schemas import CollectionResult
 from smart_ads.reconciliation import bundle_7b as b7
+from smart_ads.reconciliation import bundle_evidence
 from smart_ads.reconciliation.bundle_7b import (
     Bundle7BDefectError,
     MetricPairKey,
@@ -95,6 +97,26 @@ def test_select_fact_evidence_builds_the_closed_selector(cand_result: Collection
     }
     assert b7.FactEvidenceSelector.from_dict(selector.to_dict()) == selector
     assert b7.resolve_fact_evidence(selector, cand_result) == target
+
+
+def test_public_evidence_functions_reject_a_result_index_even_a_forged_one(
+    cand_result: CollectionResult,
+) -> None:
+    pair = MetricPairKey(row_key(REF_A), CLICKS)
+    index = bundle_evidence.ResultIndex.of(cand_result)
+    forged = dataclasses.replace(
+        index, facts_by_pair=MappingProxyType({pair: (fact(REF_A, CLICKS, "999"),)})
+    )
+    selector = b7.select_fact_evidence(cand_result, pair)
+    for call in (
+        lambda: b7.select_fact_evidence(forged, pair),  # type: ignore[arg-type]
+        lambda: b7.resolve_fact_evidence(selector, forged),  # type: ignore[arg-type]
+        lambda: b7.select_fact_evidence(index, pair),  # type: ignore[arg-type]
+        lambda: b7.resolve_fact_evidence(selector, index),  # type: ignore[arg-type]
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            call()
+        assert code_of(excinfo) == "malformed_argument"
 
 
 def test_select_fact_evidence_rejects_a_non_addressable_pair(cand_result: CollectionResult) -> None:
