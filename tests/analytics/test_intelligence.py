@@ -34,6 +34,7 @@ from smart_ads.analytics.policy import (
     AnalysisPolicy,
     EvaluationScope,
     PolicyNotApplicableError,
+    PolicyValidationError,
 )
 from smart_ads.analytics.results import (
     AnalysisExecution,
@@ -1392,6 +1393,44 @@ METRIC_ROW_CASES = [
 @pytest.mark.parametrize(("code", "rows"), METRIC_ROW_CASES)
 def test_metric_row_rejections(code: str, rows: list[Any]) -> None:
     _raises(code, _run, (_waste_rule(),), rows)
+
+
+# Spend must be int64_minor_currency and outcome int64_count. Only the 3-day window carries rows,
+# so a lazy check would see the type with window_days 3 and nothing (inconclusive) with 1.
+MISTYPED_REF_CASES = [
+    pytest.param(_waste_rule, {"spend_metric_ref": CLICKS, "outcome_metric_ref": IMPRESSIONS}, id="waste-review"),
+    pytest.param(_waste_rule, {"spend_metric_ref": IMPRESSIONS}, id="waste-count-spend"),
+    pytest.param(_waste_rule, {"outcome_metric_ref": SPEND}, id="waste-money-outcome"),
+    pytest.param(
+        _saturation_rule, {"spend_metric_ref": CLICKS, "outcome_metric_ref": IMPRESSIONS}, id="saturation-review"
+    ),
+    pytest.param(_saturation_rule, {"spend_metric_ref": IMPRESSIONS}, id="saturation-count-spend"),
+    pytest.param(_saturation_rule, {"outcome_metric_ref": SPEND}, id="saturation-money-outcome"),
+]
+MISTYPED_ROWS = _waste_rows("1000", "0") + _metric(R0, W3, IMPRESSIONS, "0")
+
+
+@pytest.mark.parametrize("window", [1, 3])
+@pytest.mark.parametrize(("make_rule", "refs"), MISTYPED_REF_CASES)
+def test_mistyped_base_metric_ref_rejects_whatever_the_window_and_data(
+    make_rule: Callable[..., dict[str, Any]], refs: dict[str, str], window: int
+) -> None:
+    rule = {**make_rule(window=window), **refs}
+    with pytest.raises(PolicyValidationError) as info:
+        _run((rule,), MISTYPED_ROWS, resources=RES)
+    assert info.value.code == "unsupported_value"
+
+
+def test_ref_outside_the_phase1_registry_is_typed_by_its_rows() -> None:
+    # The policy cannot type `metric:media_spend_v1`: no row is inconclusive, a valued row of the
+    # wrong type is metric_type_mismatch, a money row is evaluated.
+    media = "metric:media_spend_v1"
+    rule = {**_waste_rule(), "spend_metric_ref": media}
+    assert _verdicts(_run((rule,), _waste_rows("1000", "0"))) == [("waste", "inconclusive")]
+    count_row = _patched(_mrow(R0, W3[0], W3[1], CLICKS, "1000"), 3, _cell("opaque_ref", media))
+    _raises("metric_type_mismatch", _run, (rule,), [count_row] + _metric(R0, W3, CLICKS, "0"))
+    money_row = _patched(SPEND_ROW, 3, _cell("opaque_ref", media))
+    assert _verdicts(_run((rule,), [money_row] + _metric(R0, W3, CLICKS, "0"))) == [("waste", "detected")]
 
 
 def test_unverifiable_execution_propagates_the_result_set_code() -> None:
