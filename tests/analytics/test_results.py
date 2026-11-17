@@ -875,6 +875,46 @@ def test_verifier_rejects_forged_digest_and_partial_integrity_on_dataclass_input
             require_signed=require_signed,
         )
 
+    if not require_signed:
+        for partial_slot in ("content_digest", "signature_base64"):
+            clean_unsigned = P1Integrity(
+                key_id="key:ed25519:" + "a" * 64,
+                key_registry_snapshot_locator=_loc("smart_ads/key_authorization_registry/v1", "c"),
+            )
+            u_rel = AnalysisResultSchema.from_dict(
+                {**REL_SCHEMA.to_dict(), "integrity": clean_unsigned.to_dict()}
+            )
+            u_res_a = _result_with("metric:a", u_rel, REL_ROWS, signed=False)
+            u_res_a = AnalysisResult.from_dict(
+                {**u_res_a.to_dict(), "integrity": clean_unsigned.to_dict()}
+            )
+            u_exec = AnalysisExecution.from_dict(
+                {
+                    **_execution_dict(_set_dict([_entry(u_res_a), _entry(RESULT_B)])),
+                    "integrity": clean_unsigned.to_dict(),
+                }
+            )
+            assert verify_analysis_execution(
+                u_exec, [u_res_a, RESULT_B], [u_rel, SCALAR_SCHEMA], SNAPSHOT
+            ) == u_exec
+            tampered_int = P1Integrity.from_dict(clean_unsigned.to_dict())
+            object.__setattr__(tampered_int, partial_slot, _AlwaysEq())
+            if target == "execution":
+                object.__setattr__(u_exec, "integrity", tampered_int)
+            elif target == "result":
+                object.__setattr__(u_res_a, "integrity", tampered_int)
+            else:
+                object.__setattr__(u_rel, "integrity", tampered_int)
+            _raises(
+                "invalid_integrity",
+                verify_analysis_execution,
+                u_exec,
+                [u_res_a, RESULT_B],
+                [u_rel, SCALAR_SCHEMA],
+                SNAPSHOT,
+                require_signed=False,
+            )
+
 
 def test_verifier_reparses_tampered_snapshot_locator_and_deleted_slots() -> None:
     tampered_snap = ArtifactLocator.from_dict(SNAPSHOT.to_dict())

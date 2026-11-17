@@ -138,6 +138,8 @@ def _check_integrity_pair(error: _Error, code: str, given: Any, fresh: Any) -> N
         return
     if not isinstance(given, P1Integrity) or not isinstance(fresh, P1Integrity):
         raise error(code, "integrity: expected P1Integrity or None")
+    if (given.content_digest is None) != (given.signature_base64 is None):
+        raise error(code, "integrity: partial signature state dropped by wire form")
     if (given.content_digest, given.signature_base64) != (
         fresh.content_digest,
         fresh.signature_base64,

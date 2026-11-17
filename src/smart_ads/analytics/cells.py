@@ -496,11 +496,14 @@ def _reparse_p1(item: _T, cls: Any, *, code: str = "field_invalid") -> _T:
     if given_int is not None:
         if not isinstance(given_int, P1Integrity) or fresh.integrity is None:
             raise _fail("invalid_integrity", f"{cls.SCHEMA}: malformed P1 integrity")
-        pair = _guard_rs(
+        cd, sig = _guard_rs(
             "invalid_integrity",
             lambda: (given_int.content_digest, given_int.signature_base64),
         )
-        if pair != (fresh.integrity.content_digest, fresh.integrity.signature_base64):
+        if (cd is None) != (sig is None) or (cd, sig) != (
+            fresh.integrity.content_digest,
+            fresh.integrity.signature_base64,
+        ):
             raise _fail("invalid_integrity", f"{cls.SCHEMA}: partial P1 integrity state")
     return fresh  # type: ignore[return-value]
 

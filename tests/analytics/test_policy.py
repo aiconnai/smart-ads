@@ -1849,6 +1849,22 @@ def test_reparsed_rejects_partial_p1_integrity_and_always_eq_locators() -> None:
     with rejects("invalid_type"):
         pol.policy_applicability_code(signed, _eval_scope(), INSIDE_WINDOW)
 
+    for partial_slot in ("content_digest", "signature_base64"):
+        clean_unsigned = P1Integrity(
+            key_id="key:ed25519:" + "a" * 64,
+            key_registry_snapshot_locator=ArtifactLocator(
+                "smart_ads/key_authorization_registry/v1",
+                "sha256:" + "c" * 64,
+                object_ref="cell-object:sha256:" + "c" * 64,
+            ),
+        )
+        object.__setattr__(clean_unsigned, partial_slot, _AlwaysEq())
+        unsigned_partial = dataclasses.replace(_policy(), integrity=clean_unsigned)
+        with rejects("invalid_type"):
+            pol.policy_applicability_code(unsigned_partial, _eval_scope(), INSIDE_WINDOW)
+        with rejects("invalid_type"):
+            pol._reparsed(pol._fail, "invalid_type", P1Integrity, clean_unsigned)
+
     bad_reg_loc = ArtifactLocator(
         "smart_ads/key_authorization_registry/v1",
         "sha256:" + "c" * 64,
