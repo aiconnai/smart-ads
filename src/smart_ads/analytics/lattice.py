@@ -277,8 +277,14 @@ def _winner_precedence(row: AnalyticsLandingRow) -> tuple[bytes, bool, bytes]:
     )
 
 
-def select_winner(candidates: Iterable[AnalyticsLandingRow]) -> AnalyticsLandingRow:
-    """Return the section 6.2 winner among candidates that share one `fact_key`."""
+def order_by_winner(
+    candidates: Iterable[AnalyticsLandingRow],
+) -> tuple[AnalyticsLandingRow, ...]:
+    """Order candidates of one `fact_key` by the section 6.2 precedence, winner last.
+
+    One sort on the winner precedence; rejects what `select_winner` rejects (no
+    candidate, a non-row, several fact keys, or a duplicate candidate).
+    """
     ordered = order_candidates(candidates)
     if not ordered:
         raise ClosedValidationError("candidates: at least one candidate is required")
@@ -287,7 +293,16 @@ def select_winner(candidates: Iterable[AnalyticsLandingRow]) -> AnalyticsLanding
         raise ClosedValidationError(
             "candidates: a winner is defined for one fact_key; found several"
         )
-    return max(ordered, key=_winner_precedence)
+    by_precedence = tuple(sorted(ordered, key=_winner_precedence))
+    keys = [_winner_precedence(row) for row in by_precedence]
+    if any(left == right for left, right in zip(keys, keys[1:])):
+        raise ClosedValidationError("candidates: two candidates share one winner precedence")
+    return by_precedence
+
+
+def select_winner(candidates: Iterable[AnalyticsLandingRow]) -> AnalyticsLandingRow:
+    """Return the section 6.2 winner among candidates that share one `fact_key`."""
+    return order_by_winner(candidates)[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +702,7 @@ __all__ = [
     "classify_input_state",
     "classify_restatement",
     "derive_effective_state",
+    "order_by_winner",
     "order_candidates",
     "select_winner",
 ]

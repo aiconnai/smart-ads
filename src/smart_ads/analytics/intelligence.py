@@ -26,7 +26,7 @@ from smart_ads.analytics.cells import (
 )
 from smart_ads.analytics.formulas import divide_count_by_count, divide_money_by_money
 from smart_ads.analytics.lattice import (
-    classify_input_state, classify_restatement, order_candidates, select_winner,
+    classify_input_state, classify_restatement, order_by_winner, order_candidates,
 )
 from smart_ads.analytics.policy import (
     RULE_TYPE_RESTATEMENT, RULE_TYPES, AnalysisPolicy, AnalysisRule, EvaluationScope,
@@ -109,6 +109,7 @@ _MetricKey = tuple[str, str, str, str]
 _Window = tuple[str, str]
 # (finding_status, window_start_date, window_end_date, evidence_locators)
 _Outcome = tuple[str, str, str, tuple[ArtifactLocator, ...]]
+_Chains =Mapping[str, tuple[tuple[AnalyticsLandingRow, ...], ...]]
 
 
 class IntelligenceError(ClosedValidationError):
@@ -475,7 +476,7 @@ class _RuleInputs:
     currency: str
     result_locator: ArtifactLocator
     snapshot_locator: ArtifactLocator
-    history: tuple[AnalyticsLandingRow, ...]
+    history: _Chains
 
 
 # ---------------------------------------------------------------- metric relation
@@ -612,14 +613,16 @@ def _stalled_delivery(rule: StalledDeliveryRule, resource: str, inputs: _RuleInp
     return _outcome(FINDING_DETECTED, window, inputs) if quiet else None
 
 
-def _winner_chain(rows: list[AnalyticsLandingRow]) -> tuple[AnalyticsLandingRow, ...]:
-    """Candidates of one fact_key, oldest first, by repeated section 6.2 `select_winner`."""
-    remaining, newest_first = list(rows), []
-    while remaining:
-        winner = _guard("invalid_history", select_winner, remaining)
-        newest_first.append(winner)
-        remaining = [row for row in remaining if row is not winner]
-    return tuple(reversed(newest_first))
+def _history_chains(history: tuple[AnalyticsLandingRow, ...]) -> _Chains:
+    """Index history once: per resource, each fact key's candidates in section 6.2 order."""
+    groups: dict[bytes, list[AnalyticsLandingRow]] = {}
+    for row in history:
+        groups.setdefault(canonicalize_jcs(row.fact_key.to_dict()), []).append(row)
+    chains: dict[str, list[tuple[AnalyticsLandingRow, ...]]] = {}
+    for rows in groups.values():
+        chain = _guard("invalid_history", order_by_winner, rows)
+        chains.setdefault(chain[0].fact_key.resource_ref, []).append(chain)
+    return MappingProxyType({resource: tuple(found) for resource, found in chains.items()})
 
 
 def _restatement(rule: RestatementRule, resource: str, inputs: _RuleInputs) -> _Outcome | None:
@@ -629,13 +632,10 @@ def _restatement(rule: RestatementRule, resource: str, inputs: _RuleInputs) -> _
     finding_key already names the resource and window.
     """
     start, end = _window(inputs.end, rule.lookback_days)
-    groups: dict[bytes, list[AnalyticsLandingRow]] = {}
-    for row in inputs.history:
-        key = row.fact_key
-        if key.resource_ref == resource and start <= key.metric_date <= end:
-            groups.setdefault(canonicalize_jcs(key.to_dict()), []).append(row)
-    for rows in groups.values():
-        for prior, current in pairwise(_winner_chain(rows)):
+    for chain in inputs.history.get(resource, ()):
+        if not start <= chain[0].fact_key.metric_date <= end:
+            continue
+        for prior, current in pairwise(chain):
             if _guard("invalid_history", classify_restatement, prior, current) in rule.restatement_kinds:
                 evidence = _sorted_unique_locators((inputs.result_locator, inputs.snapshot_locator))
                 return FINDING_DETECTED, start, end, evidence
@@ -768,7 +768,7 @@ def _evaluate(
         currency=context.scope.currency,
         result_locator=entry.result_locator,
         snapshot_locator=evidence.bundle_dataset_snapshot_locator,
-        history=context.restatement_history,
+        history=_history_chains(context.restatement_history),
     )
     binding = _Binding(
         execution.locator(), entry.result_locator, entry.result_key, context.policy, context.policy.locator()

@@ -10,6 +10,7 @@ import base64
 import dataclasses
 import datetime
 import hashlib
+import functools
 import itertools
 import json
 from pathlib import Path
@@ -27,6 +28,7 @@ from smart_ads.analytics.intelligence import (
     IntelligenceError,
     evaluate_findings,
 )
+from smart_ads.analytics.lattice import classify_restatement, select_winner
 from smart_ads.analytics.policy import SaturationRule, WasteRule
 from smart_ads.analytics.policy import (
     AnalysisPolicy,
@@ -1074,6 +1076,88 @@ def test_restatement_findings_are_per_resource() -> None:
     assert [f.finding_key for f in findings] == [
         _expected_key("rule:restatement", "restatement", RES[2], _day(6), END)
     ]
+
+
+T0 = "2026-11-10T09:00:00.000000Z"
+ALL_KIND_SUBSETS = [
+    kinds
+    for size in (1, 2, 3)
+    for kinds in itertools.combinations(("state_flip", "tombstone", "value_change"), size)
+]
+
+
+def _oracle_restated(history: tuple[AnalyticsLandingRow, ...], kinds: tuple[str, ...]) -> bool:
+    """Previous behaviour: chain each fact key by repeatedly taking select_winner."""
+    groups: dict[bytes, list[AnalyticsLandingRow]] = {}
+    for row in history:
+        groups.setdefault(_jcs(row.fact_key.to_dict()), []).append(row)
+    for rows in groups.values():
+        newest_first: list[AnalyticsLandingRow] = []
+        while rows:
+            winner = select_winner(rows)
+            newest_first.append(winner)
+            rows = [row for row in rows if row is not winner]
+        chain = newest_first[::-1]
+        if any(classify_restatement(a, b) in kinds for a, b in zip(chain, chain[1:])):
+            return True
+    return False
+
+
+def _same_instant(first: str, second: str, *, first_digest_greater: bool) -> tuple[AnalyticsLandingRow, ...]:
+    """Two candidates at T1 (`first` raw 100, `second` raw 200) with the requested digest order."""
+    for index in range(1, 400):
+        a = _landing(presence=first, raw="100", obs=f"observation:a{index}")
+        b = _landing(presence=second, raw="200", obs=f"observation:b{index}")
+        if (a.semantic_observation_digest > b.semantic_observation_digest) == first_digest_greater:
+            return a, b
+    raise AssertionError("no digest ordering found")
+
+
+TIE_HISTORIES = {
+    f"{first}-vs-{second}-{'greater' if greater else 'smaller'}": (
+        _landing(raw="100", at=T0),
+        *_same_instant(first, second, first_digest_greater=greater),
+    )
+    for first, second in (
+        ("retracted_tombstone", "observed"),  # rule 2 against the digest order
+        ("retracted_tombstone", "missing"),
+        ("observed", "observed"),  # digest tie-break (rule 3) between two values
+        ("missing", "observed"),
+    )
+    for greater in (True, False)
+}
+
+
+@pytest.mark.parametrize("name", sorted(TIE_HISTORIES))
+@pytest.mark.parametrize("kinds", ALL_KIND_SUBSETS, ids="+".join)
+def test_restatement_with_same_instant_ties_matches_previous_behaviour(
+    name: str, kinds: tuple[str, ...]
+) -> None:
+    history = TIE_HISTORIES[name]
+    expected = _oracle_restated(history, kinds)
+    for order in (history, history[::-1]):
+        assert _restated(_restatement_rule(kinds=kinds), *order) is expected
+
+
+@functools.cache
+def _versions(count: int, change_at: int) -> tuple[AnalyticsLandingRow, ...]:
+    """`count` versions of one fact key, one microsecond apart; raw 5 until `change_at`, then 6."""
+    start = datetime.datetime(2026, 11, 10, 10)
+    return tuple(
+        _landing(
+            raw="6" if index >= change_at else "5",
+            at=(start + datetime.timedelta(microseconds=index)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        )
+        for index in range(count)
+    )
+
+
+@pytest.mark.parametrize(("change_at", "restated"), [(1000, True), (1999, True), (2000, False)])
+def test_restatement_over_two_thousand_versions_is_feasible(change_at: int, restated: bool) -> None:
+    history = _versions(2000, change_at)
+    for order in (history, history[::-1]):
+        assert _restated(_restatement_rule(kinds=("value_change",)), *order) is restated
+    assert not _restated(_restatement_rule(kinds=("state_flip", "tombstone")), *history)
 
 
 @pytest.mark.parametrize(
