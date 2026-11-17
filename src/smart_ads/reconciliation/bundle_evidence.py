@@ -32,8 +32,8 @@ from smart_ads.reconciliation.bundle_common import (
     FACT_RECONCILIATION_SCHEMA,
     Bundle7BDefectError,
     closed,
+    artifact_locator_for,
     guard,
-    located,
     metric_ref,
     parse_locator,
     require_collection,
@@ -74,7 +74,7 @@ COMPARISON_MEMBERS: Final[tuple[str, ...]] = (
 def collection_result_locator(result: CollectionResult) -> ArtifactLocator:
     """The content-addressed ``collection_result/v1`` locator of a resolved result."""
     require_type(result, CollectionResult, label="collection_result")
-    return located(CollectionResult.SCHEMA, result)
+    return artifact_locator_for(CollectionResult.SCHEMA, result)
 
 
 def complete_facts(result: CollectionResult) -> tuple[NormalizedCollectionFact, ...]:

@@ -17,8 +17,8 @@ from smart_ads.reconciliation.bundle_common import (
     REQUIRED_7B_METRICS,
     RUN_CONTEXT_SCHEMA,
     Bundle7BDefectError,
+    artifact_locator_for,
     guard,
-    located,
     require_argument_locator,
     require_type,
     scope_ref,
@@ -108,7 +108,7 @@ def _resolve_profile(
             "tolerance_profile_metric_mismatch", f"{label}: profile closes another metric"
         )
     guard("tolerance_profile_unbound", label, lambda: profile.require_bound_to(**binding))
-    return profile, located(ToleranceProfile.SCHEMA, profile)
+    return profile, artifact_locator_for(ToleranceProfile.SCHEMA, profile)
 
 
 def resolve_profiles(tolerance_profiles: object, binding: Mapping[str, Any]) -> ResolvedProfiles:

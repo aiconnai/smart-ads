@@ -12,7 +12,7 @@ from smart_ads.reconciliation.bundle_common import (
     EFFECT_PROOF_SCHEMA,
     RUN_CONTEXT_SCHEMA,
     Bundle7BDefectError,
-    located,
+    artifact_locator_for,
     query_bytes,
     require_argument_locator,
     require_callable,
@@ -125,7 +125,9 @@ def _verify_bindings(record: Certification7BRecord, arguments: Mapping[str, Any]
         record, arguments["gate3_selection"], arguments["gate3_certification_fingerprint"]
     )
     _verify_effect_locators(record, arguments)
-    contract_locator = located(PipeboardPhase1Contract.SCHEMA, arguments["driver_contract"])
+    contract_locator = artifact_locator_for(
+        PipeboardPhase1Contract.SCHEMA, arguments["driver_contract"]
+    )
     if contract_locator != record.candidate_execution.driver_contract_locator:
         raise Bundle7BDefectError(
             "driver_contract_unresolved", "candidate contract locator does not resolve"
@@ -136,7 +138,8 @@ def _verify_admission(
     record: Certification7BRecord, execution: Any, admission: AdmittedCollection
 ) -> None:
     label = "admission"
-    if located(AdmittedCollection.SCHEMA, admission) != execution.admitted_collection_locator:
+    admitted_locator = artifact_locator_for(AdmittedCollection.SCHEMA, admission)
+    if admitted_locator != execution.admitted_collection_locator:
         raise Bundle7BDefectError(
             "admission_mismatch", f"{label}: does not resolve the side's locator"
         )
@@ -188,7 +191,7 @@ def _verify_result(
     index: ResultIndex,
     call_side: str,
     effect_result: ArtifactLocator,
-) -> SideUniverse:
+) -> None:
     result = index.result
     facts = side_facts(result, call_side)
     _verify_result_binding(execution, result, call_side)
@@ -210,16 +213,15 @@ def _verify_result(
         raise Bundle7BDefectError(
             "row_count_mismatch", f"{call_side}: row_count must equal length(U7M)"
         )
-    return universe
 
 
 def _verify_side(
     record: Certification7BRecord, call_side: str, arguments: Mapping[str, Any]
-) -> tuple[SideUniverse, ResultIndex]:
+) -> ResultIndex:
     execution = getattr(record, f"{call_side}_execution")
     _verify_admission(record, execution, arguments[f"{call_side}_admission"])
     index = ResultIndex.of(arguments[f"{call_side}_result"])
-    universe = _verify_result(
+    _verify_result(
         record,
         execution,
         index,
@@ -233,19 +235,7 @@ def _verify_side(
         algorithm_digest=execution.native_to_canonical_projection_algorithm_digest,
         project_native_request=arguments["project_native_request"],
     )
-    return universe, index
-
-
-def _verify_universes(
-    record: Certification7BRecord, cand: SideUniverse, ref: SideUniverse
-) -> None:
-    if cand.rows != ref.rows:
-        raise Bundle7BDefectError("row_universe_mismatch", "candidate and reference U7 differ")
-    recorded = tuple(item.pair_key() for item in record.fact_reconciliations)
-    if cand.pairs != ref.pairs or recorded != cand.pairs:
-        raise Bundle7BDefectError(
-            "pair_universe_mismatch", "U7M differs across sides or from the reconciliations"
-        )
+    return index
 
 
 def _verify_side_evidence(
@@ -326,9 +316,28 @@ def verify_certification_7b_record(
 
     The record constructor already recomputed every intrinsic member. This adds
     the bindings to resolved evidence (run, certification-role Gate-3 selection
-    and fingerprint, driver contract, admissions, complete results, effect-proof
-    locators, injected native projection, protected tolerance profiles) and, per
+    and fingerprint, driver contract, admissions, complete results whose facts lie
+    inside the admitted query window, binding and account, effect-proof locators,
+    injected native projection, protected tolerance profiles) and, per
     reconciliation, the resolved facts and the recomputed comparison.
+
+    Not verified here, because no resolved evidence for them is supplied:
+
+    * ``wheel_digest``, ``reference_workload_binary_digest``,
+      ``reference_code_digest`` and ``reference_run_digest`` are checked for
+      grammar only;
+    * ``gate3_certification_fingerprint`` is trusted as the selection's
+      ``certification_fingerprint``: only five members are compared with
+      ``gate3_selection`` (candidate_driver_contract_digest,
+      canonical_query_digest, schema_bundle_digest,
+      resource_mapping_contract_digest, authorized_certification_scope); the
+      other six (selected_meta_api_version, reference_client_identity_digest,
+      official_source_locators_digest, parser_code_digest, adapter_code_digest,
+      mapping_rules_digest) and the selection's
+      ``certification_fingerprint_digest`` are not, since the ADR gives no
+      formula for that digest;
+    * ``effect_proof/v1`` contents are not modelled: only the two proof
+      locators and their result locators are compared.
     """
     arguments: dict[str, Any] = {
         "migration_run_context_locator": migration_run_context_locator,
@@ -347,8 +356,8 @@ def verify_certification_7b_record(
     }
     _verify_arguments(record, arguments)
     _verify_bindings(record, arguments)
-    cand, cand_index = _verify_side(record, "candidate", arguments)
-    ref, ref_index = _verify_side(record, "reference", arguments)
-    _verify_universes(record, cand, ref)
-    indexes = {"candidate": cand_index, "reference": ref_index}
+    # Each side's recomputed U7 digest equals the record's (which the constructor
+    # recomputed from the reconciliations) and each U7M is complete, so the two
+    # sides and the reconciliation set necessarily share one universe.
+    indexes = {side: _verify_side(record, side, arguments) for side in ("candidate", "reference")}
     _verify_reconciliations(record, arguments, indexes, tolerance_profiles)

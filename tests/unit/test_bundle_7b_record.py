@@ -117,6 +117,41 @@ def test_record_round_trips_with_every_yaml_member(world: World) -> None:
     assert b7.Certification7BRecord.SCHEMA == "smart_ads/certification_7b_record/v1"
 
 
+def test_public_key_set_constants_match_every_serialized_object(world: World) -> None:
+    parsed = world.parsed()
+    recon = parsed.fact_reconciliations[0]
+    pairs = [
+        (b7.Certification7BRecord.CORE_KEYS, parsed.to_dict()),
+        (b7.CandidateExecution.KEYS, parsed.candidate_execution.to_dict()),
+        (b7.ReferenceExecution.KEYS, parsed.reference_execution.to_dict()),
+        (b7.RowPairing.KEYS, parsed.row_pairing.to_dict()),
+        (b7.Gate3CertificationFingerprint.KEYS,
+         parsed.candidate_execution.gate3_certification_fingerprint.to_dict()),
+        (b7.NativeRequestProjection.CORE_KEYS,
+         parsed.reference_execution.native_request_projection.to_dict()),
+        (b7.FactReconciliation.KEYS, recon.to_dict()),
+        (b7.ReconciliationSide.KEYS, recon.candidate.to_dict()),
+        (b7.FactEvidenceSelector.KEYS, recon.candidate.fact_evidence_selector.to_dict()),
+        (b7.MetricPairKey.KEYS, recon.pair_key().to_dict()),
+    ]
+    for keys, serialized in pairs:
+        assert isinstance(keys, tuple)
+        assert keys == tuple(serialized)
+    assert b7.FactReconciliation.SCHEMA == "smart_ads/fact_reconciliation/v1"
+    assert b7.FactEvidenceSelector.SCHEMA == "smart_ads/fact_evidence_selector/v1"
+    assert b7.NativeRequestProjection.SCHEMA == "smart_ads/native_request_projection/v1"
+
+
+def test_facade_exports_the_renamed_locator_helper() -> None:
+    assert "artifact_locator_for" in b7.__all__
+    assert "located" not in b7.__all__
+    fp = b7.Gate3CertificationFingerprint.from_dict(fingerprint_dict())
+    assert b7.artifact_locator_for("smart_ads/finding/v1", fp).artifact_type == (
+        "smart_ads/finding/v1"
+    )
+    assert "native_projection_not_closed" not in b7.DEFECT_CODES
+
+
 def test_record_types_are_immutable(world: World) -> None:
     parsed = world.parsed()
     with pytest.raises(dataclasses.FrozenInstanceError):

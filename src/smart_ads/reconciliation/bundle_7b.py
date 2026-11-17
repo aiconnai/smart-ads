@@ -15,6 +15,29 @@ Malformed evidence (grammar, extra or missing member, wrong order, divergent
 digest, failed binding) raises ``Bundle7BDefectError`` with a closed ``code``.
 Legitimate failed comparisons (``mismatch``, ``not_comparable``) are values.
 No float, clock, I/O or signature verification is involved.
+
+Not verified, because no resolved evidence for them is supplied:
+
+* ``wheel_digest``, ``reference_workload_binary_digest``, ``reference_code_digest``
+  and ``reference_run_digest`` are checked for grammar only;
+* the ``gate3_certification_fingerprint`` argument of the verifier is trusted as
+  the selection's ``certification_fingerprint``: only five of its members are
+  compared with ``ResolvedGate3SelectionState``; the other six
+  (selected_meta_api_version, reference_client_identity_digest,
+  official_source_locators_digest, parser_code_digest, adapter_code_digest,
+  mapping_rules_digest) and ``certification_fingerprint_digest`` are not, since
+  the ADR gives no formula for that digest;
+* ``effect_proof/v1`` contents are not modelled; only the two proof locators,
+  their distinctness and their result locators are checked.
+
+Choices the ADR does not fix (open decisions, kept as implemented):
+
+* ``required_metrics`` is pinned to the YAML order ``[impressions, clicks, spend]``;
+* the ``native_request_projection/v1`` member names, and its endpoint grammar;
+* ``native_request_digest`` is taken over the full ``to_dict()``, ``integrity`` included;
+* a partial ``collection_result/v1`` raises ``collection_result_incomplete``
+  instead of returning a failed value;
+* ``X(f)`` for ``fact_projection_digest`` is the complete normalized fact.
 """
 from __future__ import annotations
 
@@ -27,7 +50,7 @@ from smart_ads.reconciliation.bundle_common import (
     NATIVE_REQUEST_PROJECTION_SCHEMA,
     REQUIRED_7B_METRICS,
     Bundle7BDefectError,
-    located,
+    artifact_locator_for,
 )
 from smart_ads.reconciliation.bundle_evidence import (
     FactEvidenceSelector,
@@ -96,6 +119,7 @@ __all__ = [
     "ReconciliationSide",
     "ReferenceExecution",
     "RowPairing",
+    "artifact_locator_for",
     "check_native_request",
     "collection_result_locator",
     "compute_canonical_fact_key_digest",
@@ -104,7 +128,6 @@ __all__ = [
     "compute_row_universe",
     "compute_row_universe_digest",
     "expected_pair_universe",
-    "located",
     "reconcile_7b_fact_sets",
     "require_same_fingerprint",
     "resolve_fact_evidence",

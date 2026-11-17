@@ -86,7 +86,6 @@ DEFECT_CODES: Final[frozenset[str]] = frozenset(
         "canonical_fact_key_digest_mismatch",
         "asserted_comparison_malformed",
         # native request projection and P1 integrity
-        "native_projection_not_closed",
         "native_projection_forbidden_content",
         "native_projection_mismatch",
         "native_request_digest_mismatch",
@@ -291,7 +290,7 @@ def parse_member_locator(
     return parse_locator(mapping[name], artifact_type, label=f"{label}.{name}")
 
 
-def located(artifact_type: str, artifact: Any) -> ArtifactLocator:
+def artifact_locator_for(artifact_type: str, artifact: Any) -> ArtifactLocator:
     """Repo locator convention: ``for_canonical_bytes(type, RFC8785(artifact.to_dict()))``."""
     return ArtifactLocator.for_canonical_bytes(artifact_type, canonicalize_jcs(artifact.to_dict()))
 

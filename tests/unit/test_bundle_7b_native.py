@@ -67,14 +67,14 @@ def test_native_projection_round_trips_with_only_the_adr_members() -> None:
      "time_increment", "limit", "url", "query"],
 )
 def test_native_projection_rejects_any_extra_member(extra: str) -> None:
-    assert native_defect(native_dict(**{extra: "x"})) == "native_projection_not_closed"
+    assert native_defect(native_dict(**{extra: "x"})) == "closed_member_set"
 
 
 @pytest.mark.parametrize("missing", NATIVE_KEYS)
 def test_native_projection_rejects_any_missing_member(missing: str) -> None:
     data = native_dict()
     del data[missing]
-    assert native_defect(data) == "native_projection_not_closed"
+    assert native_defect(data) == "closed_member_set"
 
 
 @pytest.mark.parametrize(

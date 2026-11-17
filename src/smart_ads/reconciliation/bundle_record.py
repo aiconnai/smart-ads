@@ -249,7 +249,8 @@ class Certification7BRecord:
 
 
 def _require_required_metrics(value: object, *, label: str) -> None:
-    """Exactly ``[impressions, clicks, spend]`` in YAML order (the ADR literal; not UTF-8 sorted)."""
+    """Exactly ``[impressions, clicks, spend]``: the ADR's YAML order, a choice it does not
+    fix beyond the literal (not UTF-8 sorted)."""
     if not isinstance(value, (list, tuple)) or tuple(value) != REQUIRED_7B_METRICS:
         raise Bundle7BDefectError(
             "fixed_member_mismatch",

@@ -252,7 +252,7 @@ class NativeRequestProjection:
         actual = set(mapping)
         if actual != keys:
             raise Bundle7BDefectError(
-                "native_projection_not_closed",
+                "closed_member_set",
                 f"{label}: missing={sorted(keys - actual)} extra={sorted(actual - keys)}",
             )
         if mapping["$schema"] != cls.SCHEMA:
