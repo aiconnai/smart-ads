@@ -314,46 +314,23 @@ def verify_certification_7b_record(
 ) -> None:
     """Recompute the whole 7B record from in-memory resolved evidence; any failure raises.
 
-    The record constructor already recomputed every intrinsic member. This adds
-    the bindings to resolved evidence (run, certification-role Gate-3 selection
-    and fingerprint, driver contract, admissions, complete results whose facts lie
-    inside the admitted query window, binding and account, effect-proof locators,
-    injected native projection, protected tolerance profiles) and, per
-    reconciliation, the resolved facts and the recomputed comparison.
-
-    Not verified here, because no resolved evidence for them is supplied:
-
-    * ``wheel_digest``, ``reference_workload_binary_digest``,
-      ``reference_code_digest`` and ``reference_run_digest`` are checked for
-      grammar only;
-    * ``gate3_certification_fingerprint`` is trusted as the selection's
-      ``certification_fingerprint``: only five members are compared with
-      ``gate3_selection`` (candidate_driver_contract_digest,
-      canonical_query_digest, schema_bundle_digest,
-      resource_mapping_contract_digest, authorized_certification_scope); the
-      other six (selected_meta_api_version, reference_client_identity_digest,
-      official_source_locators_digest, parser_code_digest, adapter_code_digest,
-      mapping_rules_digest) and the selection's
-      ``certification_fingerprint_digest`` are not, since the ADR gives no
-      formula for that digest;
-    * ``effect_proof/v1`` contents are not modelled: only the two proof
-      locators and their result locators are compared.
+    Adds to the record's intrinsic checks the bindings to resolved evidence: run,
+    certification-role Gate-3 selection and fingerprint, driver contract,
+    admissions, complete results whose facts lie in the admitted query window,
+    binding and account, effect-proof locators, the injected native projection,
+    protected tolerance profiles and, per reconciliation, the resolved facts and
+    the recomputed comparison. Not verified (no resolved evidence is supplied):
+    ``wheel_digest``, ``reference_workload_binary_digest``, ``reference_code_digest``
+    and ``reference_run_digest`` are checked for grammar only; the
+    ``gate3_certification_fingerprint`` argument is trusted as the selection's
+    fingerprint, only five members being compared with ``gate3_selection`` and the
+    other six (selected_meta_api_version, reference_client_identity_digest,
+    official_source_locators_digest, parser_code_digest, adapter_code_digest,
+    mapping_rules_digest) and ``certification_fingerprint_digest`` not, since the
+    ADR gives no formula; ``effect_proof/v1`` contents are not modelled.
     """
-    arguments: dict[str, Any] = {
-        "migration_run_context_locator": migration_run_context_locator,
-        "gate3_selection": gate3_selection,
-        "gate3_certification_fingerprint": gate3_certification_fingerprint,
-        "driver_contract": driver_contract,
-        "candidate_admission": candidate_admission,
-        "reference_admission": reference_admission,
-        "candidate_result": candidate_result,
-        "reference_result": reference_result,
-        "candidate_effect_proof_locator": candidate_effect_proof_locator,
-        "candidate_effect_result_locator": candidate_effect_result_locator,
-        "reference_effect_proof_locator": reference_effect_proof_locator,
-        "reference_effect_result_locator": reference_effect_result_locator,
-        "project_native_request": project_native_request,
-    }
+    # Snapshot of the keyword arguments by name (taken before any other local exists).
+    arguments: dict[str, Any] = dict(locals())
     _verify_arguments(record, arguments)
     _verify_bindings(record, arguments)
     # Each side's recomputed U7 digest equals the record's (which the constructor
