@@ -8,7 +8,12 @@ from typing import Any
 
 import pytest
 
-from smart_ads.contracts.jcs import ArtifactLocator, canonicalize_jcs
+from smart_ads.contracts.jcs import (
+    ArtifactLocator,
+    P1Integrity,
+    canonicalize_jcs,
+    p1_content_digest,
+)
 from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import (
     AdmittedCollection,
@@ -40,6 +45,7 @@ from tests.unit._bundle_7b_builders import (
     CLICKS,
     GATE3_LOC,
     IMPRESSIONS,
+    KEY_ID,
     QUERY_DIGEST,
     REFERENCE_AT,
     RUN_LOC,
@@ -56,8 +62,11 @@ from tests.unit._bundle_7b_builders import (
     oracle_domain_digest,
     oracle_jcs,
     oracle_result_locator,
+    profile_dict,
     reconcile,
+    registry_loc,
     sha,
+    signature,
 )
 
 CANDIDATE_PROVIDER = "provider-target:pipeboard-hosted"
@@ -305,6 +314,24 @@ def verify_defect(world: World, record: dict[str, Any] | None = None, **override
     return code_of(excinfo)
 
 
+def sign_p1_dict(data: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(data)
+    out["integrity"] = {
+        "key_id": KEY_ID,
+        "key_registry_snapshot_locator": registry_loc().to_dict(),
+    }
+    out["integrity"].update(content_digest=p1_content_digest(out), signature_base64=signature())
+    return out
+
+
+def sign_p1_obj(obj: Any) -> Any:
+    return type(obj).from_dict(sign_p1_dict(obj.to_dict()), require_signed=True)
+
+
+def unsigned_p1_integrity() -> P1Integrity:
+    return P1Integrity(key_id=KEY_ID, key_registry_snapshot_locator=registry_loc())
+
+
 def _execution_dicts(
     *,
     locators: dict[str, ArtifactLocator],
@@ -313,7 +340,10 @@ def _execution_dicts(
     row_count: int,
     row_digest: str,
     fp: dict[str, str],
+    query: CanonicalQueryContract | None = None,
+    signed_p1: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    q = canonical_query() if query is None else query
     drv_loc = locators["driver"]
     cand_native = native_dict(
         endpoint="/mcp/tools/get_insights",
@@ -321,9 +351,12 @@ def _execution_dicts(
         endpoint_version_ref="opaque-driver-contract:" + drv_loc.content_digest,
     )
     ref_native = native_dict()
+    if signed_p1:
+        cand_native = sign_p1_dict(cand_native)
+        ref_native = sign_p1_dict(ref_native)
     shared = {
-        "canonical_query_projection": canonical_query().to_dict(),
-        "canonical_query_projection_digest": QUERY_DIGEST,
+        "canonical_query_projection": q.to_dict(),
+        "canonical_query_projection_digest": q.canonical_query_digest,
         "result_status": "complete",
         "gate3_certification_fingerprint": fp,
         "row_count": row_count,
@@ -381,14 +414,19 @@ def _row_digest(reconciliations: tuple[b7.FactReconciliation, ...]) -> str:
 
 
 def _record(
-    candidate: dict[str, Any], reference: dict[str, Any], rec: b7.Reconciliation7BResult
+    candidate: dict[str, Any],
+    reference: dict[str, Any],
+    rec: b7.Reconciliation7BResult,
+    *,
+    query: CanonicalQueryContract | None = None,
 ) -> dict[str, Any]:
+    q = canonical_query() if query is None else query
     return {
         "$schema": "smart_ads/certification_7b_record/v1",
         "migration_run_context_locator": RUN_LOC.to_dict(),
         "gate3_selection_locator": GATE3_LOC.to_dict(),
-        "canonical_query_contract": canonical_query().to_dict(),
-        "canonical_query_digest": QUERY_DIGEST,
+        "canonical_query_contract": q.to_dict(),
+        "canonical_query_digest": q.canonical_query_digest,
         "required_metrics": [IMPRESSIONS, CLICKS, SPEND],
         "candidate_execution": candidate,
         "reference_execution": reference,
@@ -399,14 +437,16 @@ def _record(
     }
 
 
-def _gate3_state(drv_loc: ArtifactLocator, fp: dict[str, str]) -> ResolvedGate3SelectionState:
+def _gate3_state(
+    drv_loc: ArtifactLocator, fp: dict[str, str], query_digest: str = QUERY_DIGEST
+) -> ResolvedGate3SelectionState:
     return ResolvedGate3SelectionState(
         locator=GATE3_LOC,
         selection_role="certification",
         revalidated_at_utc="2026-11-11T04:00:00Z",
         valid_until_utc="2026-11-11T04:15:00Z",
         candidate_driver_contract_digest=drv_loc.content_digest,
-        canonical_query_digest=QUERY_DIGEST,
+        canonical_query_digest=query_digest,
         schema_bundle_digest=fp["schema_bundle_digest"],
         resource_mapping_contract_digest=fp["resource_mapping_contract_digest"],
         authorized_certification_scope=fp["authorized_certification_scope"],
@@ -415,12 +455,16 @@ def _gate3_state(drv_loc: ArtifactLocator, fp: dict[str, str]) -> ResolvedGate3S
 
 
 def _admissions(
-    drv_loc: ArtifactLocator, reg_loc: ArtifactLocator, separate: bool
+    drv_loc: ArtifactLocator,
+    reg_loc: ArtifactLocator,
+    separate: bool,
+    query: CanonicalQueryContract | None = None,
 ) -> tuple[AdmittedCollection, AdmittedCollection]:
-    admission = make_admission(canonical_query(), drv_loc, reg_loc)
+    q = canonical_query() if query is None else query
+    admission = make_admission(q, drv_loc, reg_loc)
     if not separate:
         return admission, admission
-    other = make_admission(canonical_query(), drv_loc, reg_loc, admission_id="admission:adm-7b-002")
+    other = make_admission(q, drv_loc, reg_loc, admission_id="admission:adm-7b-002")
     return admission, other
 
 
@@ -434,14 +478,26 @@ def build_world(
     require_verified: bool = True,
     separate_reference_admission: bool = False,
     scope: str = SCOPE,
+    query_scope: str = SCOPE,
     query_checked: bool = True,
+    signed_p1: bool = False,
 ) -> World:
     """Build a consistent world; ``query_checked=False`` lets reconcile accept facts outside
     the admitted query so that the verifier's own check can be reached."""
+    query = (
+        canonical_query()
+        if query_scope == SCOPE
+        else dataclasses.replace(canonical_query(), resource_scope_ref=query_scope)
+    )
     contract = make_pipeboard_contract()
+    if signed_p1:
+        contract = sign_p1_obj(contract)
     drv_loc = locate(PipeboardPhase1Contract.SCHEMA, contract)
     reg_loc = loc("smart_ads/private_registry_snapshot/v1", "e")
-    admission, ref_admission = _admissions(drv_loc, reg_loc, separate_reference_admission)
+    admission, ref_admission = _admissions(drv_loc, reg_loc, separate_reference_admission, query)
+    if signed_p1:
+        admission = sign_p1_obj(admission)
+        ref_admission = sign_p1_obj(ref_admission)
     locators = {
         "driver": drv_loc,
         "registry": reg_loc,
@@ -458,23 +514,47 @@ def build_world(
         side="reference", retrieved_at=ref_at,
         admitted_locator=locators["reference_admission"], registry_locator=reg_loc,
     )
+    if signed_p1:
+        cand = sign_p1_obj(cand)
+        ref = sign_p1_obj(ref)
+    q_digest = query.canonical_query_digest
     fp = fingerprint_dict(candidate_driver_contract_digest=drv_loc.content_digest,
-                          canonical_query_digest=QUERY_DIGEST,
+                          canonical_query_digest=q_digest,
                           authorized_certification_scope=scope)
-    profiles = default_profiles(scope)
+    profiles = {
+        IMPRESSIONS: profile_dict(IMPRESSIONS),
+        CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000", scope=scope,
+                             query_digest=q_digest),
+        SPEND: profile_dict(SPEND),
+    }
     with pytest.MonkeyPatch.context() as patch:
         if not query_checked:
             patch.setattr(bundle_reconcile, "require_facts_in_query", lambda *a, **k: None)
-        rec = reconcile(cand, ref, profiles, authorized_certification_scope=scope)
+        rec = reconcile(
+            cand, ref, profiles,
+            canonical_query_contract=query,
+            authorized_certification_scope=scope,
+        )
     if require_verified and rec.bundle_outcome != "verified":
         raise AssertionError(f"world is not verified: {rec.defect_codes}")
     candidate, reference = _execution_dicts(
         locators=locators, cand=cand, ref=ref, row_count=len(rec.fact_reconciliations),
         row_digest=_row_digest(rec.fact_reconciliations), fp=fp,
+        query=query, signed_p1=signed_p1,
+    )
+    record_data = _record(candidate, reference, rec, query=query)
+    if signed_p1:
+        record_data = sign_p1_dict(record_data)
+    algo: Any = (
+        pinned_algorithm
+        if query_scope == SCOPE
+        else lambda proj, dig: dataclasses.replace(
+            pinned_algorithm(proj, dig), resource_scope_ref=query_scope
+        )
     )
     kwargs = {
         "migration_run_context_locator": RUN_LOC,
-        "gate3_selection": _gate3_state(drv_loc, fp),
+        "gate3_selection": _gate3_state(drv_loc, fp, q_digest),
         "gate3_certification_fingerprint": b7.Gate3CertificationFingerprint.from_dict(fp),
         "driver_contract": contract,
         "candidate_admission": admission,
@@ -486,9 +566,9 @@ def build_world(
         "reference_effect_proof_locator": REF_EFFECT,
         "reference_effect_result_locator": oracle_result_locator(ref),
         "tolerance_profiles": profiles,
-        "project_native_request": pinned_algorithm,
+        "project_native_request": algo,
     }
-    return World(record=_record(candidate, reference, rec), kwargs=kwargs)
+    return World(record=record_data, kwargs=kwargs)
 
 
 @pytest.fixture(scope="module")

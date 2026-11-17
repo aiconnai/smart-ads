@@ -29,6 +29,7 @@ from smart_ads.reconciliation.bundle_common import (
     parse_member_locator,
     parse_query,
     reparsed,
+    require_bool,
     require_member,
     require_type,
     scope_ref,
@@ -56,8 +57,8 @@ _FINGERPRINT_DIGEST_MEMBERS: Final[tuple[str, ...]] = (
     "schema_bundle_digest",
     "resource_mapping_contract_digest",
 )
-# The selected version is copied into `api-version:<v>`, which must stay an opaque_ref.
-_API_VERSION_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+# The selected version is copied into `api-version:<v>` (closed Meta API version grammar).
+_API_VERSION_RE: Final[re.Pattern[str]] = re.compile(r"\Av[0-9]+(?:\.[0-9]+)*\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +235,9 @@ def _check_common_execution(execution: Any, *, label: str) -> None:
     )
 
 
-def _parse_common_execution(mapping: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+def _parse_common_execution(
+    mapping: Mapping[str, Any], *, label: str, require_signed: bool = False
+) -> dict[str, Any]:
     return {
         **{name: mapping[name] for name in _COMMON_EXECUTION_RAW},
         "admitted_collection_locator": parse_member_locator(
@@ -244,7 +247,7 @@ def _parse_common_execution(mapping: Mapping[str, Any], *, label: str) -> dict[s
             mapping, "effect_proof_locator", EFFECT_PROOF_SCHEMA, label=label
         ),
         "native_request_projection": NativeRequestProjection.from_dict(
-            mapping["native_request_projection"]
+            mapping["native_request_projection"], require_signed=require_signed
         ),
         "canonical_query_projection": parse_query(
             mapping["canonical_query_projection"], label=f"{label}.canonical_query_projection"
@@ -352,7 +355,8 @@ class CandidateExecution:
         return _execution_dict(self, self.KEYS)
 
     @classmethod
-    def from_dict(cls, data: object) -> CandidateExecution:
+    def from_dict(cls, data: object, *, require_signed: bool = False) -> CandidateExecution:
+        require_bool(require_signed, label="require_signed")
         label = "candidate_execution"
         mapping = closed(data, frozenset(cls.KEYS), label=label)
         own = ("driver_id", "source_contract_ref", *_CANDIDATE_DIGESTS)
@@ -364,7 +368,7 @@ class CandidateExecution:
             driver_contract_locator=parse_member_locator(
                 mapping, "driver_contract_locator", DRIVER_CONTRACT_SCHEMA, label=label
             ),
-            **_parse_common_execution(mapping, label=label),
+            **_parse_common_execution(mapping, label=label, require_signed=require_signed),
         )
 
 
@@ -435,6 +439,10 @@ class ReferenceExecution:
             prefixes=frozenset({"api-version"}),
             label=f"{label}.source_contract_ref",
         )
+        if _API_VERSION_RE.fullmatch(self.source_contract_ref.split(":", 1)[1]) is None:
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.source_contract_ref: invalid api-version"
+            )
         fingerprint = self.gate3_certification_fingerprint
         require_member(
             fingerprint,
@@ -451,13 +459,14 @@ class ReferenceExecution:
         return _execution_dict(self, self.KEYS)
 
     @classmethod
-    def from_dict(cls, data: object) -> ReferenceExecution:
+    def from_dict(cls, data: object, *, require_signed: bool = False) -> ReferenceExecution:
+        require_bool(require_signed, label="require_signed")
         label = "reference_execution"
         mapping = closed(data, frozenset(cls.KEYS), label=label)
         own = ("reference_workload_ref", "source_contract_ref", "implementation_kind")
         return cls(
             **{name: mapping[name] for name in (*own, *_REFERENCE_DIGESTS)},
-            **_parse_common_execution(mapping, label=label),
+            **_parse_common_execution(mapping, label=label, require_signed=require_signed),
         )
 
 

@@ -51,7 +51,9 @@ from tests.unit._bundle_7b_world import (
     make_pipeboard_contract,
     record_defect,
     reseal,
+    sign_p1_dict,
     tampered,
+    unsigned_p1_integrity,
     verify_defect,
     world,  # noqa: F401 - pytest fixture
 )
@@ -131,7 +133,7 @@ def test_verifier_fails_on_any_single_member_of_the_resolved_fingerprint(
 @pytest.mark.parametrize(
     "member",
     ["reference_client_identity_digest", "official_source_locators_digest",
-     "schema_bundle_digest", "resource_mapping_contract_digest", "authorized_certification_scope"],
+     "schema_bundle_digest", "resource_mapping_contract_digest"],
 )
 def test_verifier_rejects_a_fingerprint_changed_identically_on_both_sides(
     world: World, member: str
@@ -223,14 +225,118 @@ def test_verifier_binds_the_candidate_result_registry_snapshot(world: World) -> 
     )
 
 
-def test_verifier_takes_the_profile_binding_scope_from_the_fingerprint() -> None:
-    other_scope = build_world(scope="scope:other-campaigns")
-    other_scope.verify()
-    # The query's resource_scope_ref is scope:campaigns-active; a profile bound to it fails.
-    query_scoped = default_profiles("scope:campaigns-active")
-    assert verify_defect(other_scope, tolerance_profiles=query_scoped) == (
-        "tolerance_profile_unbound"
+def test_verifier_binds_the_reference_result_registry_snapshot(world: World) -> None:
+    base = world.kwargs["reference_result"]
+    moved = collection_result(
+        facts_for(BASE_VALUES, side="reference"),
+        side="reference",
+        retrieved_at=base.retrieval_context.retrieved_at_utc,
+        admitted_locator=base.admitted_collection_locator,
+        registry_locator=loc("smart_ads/private_registry_snapshot/v1", "f"),
     )
+    assert verify_defect(
+        world,
+        reference_result=moved,
+        reference_effect_result_locator=oracle_result_locator(moved),
+    ) == "collection_result_mismatch"
+
+
+@pytest.mark.parametrize("side", ["candidate", "reference"])
+def test_verifier_binds_admission_gate3_prerequisite_locator_on_both_sides(
+    world: World, side: str
+) -> None:
+    base: AdmittedCollection = world.kwargs[f"{side}_admission"]
+    wrong_prereq = dataclasses.replace(
+        base.purpose_prerequisite_locators,
+        gate3_selection_receipt_locator=loc("smart_ads/gate3_selection_receipt/v1", "e"),
+    )
+    admission = dataclasses.replace(base, purpose_prerequisite_locators=wrong_prereq)
+    record = tampered(
+        world.record,
+        (f"{side}_execution", "admitted_collection_locator"),
+        locate(AdmittedCollection.SCHEMA, admission).to_dict(),
+    )
+    assert verify_defect(world, record, **{f"{side}_admission": admission}) == "admission_mismatch"
+
+
+def test_verifier_binds_reference_admission_registry_snapshot_to_record(world: World) -> None:
+    base: AdmittedCollection = world.kwargs["reference_admission"]
+    other_reg = loc("smart_ads/private_registry_snapshot/v1", "f")
+    ref_adm = make_admission(
+        canonical_query(),
+        base.driver_contract_locator,
+        other_reg,
+        admission_id="admission:adm-7b-ref-other-reg",
+    )
+    ref_adm_loc = locate(AdmittedCollection.SCHEMA, ref_adm)
+    ref_res = collection_result(
+        facts_for(BASE_VALUES, side="reference"),
+        side="reference",
+        retrieved_at=world.kwargs["reference_result"].retrieval_context.retrieved_at_utc,
+        admitted_locator=ref_adm_loc,
+        registry_locator=other_reg,
+    )
+    record = tampered(
+        world.record,
+        ("reference_execution", "admitted_collection_locator"),
+        ref_adm_loc.to_dict(),
+    )
+    assert verify_defect(
+        world,
+        record,
+        reference_admission=ref_adm,
+        reference_result=ref_res,
+        reference_effect_result_locator=oracle_result_locator(ref_res),
+    ) == "admission_mismatch"
+
+
+@pytest.mark.parametrize("side", ["candidate", "reference"])
+def test_verifier_binds_result_requested_capabilities_to_admission(
+    world: World, side: str
+) -> None:
+    base_res = world.kwargs[f"{side}_result"]
+    moved = dataclasses.replace(
+        base_res,
+        requested_capabilities=("cap:campaign-basic-v1", "cap:extra-v1"),
+    )
+    recs = copy.deepcopy(world.record["fact_reconciliations"])
+    moved_loc = oracle_result_locator(moved).to_dict()
+    for rec in recs:
+        rec[side]["fact_evidence_selector"]["collection_result_locator"] = moved_loc
+    record = reseal(dict(world.record, fact_reconciliations=recs))
+    assert verify_defect(
+        world,
+        record,
+        **{
+            f"{side}_result": moved,
+            f"{side}_effect_result_locator": oracle_result_locator(moved),
+        },
+    ) == "collection_result_mismatch"
+
+
+def test_verifier_rejects_cross_scope_worlds_and_accepts_aligned_scopes(world: World) -> None:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        build_world(scope="scope:other-campaigns")
+    assert code_of(excinfo) == "gate3_selection_mismatch"
+
+    cross_record = world.record
+    for side in ("candidate_execution", "reference_execution"):
+        cross_record = tampered(
+            cross_record,
+            (side, "gate3_certification_fingerprint", "authorized_certification_scope"),
+            "scope:other-campaigns",
+        )
+    assert verify_defect(world, cross_record) == "fingerprint_member_mismatch"
+
+    # Scope-aligned world rejects non-zero tolerance profiles bound to another scope.
+    other_scoped = default_profiles("scope:other-campaigns")
+    assert verify_defect(world, tolerance_profiles=other_scoped) == "tolerance_profile_unbound"
+
+    # Genuinely scope-aligned bundle for another scope continues to verify.
+    aligned_other = build_world(
+        scope="scope:other-campaigns", query_scope="scope:other-campaigns"
+    )
+    assert aligned_other.verify() is None
 
 
 @pytest.mark.parametrize("side", ["candidate", "reference"])
@@ -520,3 +626,58 @@ def test_every_defect_code_is_documented_and_closed() -> None:
     with pytest.raises(ClosedValidationError):
         Bundle7BDefectError("not_a_code", "x")
     assert all(code == code.lower() and " " not in code for code in b7.DEFECT_CODES)
+
+
+def test_verifier_supports_require_signed_across_all_7b_p1_envelopes(world: World) -> None:
+    for bad_flag in ("yes", 1, None):
+        assert verify_defect(world, require_signed=bad_flag) == "malformed_argument"
+
+    # Unsigned default world still verifies with require_signed=False, rejects with True.
+    assert world.verify(require_signed=False) is None
+    assert verify_defect(world, require_signed=True) == "closed_member_set"
+
+    signed_world = build_world(signed_p1=True)
+    assert signed_world.verify(require_signed=True) is None
+    assert signed_world.verify(require_signed=False) is None
+
+    # Record outer unsigned (None or 2-key) -> rejected under require_signed=True.
+    bare_record = copy.deepcopy(signed_world.record)
+    del bare_record["integrity"]
+    assert verify_defect(signed_world, bare_record, require_signed=True) == "closed_member_set"
+    two_key_record = copy.deepcopy(signed_world.record)
+    two_key_record["integrity"] = unsigned_p1_integrity().to_dict()
+    assert verify_defect(signed_world, two_key_record, require_signed=True) == "malformed_member"
+
+    # Embedded NativeRequestProjections unsigned -> rejected under require_signed=True.
+    for side in ("candidate_execution", "reference_execution"):
+        unsigned_proj = copy.deepcopy(signed_world.record[side]["native_request_projection"])
+        unsigned_proj["integrity"] = unsigned_p1_integrity().to_dict()
+        rec_copy = copy.deepcopy(signed_world.record)
+        rec_copy[side]["native_request_projection"] = unsigned_proj
+        rec_copy[side]["native_request_digest"] = b7.NativeRequestProjection.from_dict(
+            unsigned_proj
+        ).native_request_digest
+        del rec_copy["integrity"]
+        resealed = sign_p1_dict(rec_copy)
+        assert signed_world.verify(resealed, require_signed=False) is None
+        assert verify_defect(signed_world, resealed, require_signed=True) == "malformed_member"
+
+    # Resolved P1 arguments unsigned or forged content_digest -> rejected.
+    for arg_name in (
+        "driver_contract",
+        "candidate_admission",
+        "reference_admission",
+        "candidate_result",
+        "reference_result",
+    ):
+        signed_arg = signed_world.kwargs[arg_name]
+        unsigned_arg = dataclasses.replace(signed_arg, integrity=unsigned_p1_integrity())
+        assert verify_defect(
+            signed_world, require_signed=True, **{arg_name: unsigned_arg}
+        ) == "malformed_member"
+        forged_int = dataclasses.replace(signed_arg.integrity, content_digest=sha("0"))
+        forged_arg = copy.copy(signed_arg)
+        object.__setattr__(forged_arg, "integrity", forged_int)
+        assert verify_defect(
+            signed_world, require_signed=True, **{arg_name: forged_arg}
+        ) == "malformed_member"

@@ -204,34 +204,84 @@ def require_count(value: object, *, label: str) -> int:
     return value
 
 
-def reparsed(value: T, expected: Any, *, label: str, canonical: bool = True) -> T:
+def require_bool(value: object, *, label: str) -> bool:
+    """Strict bool flag check (``malformed_argument``)."""
+    if type(value) is not bool:
+        raise Bundle7BDefectError("malformed_argument", f"{label}: expected bool")
+    return value
+
+
+def _check_integrity_pair(
+    orig_int: object, fresh_int: object, *, code: str, label: str
+) -> None:
+    if orig_int is None and fresh_int is None:
+        return
+    if not isinstance(orig_int, P1Integrity) or not isinstance(fresh_int, P1Integrity):
+        raise Bundle7BDefectError(code, f"{label}.integrity: expected P1Integrity")
+    if (orig_int.content_digest is None) != (orig_int.signature_base64 is None):
+        raise Bundle7BDefectError(code, f"{label}.integrity: partial signature state")
+    if (orig_int.content_digest, orig_int.signature_base64) != (
+        fresh_int.content_digest,
+        fresh_int.signature_base64,
+    ):
+        raise Bundle7BDefectError(code, f"{label}.integrity: signature state changed")
+
+
+def _check_reparsed_integrity(orig: Any, fresh: Any, *, code: str, label: str) -> None:
+    fields = getattr(type(fresh), "__dataclass_fields__", ())
+    if "integrity" in fields:
+        _check_integrity_pair(orig.integrity, fresh.integrity, code=code, label=label)
+    if "native_request_projection" in fields:
+        _check_reparsed_integrity(
+            orig.native_request_projection,
+            fresh.native_request_projection,
+            code=code,
+            label=f"{label}.native_request_projection",
+        )
+    for side in ("candidate_execution", "reference_execution"):
+        if side in fields:
+            _check_reparsed_integrity(
+                getattr(orig, side),
+                getattr(fresh, side),
+                code=code,
+                label=f"{label}.{side}",
+            )
+
+
+def reparsed(
+    value: T,
+    expected: Any,
+    *,
+    label: str,
+    canonical: bool = True,
+    code: str = "malformed_member",
+    require_signed: bool = False,
+) -> T:
     """A fresh ``expected`` rebuilt from the wire form of ``value``: ``from_dict(to_dict())``.
 
     A frozen object that crosses a public seam is untrusted: its ``__post_init__``
     ran once, at construction, and ``object.__setattr__`` bypasses it. The copy is
     what the object's wire form would parse to, so a tampered object is rejected
-    exactly as that wire form would be (a coded ``Bundle7BDefectError``; a plain
-    ``ClosedValidationError`` or a bare error from ``to_dict`` or ``from_dict`` is
-    ``malformed_member``), and the caller must use the copy, never ``value``. A wrong
-    class is ``malformed_argument``. Signed ``integrity`` blocks round-trip intact.
-
-    A validator that compares with ``!=`` lets through an object that is no JSON
-    value yet claims equality with every literal, and the copy carries it by
-    reference. With ``canonical`` the copy's own wire form must canonicalize
-    (RFC 8785), so every later digest of it is total: such an object is
-    ``malformed_member`` here instead of a plain error (or an accept) downstream.
-    ``checked_result`` skips it: ``ResultIndex.of`` canonicalizes the whole result
-    once for its locator, and a second pass over it is the cost this avoids.
+    exactly as that wire form would be, and the caller must use the copy, never
+    ``value``. Partial or corrupted ``P1Integrity`` states dropped by ``to_dict()``
+    are rejected, and with ``canonical`` the copy's wire form must canonicalize.
     """
     require_type(value, expected, label=label)
+    require_bool(require_signed, label="require_signed")
 
     def build() -> T:
-        fresh: T = expected.from_dict(value.to_dict())
+        wire = value.to_dict()  # type: ignore[attr-defined]
+        fresh: T = (
+            expected.from_dict(wire, require_signed=require_signed)
+            if require_signed
+            else expected.from_dict(wire)
+        )
+        _check_reparsed_integrity(value, fresh, code=code, label=label)
         if canonical:
             canonicalize_jcs(fresh.to_dict())  # type: ignore[attr-defined]
         return fresh
 
-    return guard_any("malformed_member", label, build)
+    return guard_any(code, label, build)
 
 
 def require_callable(value: object, *, label: str) -> None:
@@ -302,13 +352,20 @@ def hyphen_ref(value: object, *, prefixes: frozenset[str], label: str) -> str:
     return value
 
 
-def parse_integrity(mapping: Mapping[str, Any], *, label: str) -> P1Integrity | None:
+def parse_integrity(
+    mapping: Mapping[str, Any], *, label: str, require_signed: bool = False
+) -> P1Integrity | None:
+    require_bool(require_signed, label="require_signed")
     if "integrity" not in mapping:
+        if require_signed:
+            raise Bundle7BDefectError(
+                "malformed_member", f"{label}.integrity: signed P1 integrity required"
+            )
         return None
     return guard(
         "malformed_member",
         f"{label}.integrity",
-        lambda: P1Integrity.from_dict(mapping["integrity"]),
+        lambda: P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed),
     )
 
 

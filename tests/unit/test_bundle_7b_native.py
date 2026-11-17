@@ -177,6 +177,36 @@ def test_native_endpoint_version_accepts_matching_identities(
     assert b7.NativeRequestProjection.from_dict(data).endpoint == endpoint
 
 
+@pytest.mark.parametrize("endpoint", ["/insights", "/v21.0/insights"])
+@pytest.mark.parametrize(
+    ("suffix", "secret"),
+    [
+        ("act_1234567890", "act_1234567890"),
+        ("Bearer:EAAsecretToken123", "EAAsecretToken123"),
+        ("21.0", "21.0"),
+        ("V21.0", "V21.0"),
+        ("v21.", "v21."),
+    ],
+)
+def test_native_api_version_enforces_closed_grammar_without_echoing_input(
+    endpoint: str, suffix: str, secret: str
+) -> None:
+    data = native_dict(endpoint=endpoint, endpoint_version_ref=f"api-version:{suffix}")
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.NativeRequestProjection.from_dict(data)
+    assert code_of(excinfo) == "malformed_member"
+    assert secret not in str(excinfo.value)
+
+
+def test_native_version_mismatch_never_echoes_the_version_body() -> None:
+    data = native_dict(endpoint="/v99.0/insights", endpoint_version_ref="api-version:v21.0")
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.NativeRequestProjection.from_dict(data)
+    assert code_of(excinfo) == "native_version_mismatch"
+    assert "v21.0" not in str(excinfo.value)
+    assert "v99.0" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("name", ["resource_refs", "metrics", "breakdowns"])
 def test_native_projection_sequence_members_must_be_tuples(name: str) -> None:
     projection = b7.NativeRequestProjection.from_dict(native_dict())
@@ -200,6 +230,19 @@ def test_native_projection_accepts_a_p1_integrity_block_and_checks_it() -> None:
     signed = copy.deepcopy(unsigned)
     signed["integrity"].update(content_digest=digest, signature_base64=signature())
     assert b7.NativeRequestProjection.from_dict(signed).to_dict() == signed
+    assert b7.NativeRequestProjection.from_dict(signed, require_signed=True).to_dict() == signed
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.NativeRequestProjection.from_dict(native_dict(), require_signed=True)
+    assert code_of(excinfo) == "closed_member_set"
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.NativeRequestProjection.from_dict(unsigned, require_signed=True)
+    assert code_of(excinfo) == "malformed_member"
+    for bad_flag in ("yes", 1, None):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            b7.NativeRequestProjection.from_dict(
+                signed, require_signed=bad_flag  # type: ignore[arg-type]
+            )
+        assert code_of(excinfo) == "malformed_argument"
     signed["integrity"]["content_digest"] = sha("0")
     assert native_defect(signed) == "integrity_digest_mismatch"
 
@@ -290,3 +333,57 @@ def test_native_check_rejects_wrongly_typed_arguments() -> None:
     with pytest.raises(Bundle7BDefectError) as excinfo:
         b7.check_native_request(native_dict(), **good)  # type: ignore[arg-type]
     assert code_of(excinfo) == "malformed_argument"
+
+
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+def _tampered_projected(
+    field: str, value: object, *, delete: bool = False
+) -> CanonicalQueryContract:
+    query = canonical_query()
+    if delete:
+        object.__delattr__(query, field)
+    else:
+        object.__setattr__(query, field, value)
+    return query
+
+
+class _SubclassedQuery(CanonicalQueryContract):
+    def to_dict(self) -> dict[str, Any]:
+        raise ClosedValidationError("broken subclass to_dict")
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: _tampered_projected("tzdb_version", 1.5),
+        lambda: _tampered_projected("resource_level", _AlwaysEq()),
+        lambda: _tampered_projected("date_range", None),
+        lambda: _tampered_projected("tzdb_version", None, delete=True),
+        lambda: _SubclassedQuery(**{
+            k: v for k, v in canonical_query().__dict__.items()
+        }) if hasattr(canonical_query(), "__dict__") else _SubclassedQuery(
+            **{f.name: getattr(canonical_query(), f.name)
+               for f in dataclasses.fields(CanonicalQueryContract)}
+        ),
+    ],
+)
+def test_native_check_reparses_callback_return_value_under_coded_defect(
+    factory: Callable[[], CanonicalQueryContract],
+) -> None:
+    projection = b7.NativeRequestProjection.from_dict(native_dict())
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.check_native_request(
+            projection,
+            native_request_digest=projection.native_request_digest,
+            canonical_query=canonical_query(),
+            algorithm_digest=ALGORITHM_DIGEST,
+            project_native_request=lambda p, d: factory(),
+        )
+    assert code_of(excinfo) == "native_projection_mismatch"

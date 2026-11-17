@@ -24,9 +24,11 @@ from smart_ads.reconciliation.bundle_common import (
     closed,
     guard,
     member_locator,
+    parse_integrity,
     parse_member_locator,
     parse_query,
     query_bytes,
+    require_bool,
     require_member,
     sha256_member,
     within_skew,
@@ -164,6 +166,11 @@ class Certification7BRecord:
             raise Bundle7BDefectError(
                 "fingerprint_member_mismatch", "fingerprint canonical_query_digest differs"
             )
+        if cand.authorized_certification_scope != self.canonical_query_contract.resource_scope_ref:
+            raise Bundle7BDefectError(
+                "fingerprint_member_mismatch",
+                "fingerprint authorized_certification_scope differs",
+            )
 
     def _check_reconciliations(self) -> None:
         label = "certification_7b_record.fact_reconciliations"
@@ -225,8 +232,7 @@ class Certification7BRecord:
 
     @classmethod
     def from_dict(cls, data: object, *, require_signed: bool = False) -> Certification7BRecord:
-        if not isinstance(require_signed, bool):
-            raise Bundle7BDefectError("malformed_argument", "require_signed: expected bool")
+        require_bool(require_signed, label="require_signed")
         label = "certification_7b_record"
         mapping = guard("malformed_member", label, lambda: require_mapping(data, label=label))
         has_integrity = require_signed or "integrity" in mapping
@@ -236,16 +242,11 @@ class Certification7BRecord:
             raise Bundle7BDefectError(
                 "fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}"
             )
-        integrity = (
-            guard(
-                "malformed_member",
-                f"{label}.integrity",
-                lambda: P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed),
-            )
-            if has_integrity
-            else None
+        integrity = parse_integrity(mapping, label=label, require_signed=require_signed)
+        return cls(
+            **_parse_record_members(mapping, label=label, require_signed=require_signed),
+            integrity=integrity,
         )
-        return cls(**_parse_record_members(mapping, label=label), integrity=integrity)
 
 
 def _require_required_metrics(value: object, *, label: str) -> None:
@@ -258,7 +259,9 @@ def _require_required_metrics(value: object, *, label: str) -> None:
         )
 
 
-def _parse_record_members(mapping: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+def _parse_record_members(
+    mapping: Mapping[str, Any], *, label: str, require_signed: bool = False
+) -> dict[str, Any]:
     metrics = mapping["required_metrics"]
     _require_required_metrics(metrics if isinstance(metrics, list) else None, label=label)
     reconciliations = mapping["fact_reconciliations"]
@@ -278,8 +281,12 @@ def _parse_record_members(mapping: Mapping[str, Any], *, label: str) -> dict[str
         ),
         "canonical_query_digest": mapping["canonical_query_digest"],
         "required_metrics": tuple(metrics),
-        "candidate_execution": CandidateExecution.from_dict(mapping["candidate_execution"]),
-        "reference_execution": ReferenceExecution.from_dict(mapping["reference_execution"]),
+        "candidate_execution": CandidateExecution.from_dict(
+            mapping["candidate_execution"], require_signed=require_signed
+        ),
+        "reference_execution": ReferenceExecution.from_dict(
+            mapping["reference_execution"], require_signed=require_signed
+        ),
         "row_pairing": RowPairing.from_dict(mapping["row_pairing"]),
         "fact_reconciliations": tuple(
             FactReconciliation.from_dict(item) for item in reconciliations

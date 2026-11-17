@@ -759,6 +759,70 @@ def test_a_signed_record_whose_preimage_or_digest_changed_is_rejected(world: Wor
         assert run(lambda: _verify(world, sealed)) == ("coded", "integrity_digest_mismatch")
 
 
+def test_partial_or_corrupted_p1_integrity_states_dropped_by_to_dict_are_rejected(
+    world: World, parts: dict[str, Any]
+) -> None:
+    sealed = b7.Certification7BRecord.from_dict(_sealed(world.record, signed=True))
+    assert sealed.integrity is not None
+    for slot in ("signature_base64", "content_digest"):
+        with hostile_set(sealed.integrity, slot, None):
+            assert run(lambda: _verify(world, sealed)) == ("coded", "malformed_member")
+
+    unsigned = b7.Certification7BRecord.from_dict(_sealed(world.record, signed=False))
+    assert unsigned.integrity is not None
+    for slot, bad in (
+        ("content_digest", "not-valid"),
+        ("content_digest", AlwaysEq()),
+        ("signature_base64", 12345),
+    ):
+        with hostile_set(unsigned.integrity, slot, bad):
+            assert run(lambda: _verify(world, unsigned)) == ("coded", "malformed_member")
+
+    # Nested NativeRequestProjection inside CandidateExecution and ReferenceExecution.
+    for side in ("candidate_execution", "reference_execution"):
+        rec_data = dict(world.record)
+        exec_data = dict(rec_data[side])
+        signed_proj_dict = _sealed(exec_data["native_request_projection"], signed=True)
+        exec_data["native_request_projection"] = signed_proj_dict
+        exec_data["native_request_digest"] = b7.NativeRequestProjection.from_dict(
+            signed_proj_dict
+        ).native_request_digest
+        rec_data[side] = exec_data
+        rec_obj = b7.Certification7BRecord.from_dict(rec_data)
+        exec_obj = getattr(rec_obj, side)
+        proj_obj = exec_obj.native_request_projection
+        assert proj_obj.integrity is not None
+        with hostile_set(proj_obj.integrity, "signature_base64", None):
+            downgraded_digest = proj_obj.native_request_digest
+            with hostile_set(exec_obj, "native_request_digest", downgraded_digest):
+                assert run(lambda: _verify(world, rec_obj)) == ("coded", "malformed_member")
+
+    # Standalone NativeRequestProjection in check_native_request.
+    signed_proj = b7.NativeRequestProjection.from_dict(_sealed(native_dict(), signed=True))
+    assert signed_proj.integrity is not None
+    with hostile_set(signed_proj.integrity, "signature_base64", None):
+        downgraded_digest = signed_proj.native_request_digest
+        assert run(
+            lambda: b7.check_native_request(
+                signed_proj,
+                native_request_digest=downgraded_digest,
+                canonical_query=canonical_query(),
+                algorithm_digest=REF_ALGO,
+                project_native_request=pinned_algorithm,
+            )
+        ) == ("coded", "malformed_member")
+
+    # Foreign P1 objects (PipeboardPhase1Contract, AdmittedCollection, CollectionResult).
+    signed_world = build_world(ONE_RESOURCE, ONE_RESOURCE, signed_p1=True)
+    for arg_name in ("driver_contract", "candidate_admission", "candidate_result"):
+        arg_obj = signed_world.kwargs[arg_name]
+        assert arg_obj.integrity is not None
+        with hostile_set(arg_obj.integrity, "signature_base64", None):
+            assert run(
+                lambda: _verify(signed_world, signed_world.parsed(), **{arg_name: arg_obj})
+            ) == ("coded", "malformed_member")
+
+
 # ---------------------------------------------------------------------------
 # Nothing quadratic: round trips are per object, never per pair
 # ---------------------------------------------------------------------------

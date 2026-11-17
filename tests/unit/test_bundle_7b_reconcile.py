@@ -285,6 +285,32 @@ def test_reconcile_binds_profiles_to_the_digest_of_the_supplied_query() -> None:
     assert code_of(excinfo) == "tolerance_profile_unbound"
 
 
+def test_reconcile_requires_authorized_scope_to_match_canonical_query_scope() -> None:
+    cand, ref = results()
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        reconcile(
+            cand,
+            ref,
+            default_profiles("scope:other-campaigns"),
+            authorized_certification_scope="scope:other-campaigns",
+        )
+    assert code_of(excinfo) == "gate3_selection_mismatch"
+    exact_cand, exact_ref = results(BASE_VALUES, BASE_VALUES)
+    exact_profiles = {
+        IMPRESSIONS: profile_dict(IMPRESSIONS),
+        CLICKS: profile_dict(CLICKS),
+        SPEND: profile_dict(SPEND),
+    }
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        reconcile(
+            exact_cand,
+            exact_ref,
+            exact_profiles,
+            authorized_certification_scope="scope:other-campaigns",
+        )
+    assert code_of(excinfo) == "gate3_selection_mismatch"
+
+
 def test_reconcile_indexes_each_result_once_for_100_rows_per_side(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

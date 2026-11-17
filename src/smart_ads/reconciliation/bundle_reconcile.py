@@ -245,6 +245,28 @@ class Reconciliation7BResult:
             require_count(getattr(self, f"{side}_row_count"), label=f"{label}.{side}_row_count")
 
 
+def _resolve_bound_profiles(
+    *,
+    tolerance_profiles: Mapping[str, Mapping[str, Any]],
+    gate3_selection_locator: ArtifactLocator,
+    query: CanonicalQueryContract,
+    authorized_certification_scope: str,
+    migration_run_context_locator: ArtifactLocator,
+) -> ResolvedProfiles:
+    binding = binding_members(
+        gate3_selection_locator=gate3_selection_locator,
+        canonical_query_digest=query.canonical_query_digest,
+        authorized_certification_scope=authorized_certification_scope,
+        migration_run_context_locator=migration_run_context_locator,
+    )
+    if binding["authorized_certification_scope"] != query.resource_scope_ref:
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch",
+            "authorized_certification_scope differs from canonical_query_contract scope",
+        )
+    return resolve_profiles(tolerance_profiles, binding)
+
+
 def reconcile_7b_fact_sets(
     *,
     candidate_result: CollectionResult,
@@ -257,30 +279,24 @@ def reconcile_7b_fact_sets(
 ) -> Reconciliation7BResult:
     """Build every ``fact_reconciliation/v1`` from two complete normalized fact sets.
 
-    Malformed evidence, a fact outside the admitted query (window, binding or
-    account) or an unresolved, unsigned or unbound tolerance profile raises
-    ``Bundle7BDefectError``; profiles are bound to the digest of
-    ``canonical_query_contract``. Set defects, retrieval skew and comparisons
-    that are not ``VERIFIED`` are returned as sorted ``defect_codes`` with
-    ``bundle_outcome == "failed"``. Reconciliations cover the required pairs
-    present on both sides.
-
-    Both results, the query and the locators are re-parsed from their wire forms
-    first and only the copies are used: a tampered frozen object is
-    ``malformed_member``, never a bare error and never an accept.
+    Malformed evidence, a fact outside the admitted query, a scope mismatch or
+    an unresolved, unsigned or unbound tolerance profile raises
+    ``Bundle7BDefectError``. Set defects, retrieval skew and comparisons that
+    are not ``VERIFIED`` are returned as sorted ``defect_codes`` with
+    ``bundle_outcome == "failed"``.
     """
     cand_result, cand_facts = checked_side(candidate_result, "candidate")
     ref_result, ref_facts = checked_side(reference_result, "reference")
     query = reparsed(canonical_query_contract, CanonicalQueryContract, label="canonical_query")
     require_facts_in_query(cand_facts, query, label="candidate_result")
     require_facts_in_query(ref_facts, query, label="reference_result")
-    binding = binding_members(
+    profiles = _resolve_bound_profiles(
+        tolerance_profiles=tolerance_profiles,
         gate3_selection_locator=gate3_selection_locator,
-        canonical_query_digest=query.canonical_query_digest,
+        query=query,
         authorized_certification_scope=authorized_certification_scope,
         migration_run_context_locator=migration_run_context_locator,
     )
-    profiles = resolve_profiles(tolerance_profiles, binding)
     cand, ref = SideUniverse.of(cand_facts), SideUniverse.of(ref_facts)
     codes = _set_codes(cand, ref, cand_result, ref_result)
     common = set(ref.pairs)

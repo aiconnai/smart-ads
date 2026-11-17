@@ -38,11 +38,13 @@ from smart_ads.reconciliation.bundle_common import (
     NATIVE_REQUEST_PROJECTION_SCHEMA,
     Bundle7BDefectError,
     check_integrity,
+    closed,
     guard,
     hyphen_ref,
     parse_integrity,
     query_bytes,
     reparsed,
+    require_bool,
     require_callable,
     require_member,
     require_strictly_ascending,
@@ -135,9 +137,14 @@ def _check_endpoint_version(endpoint: str, version_ref: str) -> None:
                 "native_version_mismatch", f"{label}.endpoint: version-opaque driver path"
             )
         return
+    if _VERSION_SEGMENT_RE.fullmatch(body) is None:
+        raise Bundle7BDefectError(
+            "malformed_member", f"{label}.endpoint_version_ref: invalid api-version"
+        )
     if any(version != body for version in versions):
         raise Bundle7BDefectError(
-            "native_version_mismatch", f"{label}.endpoint: version differs from {body!r}"
+            "native_version_mismatch",
+            f"{label}.endpoint: path version differs from endpoint_version_ref",
         )
 
 
@@ -249,16 +256,15 @@ class NativeRequestProjection:
         return out
 
     @classmethod
-    def from_dict(cls, data: object) -> NativeRequestProjection:
+    def from_dict(
+        cls, data: object, *, require_signed: bool = False
+    ) -> NativeRequestProjection:
+        require_bool(require_signed, label="require_signed")
         label = "native_request_projection"
         mapping = guard("malformed_member", label, lambda: require_mapping(data, label=label))
-        keys = set(cls.CORE_KEYS) | ({"integrity"} if "integrity" in mapping else set())
-        actual = set(mapping)
-        if actual != keys:
-            raise Bundle7BDefectError(
-                "closed_member_set",
-                f"{label}: missing={sorted(keys - actual)} extra={sorted(actual - keys)}",
-            )
+        has_integrity = require_signed or "integrity" in mapping
+        keys = frozenset(cls.CORE_KEYS) | ({"integrity"} if has_integrity else set())
+        mapping = closed(mapping, keys, label=label)
         if mapping["$schema"] != cls.SCHEMA:
             raise Bundle7BDefectError(
                 "fixed_member_mismatch", f"{label}.$schema: expected {cls.SCHEMA!r}"
@@ -278,7 +284,7 @@ class NativeRequestProjection:
         )
         return cls(
             date_range=date_range,
-            integrity=parse_integrity(mapping, label=label),
+            integrity=parse_integrity(mapping, label=label, require_signed=require_signed),
             **arrays,
             **scalars,
         )
@@ -293,6 +299,29 @@ the caller's algorithm and propagates unchanged.
 """
 
 
+def _projected_query(
+    projection: NativeRequestProjection,
+    algorithm_digest: str,
+    project_native_request: NativeToCanonicalAlgorithm,
+) -> CanonicalQueryContract:
+    try:
+        projected = project_native_request(projection, algorithm_digest)
+    except ClosedValidationError as exc:
+        raise Bundle7BDefectError(
+            "native_projection_mismatch", f"algorithm rejected: {exc}"
+        ) from exc
+    if not isinstance(projected, CanonicalQueryContract):
+        raise Bundle7BDefectError(
+            "native_projection_mismatch", "projected canonical query is not CanonicalQueryContract"
+        )
+    return reparsed(
+        projected,
+        CanonicalQueryContract,
+        label="projected_canonical_query",
+        code="native_projection_mismatch",
+    )
+
+
 def check_native_request(
     projection: NativeRequestProjection,
     *,
@@ -304,15 +333,10 @@ def check_native_request(
     """Recompute ``native_request_digest`` and run the injected, digest-pinned projection.
 
     The resulting complete canonical projection must equal ``canonical_query``
-    byte-for-byte; any other result (including a rejection by the algorithm of
-    an extra or default-valued native parameter) fails 7B. The algorithm must
-    reject only by raising ``ClosedValidationError``; any other exception
-    (``ValueError``, ``KeyError``, ``TypeError`` ...) is the caller's bug and
-    propagates unchanged, deliberately not caught here.
-
-    ``projection`` and ``canonical_query`` are re-parsed from their wire forms first
-    (the copies are what is digested and handed to the algorithm): a tampered object
-    is rejected as its wire form would be, never with a bare error.
+    byte-for-byte. The algorithm must reject only by raising
+    ``ClosedValidationError``; any other exception propagates unchanged.
+    ``projection``, ``canonical_query`` and the projected query are re-parsed
+    from their wire forms before comparison.
     """
     require_type(projection, NativeRequestProjection, label="native_request_projection")
     require_type(canonical_query, CanonicalQueryContract, label="canonical_query")
@@ -325,15 +349,8 @@ def check_native_request(
         raise Bundle7BDefectError(
             "native_request_digest_mismatch", "native_request_digest differs"
         )
-    try:
-        projected = project_native_request(projection, algorithm_digest)
-    except ClosedValidationError as exc:
-        raise Bundle7BDefectError(
-            "native_projection_mismatch", f"algorithm rejected: {exc}"
-        ) from exc
-    if not isinstance(projected, CanonicalQueryContract) or query_bytes(
-        projected
-    ) != query_bytes(canonical_query):
+    projected = _projected_query(projection, algorithm_digest, project_native_request)
+    if query_bytes(projected) != query_bytes(canonical_query):
         raise Bundle7BDefectError(
             "native_projection_mismatch", "projected canonical query is not byte-identical"
         )

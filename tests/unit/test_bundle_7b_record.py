@@ -83,6 +83,27 @@ def test_fingerprint_rejects_blank_or_malformed_members(member: str, bad: object
     assert fingerprint_defect(dict(fingerprint_dict(), **{member: bad})) == "malformed_member"
 
 
+@pytest.mark.parametrize(
+    ("bad_version", "secret"),
+    [
+        ("act_1234567890", "act_1234567890"),
+        ("Bearer:EAAsecretToken123", "EAAsecretToken123"),
+        ("21.0", "21.0"),
+        ("V21.0", "V21.0"),
+        ("v21.", "v21."),
+    ],
+)
+def test_fingerprint_selected_meta_api_version_enforces_closed_grammar_without_echo(
+    bad_version: str, secret: str
+) -> None:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.Gate3CertificationFingerprint.from_dict(
+            fingerprint_dict(selected_meta_api_version=bad_version)
+        )
+    assert code_of(excinfo) == "malformed_member"
+    assert secret not in str(excinfo.value)
+
+
 @pytest.mark.parametrize("member", FINGERPRINT_MEMBERS)
 def test_fingerprint_equality_fails_on_any_single_member(member: str) -> None:
     base = b7.Gate3CertificationFingerprint.from_dict(fingerprint_dict())
@@ -367,6 +388,17 @@ def test_record_fingerprint_query_digest_must_equal_the_record_query(world: Worl
     assert record_defect(record) == "fingerprint_member_mismatch"
 
 
+def test_record_fingerprint_scope_must_equal_the_record_query_scope(world: World) -> None:
+    record = world.record
+    for side in ("candidate_execution", "reference_execution"):
+        record = tampered(
+            record,
+            (side, "gate3_certification_fingerprint", "authorized_certification_scope"),
+            "scope:other-campaigns",
+        )
+    assert record_defect(record) == "fingerprint_member_mismatch"
+
+
 @pytest.mark.parametrize(
     ("ref_at", "code"),
     [
@@ -464,6 +496,32 @@ def test_record_side_projection_must_equal_the_record_query(world: World) -> Non
     assert record_defect(record) == "canonical_query_mismatch"
 
 
+def _sign_p1_dict(data: dict[str, Any]) -> dict[str, Any]:
+    signed = copy.deepcopy(data)
+    signed["integrity"] = {
+        "key_id": KEY_ID,
+        "key_registry_snapshot_locator": registry_loc().to_dict(),
+    }
+    signed["integrity"].update(
+        content_digest=p1_content_digest(signed), signature_base64=signature()
+    )
+    return signed
+
+
+def _fully_signed_record_dict(record_data: dict[str, Any]) -> dict[str, Any]:
+    import hashlib
+    from tests.unit._bundle_7b_builders import oracle_jcs
+
+    out = copy.deepcopy(record_data)
+    for side in ("candidate_execution", "reference_execution"):
+        proj = _sign_p1_dict(out[side]["native_request_projection"])
+        out[side]["native_request_projection"] = proj
+        out[side]["native_request_digest"] = (
+            "sha256:" + hashlib.sha256(oracle_jcs(proj)).hexdigest()
+        )
+    return _sign_p1_dict(out)
+
+
 def test_record_p1_integrity_is_recomputed_and_can_be_required(world: World) -> None:
     unsigned = dict(world.record, integrity={
         "key_id": KEY_ID, "key_registry_snapshot_locator": registry_loc().to_dict()
@@ -473,11 +531,36 @@ def test_record_p1_integrity_is_recomputed_and_can_be_required(world: World) -> 
     with pytest.raises(Bundle7BDefectError) as excinfo:
         b7.Certification7BRecord.from_dict(unsigned, require_signed=True)
     assert code_of(excinfo) == "malformed_member"
-    signed = copy.deepcopy(unsigned)
-    signed["integrity"].update(
-        content_digest=p1_content_digest(unsigned), signature_base64=signature()
-    )
+    outer_only_signed = _sign_p1_dict(world.record)
+    assert b7.Certification7BRecord.from_dict(outer_only_signed).to_dict() == outer_only_signed
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.Certification7BRecord.from_dict(outer_only_signed, require_signed=True)
+    assert code_of(excinfo) == "closed_member_set"
+    signed = _fully_signed_record_dict(world.record)
     assert b7.Certification7BRecord.from_dict(signed, require_signed=True).to_dict() == signed
+    for side in ("candidate_execution", "reference_execution"):
+        half = copy.deepcopy(world.record)
+        for s in ("candidate_execution", "reference_execution"):
+            if s != side:
+                proj = _sign_p1_dict(half[s]["native_request_projection"])
+                half[s]["native_request_projection"] = proj
+                half[s]["native_request_digest"] = b7.NativeRequestProjection.from_dict(
+                    proj
+                ).native_request_digest
+            else:
+                proj = copy.deepcopy(half[s]["native_request_projection"])
+                proj["integrity"] = {
+                    "key_id": KEY_ID,
+                    "key_registry_snapshot_locator": registry_loc().to_dict(),
+                }
+                half[s]["native_request_projection"] = proj
+                half[s]["native_request_digest"] = b7.NativeRequestProjection.from_dict(
+                    proj
+                ).native_request_digest
+        half_signed = _sign_p1_dict(half)
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            b7.Certification7BRecord.from_dict(half_signed, require_signed=True)
+        assert code_of(excinfo) == "malformed_member"
     signed["integrity"]["content_digest"] = sha("0")
     assert record_defect(signed) == "integrity_digest_mismatch"
 
@@ -486,5 +569,19 @@ def test_record_from_dict_rejects_non_mappings_and_bad_flags(world: World) -> No
     for bad in ("record", None, {1: 2}):
         assert record_defect(bad) == "malformed_member"  # type: ignore[arg-type]
     with pytest.raises(Bundle7BDefectError) as excinfo:
-        b7.Certification7BRecord.from_dict(world.record, require_signed="yes")  # type: ignore[arg-type]
+        b7.Certification7BRecord.from_dict(
+            world.record, require_signed="yes"  # type: ignore[arg-type]
+        )
     assert code_of(excinfo) == "malformed_argument"
+    for exec_cls, key in (
+        (b7.CandidateExecution, "candidate_execution"),
+        (b7.ReferenceExecution, "reference_execution"),
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            exec_cls.from_dict(
+                world.record[key], require_signed="yes"  # type: ignore[arg-type]
+            )
+        assert code_of(excinfo) == "malformed_argument"
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            exec_cls.from_dict(world.record[key], require_signed=True)
+        assert code_of(excinfo) == "closed_member_set"
