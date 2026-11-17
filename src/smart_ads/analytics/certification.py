@@ -12,7 +12,8 @@ from smart_ads.analytics.formulas import (
     CertificationInput, DerivedCertificationStatus, combine_derived_certification,
 )
 from smart_ads.analytics.intelligence import (
-    FINDING_SCHEMA, AnalysisEvidence, EvaluationContext, Finding, _check_integrity, _digest_member,
+    FINDING_INCONCLUSIVE, FINDING_SCHEMA, AnalysisEvidence, EvaluationContext, Finding,
+    _check_integrity, _digest_member,
     _evaluate, _fail, _integrity_type, _is_signed, _list_member, _locator_array, _member,
     _P1Artifact, _parse_locator, _require, _sorted_unique_locators, _split_envelope, _strict,
     _typed_tuple, _with_integrity,
@@ -61,6 +62,23 @@ def _derive_certification_status(inputs: _CertificationInputs) -> DerivedCertifi
         for item in items
     ):
         raise _fail("degraded_not_permitted", "no independently validated DEGRADED derived input")
+    return status
+
+
+_INCONCLUSIVE_CAP: Final[DerivedCertificationStatus] = DerivedCertificationStatus.UNAVAILABLE
+
+
+def _cap_for_inconclusive(
+    status: DerivedCertificationStatus, recomputed: tuple[Finding, ...]
+) -> DerivedCertificationStatus:
+    """`status` lowered to at most UNAVAILABLE when any recomputed finding is inconclusive.
+
+    This cap is an analytical policy extension chosen by the repo owner, not a rule ADR-0001
+    states: section 5.6 derives the status of derived metrics from their inputs, and neither
+    section 7 nor the section 12.7 `certification_record/v1` row requires or forbids it.
+    """
+    if any(finding.finding_status == FINDING_INCONCLUSIVE for finding in recomputed):
+        return min(status, _INCONCLUSIVE_CAP)
     return status
 
 
@@ -164,7 +182,8 @@ def build_certification_record(
     binds the supplied envelopes' locators and, as `output_digest`, the verified execution's
     `canonical_result_digest`. Every argument is checked again first (see `_fresh_context`):
     supplied findings and `integrity` are re-parsed from their wire form, attested inputs
-    re-constructed.
+    re-constructed. The status is the attested inputs' status (DEGRADED admission included),
+    then capped at UNAVAILABLE if a recomputed finding is inconclusive (`_cap_for_inconclusive`).
     """
     execution, expected = _evaluate(context, evidence)
     supplied = tuple(
@@ -181,9 +200,11 @@ def build_certification_record(
     checked = None if integrity is None else _reparsed(_fail, "invalid_integrity", P1Integrity, integrity)
     if not _identical(integrity, checked):  # to_dict() drops a partial signature state
         raise _fail("invalid_integrity", "integrity is not the block its wire form parses to")
+    locators = _sorted_unique_locators(finding.locator() for finding in supplied)
+    attested = _derive_certification_status(_fresh_inputs(certification_inputs))
     return AnalyticalCertificationRecord(
-        finding_locators=_sorted_unique_locators(finding.locator() for finding in supplied),
-        derived_certification_status=_derive_certification_status(_fresh_inputs(certification_inputs)),
+        finding_locators=locators,
+        derived_certification_status=_cap_for_inconclusive(attested, expected),
         mutation_recommendations_blocked=any(f.mutation_recommendation_blocked for f in supplied),
         output_digest=execution.canonical_result_set.canonical_result_digest,
         integrity=checked,

@@ -2041,7 +2041,7 @@ def test_valid_inputs_give_the_hand_computed_findings_and_record(signed: bool) -
             "finding_locators": sorted(
                 (_locator_dict(FINDING_TYPE, finding.to_dict()) for finding in supplied), key=_jcs
             ),
-            "derived_certification_status": "VERIFIED",
+            "derived_certification_status": "UNAVAILABLE",  # VERIFIED, capped: saturation is inconclusive
             "mutation_recommendations_blocked": True,
             "output_digest": _sha(preimage),
         }

@@ -328,6 +328,34 @@ def _output_digest(evidence: AnalysisEvidence) -> str:
     return _sha(preimage)
 
 
+# Real evaluator scenarios by finding set: (_build arguments, sorted (type, status) it yields).
+# "inconclusive" has no impressions rows for R0 at all and no clicks row, so both rules are
+# inconclusive; "mixed" is the default scenario.
+FINDING_SETS: dict[str, tuple[dict[str, Any], list[tuple[str, str]]]] = {
+    "none": ({"rules": RULES[2:], "spend": "999"}, []),
+    "detected": ({"rules": RULES[2:]}, [("waste", "detected")]),
+    "inconclusive": (
+        {"rules": RULES[1:], "clicks": None},
+        [("stalled_delivery", "inconclusive"), ("waste", "inconclusive")],
+    ),
+    "mixed": (
+        {},
+        [("restatement", "detected"), ("stalled_delivery", "inconclusive"), ("waste", "detected")],
+    ),
+}
+
+
+@functools.cache
+def _set_scenario(name: str) -> tuple[EvaluationContext, AnalysisEvidence, tuple[Finding, ...]]:
+    context, evidence = _build(**FINDING_SETS[name][0])
+    return context, evidence, evaluate_findings(context, evidence)
+
+
+def _certify(name: str, inputs: list[AttestedCertificationInput]) -> AnalyticalCertificationRecord:
+    context, evidence, findings = _set_scenario(name)
+    return build_certification_record(context, evidence, findings, inputs)
+
+
 # ------------------------------------------------------------------ module boundary
 
 
@@ -378,10 +406,13 @@ def test_certification_status_is_the_minimum_with_constrained_degraded(
     expected = min((spec[0] for spec in specs), key=RANK.index)
     validated_degraded = any(spec[0] == "DEGRADED" and spec[2] for spec in specs)
     if expected == "DEGRADED" and not validated_degraded:
+        _raises("degraded_not_permitted", _certify, "detected", inputs)
         _raises("degraded_not_permitted", _record, inputs)
         return
+    capped = min(expected, CAP, key=RANK.index)  # the default scenario has an inconclusive finding
     for order in (inputs, list(reversed(inputs))):
-        assert _record(order).derived_certification_status is DerivedCertificationStatus(expected)
+        assert _certify("detected", order).derived_certification_status is DerivedCertificationStatus(expected)
+        assert _record(order).derived_certification_status is DerivedCertificationStatus(capped)
 
 
 def test_certification_status_rejections() -> None:
@@ -416,7 +447,7 @@ def test_certification_record_binds_exact_findings_and_output() -> None:
     assert record.to_dict() == {
         "$schema": RECORD_TYPE,
         "finding_locators": locators,
-        "derived_certification_status": "VERIFIED",
+        "derived_certification_status": "UNAVAILABLE",  # VERIFIED inputs, capped: stalled is inconclusive
         "mutation_recommendations_blocked": True,
         "output_digest": _output_digest(evidence),
     }
@@ -454,8 +485,10 @@ def test_record_rejects_findings_that_differ_from_recomputation(variant: str) ->
 
 def test_record_degraded_requires_an_independently_validated_degraded_input() -> None:
     _raises("degraded_not_permitted", _record, [_attested("DEGRADED"), _attested("VERIFIED")])
-    record = _record([_attested("DEGRADED", validated=True), _attested("VERIFIED")])
-    assert record.to_dict()["derived_certification_status"] == "DEGRADED"
+    _raises("degraded_not_permitted", _certify, "detected", [_attested("DEGRADED"), _attested("VERIFIED")])
+    admitted = [_attested("DEGRADED", validated=True), _attested("VERIFIED")]
+    assert _certify("detected", admitted).to_dict()["derived_certification_status"] == "DEGRADED"
+    assert _record(admitted).to_dict()["derived_certification_status"] == "UNAVAILABLE"  # capped
 
 
 def test_signed_certification_path() -> None:
@@ -500,10 +533,11 @@ def _tampered(change: dict[str, Any]) -> AnalyticalCertificationRecord:
     "change",
     [
         {"mutation_recommendations_blocked": False},  # certifies a restatement but does not block
-        {"derived_certification_status": "UNAVAILABLE"},
+        {"derived_certification_status": "VERIFIED"},  # the inputs' status, above the cap
+        {"derived_certification_status": "BLOCKED"},
         {"output_digest": "sha256:" + "0" * 64},
     ],
-    ids=["unblocked_restatement", "status", "output_digest"],
+    ids=["unblocked_restatement", "status", "status_below_cap", "output_digest"],
 )
 def test_verify_rejects_a_record_that_differs_from_recomputation(change: dict[str, Any]) -> None:
     context, evidence, findings = _scenario()
@@ -517,8 +551,14 @@ def test_verify_rejects_dropped_findings_and_other_inputs() -> None:
     dropped = _tampered({"finding_locators": record.to_dict()["finding_locators"][1:]})
     _raises("record_mismatch", verify_certification_record, dropped, context, evidence, findings, VERIFIED_INPUTS)
     _raises("findings_mismatch", verify_certification_record, record, context, evidence, findings[1:], VERIFIED_INPUTS)
+    unreconciled = [_attested("UNRECONCILED")]  # DEGRADED inputs now cap to this same record
+    _raises("record_mismatch", verify_certification_record, record, context, evidence, findings, unreconciled)
+    clean_context, clean_evidence, clean_findings = _set_scenario("detected")
+    clean = _certify("detected", VERIFIED_INPUTS)
     degraded = [_attested("DEGRADED", validated=True)]
-    _raises("record_mismatch", verify_certification_record, record, context, evidence, findings, degraded)
+    _raises(
+        "record_mismatch", verify_certification_record, clean, clean_context, clean_evidence, clean_findings, degraded
+    )
     _raises("invalid_type", verify_certification_record, record.to_dict(), context, evidence, findings, VERIFIED_INPUTS)
     _raises("invalid_type", verify_certification_record, record, context, None, findings, VERIFIED_INPUTS)
 
@@ -556,6 +596,123 @@ def test_record_round_trip() -> None:
     record = _record()
     assert AnalyticalCertificationRecord.from_dict(record.to_dict()) == record
     _raises("missing_member", AnalyticalCertificationRecord.from_dict, record.to_dict(), require_signed=True)
+
+
+# ------------------------------------------------------------------ inconclusive findings cap the status
+#
+# Analytical policy extension decided by the repo owner (ADR-0001 neither requires nor forbids
+# it): when any recomputed finding is inconclusive, the record status is
+# min(status from the attested inputs, UNAVAILABLE). The oracles restate that rule and the
+# unchanged blocking rule here instead of importing them from the code.
+
+CAP = "UNAVAILABLE"
+ATTESTED_STATUSES: dict[str, list[AttestedCertificationInput]] = {
+    "BLOCKED": [_attested("BLOCKED", "phase1_7b_base"), _attested("VERIFIED")],
+    "UNRECONCILED": [_attested("UNRECONCILED")],
+    "UNAVAILABLE": [_attested("UNAVAILABLE", "phase1_7b_base", True)],
+    "DEGRADED": [_attested("DEGRADED", validated=True), _attested("VERIFIED", "phase1_7b_base")],
+    "VERIFIED": VERIFIED_INPUTS,
+}
+CAP_CASES = list(itertools.product(ATTESTED_STATUSES, FINDING_SETS))
+
+
+def _oracle_status(attested: str, verdicts: list[tuple[str, str]]) -> str:
+    if any(status == "inconclusive" for _, status in verdicts):
+        return min(attested, CAP, key=RANK.index)
+    return attested
+
+
+def _oracle_blocked(verdicts: list[tuple[str, str]]) -> bool:
+    """Today's rule, untouched by the cap: a restatement or an inconclusive finding blocks."""
+    return any(kind == "restatement" or status == "inconclusive" for kind, status in verdicts)
+
+
+def _hand_record(name: str, status: str) -> dict[str, Any]:
+    """The record envelope for finding set `name` and `status`, built with json + hashlib."""
+    _, evidence, findings = _set_scenario(name)
+    return {
+        "$schema": RECORD_TYPE,
+        "finding_locators": sorted((_locator_dict(FINDING_TYPE, f.to_dict()) for f in findings), key=_jcs),
+        "derived_certification_status": status,
+        "mutation_recommendations_blocked": _oracle_blocked(FINDING_SETS[name][1]),
+        "output_digest": _output_digest(evidence),
+    }
+
+
+def test_finding_sets_come_from_the_evaluator() -> None:
+    for name, (_, verdicts) in FINDING_SETS.items():
+        findings = _set_scenario(name)[2]
+        assert sorted((f.finding_type, f.finding_status) for f in findings) == verdicts, name
+    assert [_oracle_blocked(FINDING_SETS[name][1]) for name in FINDING_SETS] == [False, False, True, True]
+
+
+@pytest.mark.parametrize(("attested", "finding_set"), CAP_CASES)
+def test_inconclusive_finding_caps_the_status_at_unavailable(attested: str, finding_set: str) -> None:
+    context, evidence, findings = _set_scenario(finding_set)
+    verdicts = FINDING_SETS[finding_set][1]
+    inputs = ATTESTED_STATUSES[attested]
+    record = build_certification_record(context, evidence, findings, inputs)
+    assert record.derived_certification_status is DerivedCertificationStatus(_oracle_status(attested, verdicts))
+    assert record.mutation_recommendations_blocked is _oracle_blocked(verdicts)
+    assert verify_certification_record(record, context, evidence, findings, inputs) is record
+    signed = _sign(record)
+    assert verify_certification_record(signed, context, evidence, findings, inputs) is signed
+
+
+@pytest.mark.parametrize(("attested", "finding_set"), CAP_CASES)
+def test_cap_moves_preimage_digest_and_locator_exactly_when_the_status_moves(
+    attested: str, finding_set: str
+) -> None:
+    capped = _oracle_status(attested, FINDING_SETS[finding_set][1])
+    record = _certify(finding_set, ATTESTED_STATUSES[attested])
+    uncapped_wire, capped_wire = _hand_record(finding_set, attested), _hand_record(finding_set, capped)
+    assert record.to_dict() == capped_wire
+    unsigned = dataclasses.replace(record, integrity=_unsigned_integrity())
+    block = _unsigned_integrity().to_dict()
+    assert unsigned.p1_preimage() == {**capped_wire, "integrity": block}
+    digest = hashlib.sha256(json.dumps({**capped_wire, "integrity": block}, sort_keys=True,
+                                       separators=(",", ":")).encode("ascii")).hexdigest()
+    assert unsigned.p1_content_digest() == "sha256:" + digest
+    locator = record.locator().to_dict()
+    assert locator == _locator_dict(RECORD_TYPE, capped_wire)
+    unchanged = capped == attested
+    assert (unsigned.p1_content_digest() == _sha({**uncapped_wire, "integrity": block})) is unchanged
+    assert (locator == _locator_dict(RECORD_TYPE, uncapped_wire)) is unchanged
+    if finding_set in ("none", "detected"):  # byte-identical to the record before the cap existed
+        assert unchanged and _jcs(record.to_dict()) == _jcs(uncapped_wire)
+
+
+@pytest.mark.parametrize("claimed", RANK)
+@pytest.mark.parametrize(("attested", "finding_set"), CAP_CASES)
+def test_verify_admits_only_the_capped_status(attested: str, finding_set: str, claimed: str) -> None:
+    context, evidence, findings = _set_scenario(finding_set)
+    inputs = ATTESTED_STATUSES[attested]
+    built = build_certification_record(context, evidence, findings, inputs)
+    forged = _sign(
+        AnalyticalCertificationRecord.from_dict({**built.to_dict(), "derived_certification_status": claimed})
+    )
+    assert forged.to_dict()["integrity"]["content_digest"] == _sha(_strip_signature(forged.to_dict()))
+    if claimed == _oracle_status(attested, FINDING_SETS[finding_set][1]):
+        assert verify_certification_record(forged, context, evidence, findings, inputs) is forged
+        return
+    _raises("record_mismatch", verify_certification_record, forged, context, evidence, findings, inputs)
+    unsigned_forged = {k: v for k, v in forged.to_dict().items() if k != "integrity"}
+    assert build_certification_record(context, evidence, findings, inputs).to_dict() != unsigned_forged
+
+
+@pytest.mark.parametrize("finding_set", ["inconclusive", "mixed"])
+def test_degraded_admission_still_raises_when_the_cap_would_lower_the_status(finding_set: str) -> None:
+    context, evidence, findings = _set_scenario(finding_set)
+    capped = _certify(finding_set, ATTESTED_STATUSES["UNAVAILABLE"])
+    for inputs in (
+        [_attested("DEGRADED")],
+        [_attested("DEGRADED"), _attested("VERIFIED", validated=True)],
+        [_attested("DEGRADED", "derived_input", False), _attested("VERIFIED", "phase1_7b_base", True)],
+    ):
+        _raises("degraded_not_permitted", build_certification_record, context, evidence, findings, inputs)
+        _raises("degraded_not_permitted", verify_certification_record, capped, context, evidence, findings, inputs)
+    admitted = _certify(finding_set, [_attested("DEGRADED", validated=True)])
+    assert admitted.to_dict() == capped.to_dict()
 
 
 RECORD_MUTATIONS: list[tuple[str, Callable[[dict[str, Any]], Any]]] = [
