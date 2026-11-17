@@ -135,6 +135,7 @@ def fact(
     side: str = "candidate",
     presence_status: str = "observed",
     metric_date: str = DAY,
+    currency: str = "BRL",
 ) -> NormalizedCollectionFact:
     short = metric.split(":", 1)[1].rsplit("_", 1)[0]
     source = f"source-metric:provider:{_SOURCES[side]}.{short}:v1"
@@ -156,7 +157,7 @@ def fact(
         value_type=(("int64_minor_currency" if is_money else "int64_count") if observed else None),
         raw_numeric_value=raw if observed else None,
         unit=(("minor_currency" if is_money else "count") if observed else None),
-        currency=("BRL" if is_money and observed else None),
+        currency=(currency if is_money and observed else None),
     )
 
 
@@ -531,8 +532,15 @@ def collection_result(
         semantic_version="smart-ads-semantic-1.0.0",
     )
     sorted_facts, digest = compute_normalized_fact_set_digest(facts)
+    query_currency = next(
+        (f.currency for f in sorted_facts if f.value_type == "int64_minor_currency" and f.currency),
+        "BRL",
+    )
     rows = sorted(
-        (project_collection_fact_to_landing_row(f, ctx) for f in sorted_facts),
+        (
+            project_collection_fact_to_landing_row(f, ctx, query_currency=query_currency)
+            for f in sorted_facts
+        ),
         key=lambda row: row.candidate_sort_key_jcs(),
     )
     return CollectionResult(
@@ -1102,3 +1110,304 @@ def test_native_check_rejects_wrongly_typed_arguments() -> None:
     with pytest.raises(Bundle7BDefectError) as excinfo:
         b7.check_native_request(native_dict(), **good)  # type: ignore[arg-type]
     assert code_of(excinfo) == "malformed_argument"
+
+
+# ===========================================================================
+# Slice 5 - reconcile_7b_fact_sets (failed comparisons are values)
+# ===========================================================================
+
+GATE3_LOC = _loc("smart_ads/gate3_selection_receipt/v1", "1")
+RUN_LOC = _loc("smart_ads/migration_run_context/v1", "3")
+SCOPE = "scope:campaigns-active"
+QUERY_DIGEST = canonical_query().canonical_query_digest
+CANDIDATE_VALUES = {**BASE_VALUES, (REF_A, CLICKS): "101"}
+WITHIN_TOLERANCE_ROW = {
+    "measured_absolute_delta": "1",
+    "measured_relative_delta": "0.010000",
+    "relative_delta_status": "computed",
+    "reconciliation_outcome": "within_declared_tolerance",
+    "metric_verification_status": "VERIFIED",
+}
+
+
+def profile_dict(
+    metric: str,
+    *,
+    max_abs: str = "0",
+    max_rel: str = "0.000000",
+    query_digest: str = QUERY_DIGEST,
+    scope: str = SCOPE,
+    gate3: ArtifactLocator = GATE3_LOC,
+    run: ArtifactLocator = RUN_LOC,
+    signed: bool = True,
+) -> dict[str, Any]:
+    exact = max_abs == "0" and max_rel == "0.000000"
+    data: dict[str, Any] = {
+        "$schema": "smart_ads/tolerance_profile/v1",
+        "canonical_metric_ref": metric,
+        "value_type": "int64_minor_currency" if metric == SPEND else "int64_count",
+        "max_absolute_delta": max_abs,
+        "max_relative_delta": max_rel,
+        "decimal_scale": 6,
+        "rounding_mode": "ROUND_HALF_UP",
+        "reference_zero_rule": "exact_zero_only",
+        "authorization_binding": None if exact else {
+            "gate3_selection_locator": gate3.to_dict(),
+            "canonical_query_digest": query_digest,
+            "authorized_certification_scope": scope,
+            "migration_run_context_locator": run.to_dict(),
+        },
+    }
+    if signed:
+        data["integrity"] = {
+            "key_id": KEY_ID, "key_registry_snapshot_locator": _registry_loc().to_dict()
+        }
+        data["integrity"].update(
+            content_digest=p1_content_digest(data), signature_base64=_signature()
+        )
+    return data
+
+
+def default_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        IMPRESSIONS: profile_dict(IMPRESSIONS),
+        CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000"),
+        SPEND: profile_dict(SPEND),
+    }
+
+
+def oracle_profile_locator(data: dict[str, Any]) -> ArtifactLocator:
+    digest = "sha256:" + hashlib.sha256(oracle_jcs(data)).hexdigest()
+    return ArtifactLocator.from_digest("smart_ads/tolerance_profile/v1", digest)
+
+
+def reconcile(
+    cand: CollectionResult,
+    ref: CollectionResult,
+    profiles: dict[str, dict[str, Any]] | None = None,
+    **overrides: Any,
+) -> b7.Reconciliation7BResult:
+    kwargs: dict[str, Any] = {
+        "candidate_result": cand,
+        "reference_result": ref,
+        "tolerance_profiles": default_profiles() if profiles is None else profiles,
+        "gate3_selection_locator": GATE3_LOC,
+        "canonical_query_digest": QUERY_DIGEST,
+        "authorized_certification_scope": SCOPE,
+        "migration_run_context_locator": RUN_LOC,
+    }
+    kwargs.update(overrides)
+    return b7.reconcile_7b_fact_sets(**kwargs)
+
+
+def results(
+    cand_values: dict[tuple[str, str], str] = CANDIDATE_VALUES,
+    ref_values: dict[tuple[str, str], str] = BASE_VALUES,
+    *,
+    cand_at: str = CANDIDATE_AT,
+    ref_at: str = REFERENCE_AT,
+    cand_facts: list[NormalizedCollectionFact] | None = None,
+    ref_facts: list[NormalizedCollectionFact] | None = None,
+) -> tuple[CollectionResult, CollectionResult]:
+    cand = collection_result(
+        cand_facts if cand_facts is not None else facts_for(cand_values),
+        side="candidate", retrieved_at=cand_at,
+    )
+    ref = collection_result(
+        ref_facts if ref_facts is not None else facts_for(ref_values, side="reference"),
+        side="reference", retrieved_at=ref_at,
+    )
+    return cand, ref
+
+
+def test_reconcile_verifies_a_complete_matching_bundle() -> None:
+    cand, ref = results()
+    result = reconcile(cand, ref)
+    assert result.bundle_outcome == "verified"
+    assert result.defect_codes == ()
+    pairs = [rec.pair_key() for rec in result.fact_reconciliations]
+    assert pairs == list(expected_pair_universe([row_key(REF_A), row_key(REF_B)]))
+    assert result.candidate_row_count == result.reference_row_count == 6
+    universe = [row_key(REF_A).to_dict(), row_key(REF_B).to_dict()]
+    expected_u7 = oracle_domain_digest("SMART-ADS:7B-ROW-UNIVERSE:V1\n", universe)
+    assert result.candidate_row_universe_digest == result.reference_row_universe_digest == expected_u7
+    assert result.logical_fact_reconciliation_digest == oracle_domain_digest(
+        "SMART-ADS:7B-FACT-RECONCILIATIONS:V1\n",
+        [rec.to_dict() for rec in result.fact_reconciliations],
+    )
+
+
+def test_reconcile_builds_each_member_from_the_resolved_evidence() -> None:
+    cand, ref = results()
+    result = reconcile(cand, ref)
+    clicks = result.fact_reconciliations[0]
+    assert clicks.pair_key() == MetricPairKey(row_key(REF_A), CLICKS)
+    data = clicks.to_dict()
+    assert {k: data[k] for k in COMPARISON_KEYS} == WITHIN_TOLERANCE_ROW
+    assert data["tolerance_profile_locator"] == oracle_profile_locator(default_profiles()[CLICKS]).to_dict()
+    assert data["candidate"]["raw_numeric_value"] == "101"
+    assert data["reference"]["raw_numeric_value"] == "100"
+    assert data["candidate"]["fact_evidence_selector"]["collection_result_locator"] == (
+        oracle_result_locator(cand).to_dict()
+    )
+    assert data["reference"]["fact_evidence_selector"]["collection_result_locator"] == (
+        oracle_result_locator(ref).to_dict()
+    )
+    zero_ref = result.fact_reconciliations[3].to_dict()
+    assert {k: zero_ref[k] for k in COMPARISON_KEYS} == {
+        "measured_absolute_delta": "0",
+        "measured_relative_delta": None,
+        "relative_delta_status": "reference_zero",
+        "reconciliation_outcome": "exact_match",
+        "metric_verification_status": "VERIFIED",
+    }
+
+
+def test_reconcile_returns_a_mismatch_as_a_value() -> None:
+    cand, ref = results({**CANDIDATE_VALUES, (REF_A, SPEND): "60000"})
+    result = reconcile(cand, ref)
+    assert result.bundle_outcome == "failed"
+    assert result.defect_codes == ("metric_unreconciled",)
+    spend = result.fact_reconciliations[2]
+    assert spend.metric_verification_status == "UNRECONCILED"
+    assert spend.reconciliation_outcome == "mismatch"
+
+
+def test_reconcile_returns_unavailable_and_blocked_comparisons_as_values() -> None:
+    cand_facts = facts_for(CANDIDATE_VALUES)
+    ref_facts = [
+        fact(REF_A, IMPRESSIONS, None, side="reference", presence_status="retracted_tombstone")
+        if (ref, metric) == (REF_A, IMPRESSIONS)
+        else fact(ref, SPEND, raw, side="reference", currency="USD")
+        if metric == SPEND
+        else fact(ref, metric, raw, side="reference")
+        for (ref, metric), raw in BASE_VALUES.items()
+    ]
+    cand, ref = results(cand_facts=cand_facts, ref_facts=ref_facts)
+    result = reconcile(cand, ref)
+    assert result.bundle_outcome == "failed"
+    assert result.defect_codes == ("metric_blocked", "metric_unavailable")
+    statuses = {r.pair_key().kfive()[0] + r.canonical_metric_ref: r.metric_verification_status
+                for r in result.fact_reconciliations}
+    assert statuses[REF_A + IMPRESSIONS] == "UNAVAILABLE"
+    assert statuses[REF_A + SPEND] == statuses[REF_B + SPEND] == "BLOCKED"
+
+
+def test_reconcile_reports_a_missing_pair_on_one_side() -> None:
+    ref_values = {k: v for k, v in BASE_VALUES.items() if k != (REF_B, SPEND)}
+    cand, ref = results(ref_values=ref_values)
+    result = reconcile(cand, ref)
+    assert result.bundle_outcome == "failed"
+    assert result.defect_codes == ("pair_universe_incomplete", "pair_universe_mismatch")
+    assert len(result.fact_reconciliations) == 5
+    assert result.reference_row_count == 5
+
+
+def test_reconcile_reports_an_extra_metric_on_one_side() -> None:
+    cand_facts = facts_for(CANDIDATE_VALUES) + [fact(REF_A, "metric:reach_v1", "9")]
+    cand, ref = results(cand_facts=cand_facts)
+    result = reconcile(cand, ref)
+    assert result.defect_codes == ("pair_universe_incomplete", "pair_universe_mismatch")
+    assert len(result.fact_reconciliations) == 6
+
+
+def test_reconcile_reports_a_row_present_on_one_side_only() -> None:
+    extra = {(REF_C, IMPRESSIONS): "1", (REF_C, CLICKS): "1", (REF_C, SPEND): "1"}
+    cand, ref = results({**CANDIDATE_VALUES, **extra})
+    result = reconcile(cand, ref)
+    assert result.defect_codes == ("pair_universe_mismatch", "row_universe_mismatch")
+    assert result.candidate_row_count == 9 and result.reference_row_count == 6
+    assert result.candidate_row_universe_digest != result.reference_row_universe_digest
+
+
+@pytest.mark.parametrize(
+    ("ref_at", "codes"),
+    [
+        ("2026-11-11T04:20:00.000000Z", ()),
+        ("2026-11-11T04:10:00.000000Z", ()),
+        ("2026-11-11T04:20:00.000001Z", ("retrieval_skew_exceeded",)),
+        ("2026-11-11T04:20:01.000000Z", ("retrieval_skew_exceeded",)),
+        ("2026-11-11T04:09:59.000000Z", ("retrieval_skew_exceeded",)),
+    ],
+)
+def test_reconcile_allows_exactly_300_seconds_of_retrieval_skew(
+    ref_at: str, codes: tuple[str, ...]
+) -> None:
+    cand, ref = results(ref_at=ref_at)
+    assert reconcile(cand, ref).defect_codes == codes
+
+
+def test_reconcile_rejects_incomplete_or_wrong_side_results() -> None:
+    cand, ref = results()
+    partial = dataclasses.replace(
+        cand, candidates=(), normalized_fact_set=None, normalized_fact_set_digest=None
+    )
+    for args, code in (
+        ((partial, ref), "collection_result_incomplete"),
+        ((ref, cand), "collection_result_mismatch"),
+        ((cand, cand), "collection_result_mismatch"),
+        ((cand.to_dict(), ref), "malformed_argument"),
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            reconcile(*args)  # type: ignore[arg-type]
+        assert code_of(excinfo) == code
+
+
+def test_reconcile_requires_one_signed_profile_per_required_metric() -> None:
+    cand, ref = results()
+    missing = {k: v for k, v in default_profiles().items() if k != SPEND}
+    extra = dict(default_profiles(), **{"metric:reach_v1": profile_dict(CLICKS)})
+    swapped = dict(default_profiles(), **{SPEND: profile_dict(IMPRESSIONS)})
+    unsigned = dict(default_profiles(), **{CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000", signed=False)})
+    unsigned_exact = dict(default_profiles(), **{SPEND: profile_dict(SPEND, signed=False)})
+    malformed = dict(default_profiles(), **{SPEND: dict(profile_dict(SPEND), decimal_scale=2)})
+    for profiles, code in (
+        (missing, "tolerance_profile_unresolved"),
+        (extra, "tolerance_profile_unresolved"),
+        (swapped, "tolerance_profile_metric_mismatch"),
+        (unsigned, "tolerance_profile_unsigned"),
+        (unsigned_exact, "tolerance_profile_unsigned"),
+        (malformed, "tolerance_profile_malformed"),
+        ([], "malformed_argument"),
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            reconcile(cand, ref, profiles)  # type: ignore[arg-type]
+        assert code_of(excinfo) == code
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"query_digest": _sha("e")},
+        {"scope": "scope:other-scope"},
+        {"run": _loc("smart_ads/migration_run_context/v1", "e")},
+        {"gate3": _loc("smart_ads/gate3_selection_receipt/v1", "e")},
+    ],
+)
+def test_reconcile_rejects_a_non_zero_profile_bound_elsewhere(binding: dict[str, Any]) -> None:
+    cand, ref = results()
+    rebound = profile_dict(CLICKS, max_abs="5", max_rel="0.050000", **binding)
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        reconcile(cand, ref, dict(default_profiles(), **{CLICKS: rebound}))
+    assert code_of(excinfo) == "tolerance_profile_unbound"
+
+
+def test_reconcile_rejects_malformed_binding_arguments() -> None:
+    cand, ref = results()
+    for name, bad in (
+        ("canonical_query_digest", "sha256:X"),
+        ("authorized_certification_scope", "campaigns"),
+        ("gate3_selection_locator", GATE3_LOC.to_dict()),
+        ("migration_run_context_locator", None),
+    ):
+        with pytest.raises(Bundle7BDefectError) as excinfo:
+            reconcile(cand, ref, **{name: bad})
+        assert code_of(excinfo) == "malformed_argument"
+
+
+def test_reconcile_result_is_immutable_and_its_codes_are_closed() -> None:
+    cand, ref = results()
+    result = reconcile(cand, ref)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.bundle_outcome = "failed"  # type: ignore[misc]
+    assert set(b7.RECONCILE_OUTCOME_CODES) <= b7.DEFECT_CODES
