@@ -1322,20 +1322,37 @@ def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
     assert schema_ids == sorted(schema_ids, key=lambda s: s.encode("utf-8"))
+    assert len(schema_ids) == 28
+    assert len(set(schema_ids)) == len(schema_ids)
     assert set(schema_ids) == {
         "smart_ads/admitted_collection/v1",
+        "smart_ads/analysis_execution/v1",
+        "smart_ads/analysis_policy/v1",
+        "smart_ads/analysis_result/v1",
+        "smart_ads/analysis_result_schema/v1",
         "smart_ads/analytics_landing_row/v1",
         "smart_ads/artifact_locator/v1",
         "smart_ads/base_metric_definition/v1",
         "smart_ads/canonical_query_contract/v1",
+        "smart_ads/canonical_result_set/v1",
         "smart_ads/capability_invalidation_transition/v1",
         "smart_ads/capability_revalidation_transition/v1",
+        "smart_ads/certification_7b_record/v1",
+        "smart_ads/certification_record/v1",
         "smart_ads/collection_result/v1",
+        "smart_ads/derived_metric_definition/v1",
         "smart_ads/expected_resource_inventory/v1",
+        "smart_ads/fact_evidence_selector/v1",
+        "smart_ads/fact_reconciliation/v1",
+        "smart_ads/finding/v1",
+        "smart_ads/formula_bundle/v1",
+        "smart_ads/native_request_projection/v1",
         "smart_ads/normalized_collection_fact/v1",
         "smart_ads/pipeboard_phase1_contract/v1",
         "smart_ads/private_registry_snapshot/v1",
+        "smart_ads/regression_fixture/v1",
         "smart_ads/semantic_observation_projection/v1",
+        "smart_ads/tolerance_profile/v1",
     }
 
     by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}

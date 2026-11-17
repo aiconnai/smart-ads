@@ -241,7 +241,7 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
     assert inspection["packaged_modules"] == sorted(
         EXPECTED_PACKAGED_MODULES, key=lambda s: s.encode("utf-8")
     )
-    assert len(inspection["packaged_modules"]) == 24
+    assert len(inspection["packaged_modules"]) == 43
     assert inspection["archive_allowlist_passed"] is True
     assert inspection["ast_boundary_scan_passed"] is True
     assert inspection["isolated_venv_import_passed"] is True

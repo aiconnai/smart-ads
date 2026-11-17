@@ -1,0 +1,400 @@
+"""``verify_certification_7b_record``: recompute a 7B record from resolved evidence (ADR 5.4).
+
+Trust limits of the verifier (what is not verified):
+
+* ``wheel_digest`` and the three reference digests are checked for grammar only;
+* the ``gate3_certification_fingerprint`` argument is trusted as the selection's
+  ``certification_fingerprint``: only five of its members are compared with
+  ``ResolvedGate3SelectionState``; the other six (selected_meta_api_version,
+  reference_client_identity_digest, official_source_locators_digest,
+  parser_code_digest, adapter_code_digest, mapping_rules_digest) and
+  ``certification_fingerprint_digest`` are not, since the ADR gives no formula for
+  that digest;
+* ``effect_proof/v1`` contents are not modelled.
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping
+import dataclasses
+from typing import Any, Final
+
+from smart_ads.contracts.jcs import ArtifactLocator
+from smart_ads.contracts.schemas import AdmittedCollection, CollectionResult
+from smart_ads.domain.pipeboard_contract import PipeboardPhase1Contract
+from smart_ads.ports.cell_runtime import ResolvedGate3SelectionState
+from smart_ads.reconciliation.bundle_common import (
+    EFFECT_PROOF_SCHEMA,
+    RUN_CONTEXT_SCHEMA,
+    Bundle7BDefectError,
+    artifact_locator_for,
+    checked_argument_locator,
+    guard_any,
+    query_bytes,
+    reparsed,
+    require_bool,
+    require_callable,
+    require_member,
+    require_type,
+)
+from smart_ads.reconciliation.bundle_evidence import (
+    FactReconciliation,
+    ReconciliationSide,
+    ResultIndex,
+    resolve_indexed_evidence,
+)
+from smart_ads.reconciliation.bundle_executions import (
+    CandidateExecution,
+    Gate3CertificationFingerprint,
+    require_same_fingerprint,
+)
+from smart_ads.reconciliation.bundle_native import NativeToCanonicalAlgorithm, check_native_request
+from smart_ads.reconciliation.bundle_reconcile import (
+    ResolvedProfiles,
+    binding_members,
+    resolve_profiles,
+    side_facts,
+)
+from smart_ads.reconciliation.bundle_record import Certification7BRecord
+from smart_ads.reconciliation.bundle_universe import (
+    SideUniverse,
+    pair_of,
+    require_facts_in_query,
+)
+from smart_ads.reconciliation.tolerance import ComparisonSide, compare_sides
+
+_LIVE_7B_PURPOSE: Final[str] = "live_verification_7b"
+# Resolved Gate-3 selection members that must agree with the resolved fingerprint.
+_GATE3_STATE_FINGERPRINT_PAIRS: Final[tuple[str, ...]] = (
+    "candidate_driver_contract_digest",
+    "canonical_query_digest",
+    "schema_bundle_digest",
+    "resource_mapping_contract_digest",
+    "authorized_certification_scope",
+)
+# Value objects with a wire form: (name, expected_type, is_p1_envelope).
+_REPARSED_ARGUMENTS: Final[tuple[tuple[str, type, bool], ...]] = (
+    ("gate3_certification_fingerprint", Gate3CertificationFingerprint, False),
+    ("driver_contract", PipeboardPhase1Contract, True),
+    ("candidate_admission", AdmittedCollection, True),
+    ("reference_admission", AdmittedCollection, True),
+    ("candidate_result", CollectionResult, True),
+    ("reference_result", CollectionResult, True),
+)
+_LOCATOR_ARGUMENTS: Final[tuple[tuple[str, str], ...]] = (
+    ("migration_run_context_locator", RUN_CONTEXT_SCHEMA),
+    ("candidate_effect_proof_locator", EFFECT_PROOF_SCHEMA),
+    ("reference_effect_proof_locator", EFFECT_PROOF_SCHEMA),
+    ("candidate_effect_result_locator", CollectionResult.SCHEMA),
+    ("reference_effect_result_locator", CollectionResult.SCHEMA),
+)
+
+
+def _verify_arguments(
+    record: object, arguments: Mapping[str, Any], *, require_signed: object
+) -> None:
+    """Argument classes only; the content of every object is checked on its copy."""
+    require_bool(require_signed, label="require_signed")
+    require_type(record, Certification7BRecord, label="record")
+    for name, expected in (
+        ("gate3_selection", ResolvedGate3SelectionState),
+        *((name, expected) for name, expected, _ in _REPARSED_ARGUMENTS),
+        *((name, ArtifactLocator) for name, _ in _LOCATOR_ARGUMENTS),
+    ):
+        require_type(arguments[name], expected, label=name)
+    require_callable(arguments["project_native_request"], label="project_native_request")
+
+
+def _revalidated(
+    record: Certification7BRecord, arguments: Mapping[str, Any], *, require_signed: bool
+) -> tuple[Certification7BRecord, dict[str, Any]]:
+    """Fresh copies of the record and of every value object the verifier consumes."""
+    fresh_record = reparsed(
+        record, Certification7BRecord, label="record", require_signed=require_signed
+    )
+    checked: dict[str, Any] = dict(arguments)
+    for name, expected, is_p1 in _REPARSED_ARGUMENTS:
+        checked[name] = reparsed(
+            arguments[name], expected, label=name, require_signed=require_signed and is_p1
+        )
+    for name, artifact_type in _LOCATOR_ARGUMENTS:
+        checked[name] = checked_argument_locator(arguments[name], artifact_type, label=name)
+    checked["gate3_selection"] = _rebuilt_selection(arguments["gate3_selection"])
+    return fresh_record, checked
+
+
+def _rebuilt_selection(selection: ResolvedGate3SelectionState) -> ResolvedGate3SelectionState:
+    def rebuild() -> ResolvedGate3SelectionState:
+        label = "gate3_selection.locator"
+        require_member(selection.locator, ArtifactLocator, label=label)
+        locator = reparsed(selection.locator, ArtifactLocator, label=label)
+        return dataclasses.replace(selection, locator=locator)
+
+    return guard_any("malformed_member", "gate3_selection", rebuild)
+
+
+def _verify_gate3(
+    record: Certification7BRecord,
+    selection: ResolvedGate3SelectionState,
+    resolved: Gate3CertificationFingerprint,
+) -> None:
+    """Same fresh certification-role selection; whole-object fingerprint equality on both sides."""
+    if selection.locator != record.gate3_selection_locator:
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch", "record names another Gate-3 selection"
+        )
+    if selection.selection_role != "certification":
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch", "only a certification-role selection may appear in 7B"
+        )
+    query_scope = record.canonical_query_contract.resource_scope_ref
+    if selection.authorized_certification_scope != query_scope:
+        raise Bundle7BDefectError(
+            "gate3_selection_mismatch", "selection scope differs from canonical query scope"
+        )
+    for name in ("candidate_execution", "reference_execution"):
+        own = getattr(record, name).gate3_certification_fingerprint
+        require_same_fingerprint(own, resolved, label=f"{name} vs resolved Gate-3 selection")
+    for member in _GATE3_STATE_FINGERPRINT_PAIRS:
+        if getattr(selection, member) != getattr(resolved, member):
+            raise Bundle7BDefectError(
+                "gate3_selection_mismatch", f"selection {member} differs from its fingerprint"
+            )
+
+
+def _verify_effect_locators(record: Certification7BRecord, arguments: Mapping[str, Any]) -> None:
+    for side in ("candidate", "reference"):
+        recorded = getattr(record, f"{side}_execution").effect_proof_locator
+        if recorded != arguments[f"{side}_effect_proof_locator"]:
+            raise Bundle7BDefectError(
+                "effect_proof_mismatch", f"{side}: record names another effect proof"
+            )
+    candidate_result = arguments["candidate_effect_result_locator"]
+    if candidate_result == arguments["reference_effect_result_locator"]:
+        raise Bundle7BDefectError(
+            "effect_proof_not_distinct", "one action result cannot satisfy both sides"
+        )
+
+
+def _verify_bindings(record: Certification7BRecord, arguments: Mapping[str, Any]) -> None:
+    if record.migration_run_context_locator != arguments["migration_run_context_locator"]:
+        raise Bundle7BDefectError(
+            "run_context_mismatch", "record belongs to another migration run"
+        )
+    _verify_gate3(
+        record, arguments["gate3_selection"], arguments["gate3_certification_fingerprint"]
+    )
+    _verify_effect_locators(record, arguments)
+    contract_locator = artifact_locator_for(
+        PipeboardPhase1Contract.SCHEMA, arguments["driver_contract"]
+    )
+    if contract_locator != record.candidate_execution.driver_contract_locator:
+        raise Bundle7BDefectError(
+            "driver_contract_unresolved", "candidate contract locator does not resolve"
+        )
+
+
+def _verify_admission(
+    record: Certification7BRecord, execution: Any, admission: AdmittedCollection
+) -> None:
+    label = "admission"
+    admitted_locator = artifact_locator_for(AdmittedCollection.SCHEMA, admission)
+    if admitted_locator != execution.admitted_collection_locator:
+        raise Bundle7BDefectError(
+            "admission_mismatch", f"{label}: does not resolve the side's locator"
+        )
+    if admission.collection_purpose != _LIVE_7B_PURPOSE:
+        raise Bundle7BDefectError(
+            "admission_mismatch", f"{label}: purpose must be {_LIVE_7B_PURPOSE!r}"
+        )
+    prereqs = admission.purpose_prerequisite_locators
+    if prereqs.gate3_selection_receipt_locator != record.gate3_selection_locator:
+        raise Bundle7BDefectError(
+            "admission_mismatch", f"{label}: gate3_selection_receipt_locator differs"
+        )
+    admitted_query = query_bytes(admission.canonical_query_contract)
+    if admitted_query != query_bytes(record.canonical_query_contract):
+        raise Bundle7BDefectError("admission_mismatch", f"{label}: admitted another query")
+    if admission.registry_snapshot_locator != record.candidate_execution.registry_snapshot_locator:
+        raise Bundle7BDefectError("admission_mismatch", f"{label}: registry snapshot differs")
+    if isinstance(execution, CandidateExecution) and (
+        (admission.driver_id, admission.driver_contract_locator)
+        != (execution.driver_id, execution.driver_contract_locator)
+    ):
+        raise Bundle7BDefectError("admission_mismatch", f"{label}: driver or contract differs")
+
+
+def _verify_result_binding(
+    execution: Any, admission: AdmittedCollection, result: CollectionResult, call_side: str
+) -> None:
+    if result.admitted_collection_locator != execution.admitted_collection_locator or (
+        result.retrieval_context.retrieved_at_utc != execution.retrieved_at_utc
+    ):
+        raise Bundle7BDefectError(
+            "collection_result_mismatch", f"{call_side}: admission or retrieval time differs"
+        )
+    if (
+        result.registry_snapshot_locator != admission.registry_snapshot_locator
+        or result.requested_capabilities != admission.requested_capabilities
+    ):
+        raise Bundle7BDefectError(
+            "collection_result_mismatch", f"{call_side}: result registry or capabilities differ"
+        )
+    if result.normalized_fact_set_digest != execution.normalized_fact_set_digest:
+        raise Bundle7BDefectError(
+            "normalized_fact_set_digest_mismatch", f"{call_side}: set digest differs"
+        )
+
+
+def _verify_result(
+    record: Certification7BRecord,
+    execution: Any,
+    admission: AdmittedCollection,
+    index: ResultIndex,
+    call_side: str,
+    effect_result: ArtifactLocator,
+) -> None:
+    result = index.result
+    facts = side_facts(result, call_side)
+    _verify_result_binding(execution, admission, result, call_side)
+    require_facts_in_query(facts, record.canonical_query_contract, label=f"{call_side}_result")
+    if index.locator != effect_result:
+        raise Bundle7BDefectError(
+            "effect_result_mismatch", f"{call_side}: effect proof result is another result"
+        )
+    universe = SideUniverse.of(facts)
+    if universe.row_universe_digest != execution.row_universe_digest:
+        raise Bundle7BDefectError(
+            "row_universe_digest_mismatch", f"{call_side}: recomputed U7 digest differs"
+        )
+    if not universe.is_complete:
+        raise Bundle7BDefectError(
+            "pair_universe_incomplete", f"{call_side}: U7M is not U7 x required_metrics"
+        )
+    if len(universe.pairs) != execution.row_count:
+        raise Bundle7BDefectError(
+            "row_count_mismatch", f"{call_side}: row_count must equal length(U7M)"
+        )
+
+
+def _verify_side(
+    record: Certification7BRecord, call_side: str, arguments: Mapping[str, Any]
+) -> ResultIndex:
+    """Bind one side's admission, result and native projection; return its index."""
+    execution = getattr(record, f"{call_side}_execution")
+    admission = arguments[f"{call_side}_admission"]
+    _verify_admission(record, execution, admission)
+    index = ResultIndex.of(arguments[f"{call_side}_result"])
+    _verify_result(
+        record,
+        execution,
+        admission,
+        index,
+        call_side,
+        arguments[f"{call_side}_effect_result_locator"],
+    )
+    check_native_request(
+        execution.native_request_projection,
+        native_request_digest=execution.native_request_digest,
+        canonical_query=record.canonical_query_contract,
+        algorithm_digest=execution.native_to_canonical_projection_algorithm_digest,
+        project_native_request=arguments["project_native_request"],
+    )
+    return index
+
+
+def _verify_side_evidence(
+    item: FactReconciliation, side_name: str, result: ResultIndex
+) -> ComparisonSide:
+    side = getattr(item, side_name)
+    fact = resolve_indexed_evidence(side.fact_evidence_selector, result)
+    if pair_of(fact) != item.pair_key():
+        raise Bundle7BDefectError(
+            "evidence_selector_mismatch", f"{side_name}: fact metric is not the compared metric"
+        )
+    resolved = ReconciliationSide.for_fact(fact, side.fact_evidence_selector)
+    if resolved != side:
+        raise Bundle7BDefectError(
+            "evidence_value_mismatch", f"{side_name}: copied fields differ from the fact"
+        )
+    return resolved.comparison_side()
+
+
+def _verify_reconciliation(
+    item: FactReconciliation,
+    indexes: Mapping[str, ResultIndex],
+    profiles: ResolvedProfiles,
+) -> None:
+    candidate = _verify_side_evidence(item, "candidate", indexes["candidate"])
+    reference = _verify_side_evidence(item, "reference", indexes["reference"])
+    metric = item.canonical_metric_ref
+    profile, profile_locator = profiles[metric]
+    if item.tolerance_profile_locator != profile_locator:
+        raise Bundle7BDefectError(
+            "tolerance_profile_locator_mismatch", "reconciliation names another profile"
+        )
+    recomputed = compare_sides(candidate, reference, profile, canonical_metric_ref=metric)
+    if recomputed != item.asserted_comparison:
+        raise Bundle7BDefectError(
+            "asserted_comparison_mismatch", f"{item.pair_key().kfive()}: asserted members differ"
+        )
+
+
+def _verify_reconciliations(
+    record: Certification7BRecord,
+    indexes: Mapping[str, ResultIndex],
+    tolerance_profiles: object,
+) -> None:
+    """Resolve the protected profiles under the record's run, query, scope and selection."""
+    binding = binding_members(
+        gate3_selection_locator=record.gate3_selection_locator,
+        canonical_query_digest=record.canonical_query_digest,
+        authorized_certification_scope=record.canonical_query_contract.resource_scope_ref,
+        migration_run_context_locator=record.migration_run_context_locator,
+    )
+    profiles = resolve_profiles(tolerance_profiles, binding)
+    for item in record.fact_reconciliations:
+        _verify_reconciliation(item, indexes, profiles)
+
+
+def verify_certification_7b_record(
+    record: Certification7BRecord,
+    *,
+    migration_run_context_locator: ArtifactLocator,
+    gate3_selection: ResolvedGate3SelectionState,
+    gate3_certification_fingerprint: Gate3CertificationFingerprint,
+    driver_contract: PipeboardPhase1Contract,
+    candidate_admission: AdmittedCollection,
+    reference_admission: AdmittedCollection,
+    candidate_result: CollectionResult,
+    reference_result: CollectionResult,
+    candidate_effect_proof_locator: ArtifactLocator,
+    candidate_effect_result_locator: ArtifactLocator,
+    reference_effect_proof_locator: ArtifactLocator,
+    reference_effect_result_locator: ArtifactLocator,
+    tolerance_profiles: Mapping[str, Mapping[str, Any]],
+    project_native_request: NativeToCanonicalAlgorithm,
+    require_signed: bool = False,
+) -> None:
+    """Recompute the whole 7B record from in-memory resolved evidence; any failure raises.
+
+    Adds bindings to resolved evidence (run, Gate-3 selection, driver contract,
+    admissions, results, effect proofs, native projection, tolerance profiles)
+    and optionally requires signed P1 envelopes across all 7B P1 artifacts.
+    """
+    arguments: dict[str, Any] = {
+        "migration_run_context_locator": migration_run_context_locator,
+        "gate3_selection": gate3_selection, "driver_contract": driver_contract,
+        "gate3_certification_fingerprint": gate3_certification_fingerprint,
+        "candidate_admission": candidate_admission, "reference_admission": reference_admission,
+        "candidate_result": candidate_result, "reference_result": reference_result,
+        "candidate_effect_proof_locator": candidate_effect_proof_locator,
+        "candidate_effect_result_locator": candidate_effect_result_locator,
+        "reference_effect_proof_locator": reference_effect_proof_locator,
+        "reference_effect_result_locator": reference_effect_result_locator,
+        "project_native_request": project_native_request,
+    }
+    _verify_arguments(record, arguments, require_signed=require_signed)
+    record, arguments = _revalidated(record, arguments, require_signed=require_signed)
+    _verify_bindings(record, arguments)
+    indexes = {side: _verify_side(record, side, arguments) for side in ("candidate", "reference")}
+    _verify_reconciliations(record, indexes, tolerance_profiles)

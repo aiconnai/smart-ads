@@ -685,6 +685,16 @@ ADR_P1_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
         "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
         "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
+        "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
+        "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
+        "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
+        "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
+        "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
+        "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
+        "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
+        "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
+        "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
+        "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
     }
 )
 
@@ -694,6 +704,7 @@ ADR_DATA_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "7b_canonical_fact_key": "SMART-ADS:7B-CANONICAL-FACT-KEY:V1\n",
         "7b_fact_projection": "SMART-ADS:7B-FACT-PROJECTION:V1\n",
         "7b_fact_reconciliations": "SMART-ADS:7B-FACT-RECONCILIATIONS:V1\n",
+        "7b_row_universe": "SMART-ADS:7B-ROW-UNIVERSE:V1\n",
         "semantic_observation": "SMART-ADS:SEMANTIC-OBSERVATION:V1\n",
         "row": "SMART-ADS:ROW:V1\n",
         "logical_rows": "SMART-ADS:LOGICAL-ROWS:V1\n",

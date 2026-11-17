@@ -642,8 +642,8 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         ADR_DATA_DOMAIN_PREFIXES,
         SUPPLEMENTAL_DOMAIN_PREFIXES,
     )
-    assert len(ADR_P1_DOMAIN_PREFIXES) == 27
-    assert len(ADR_DATA_DOMAIN_PREFIXES) == 7
+    assert len(ADR_P1_DOMAIN_PREFIXES) == 37
+    assert len(ADR_DATA_DOMAIN_PREFIXES) == 8
     assert len(SUPPLEMENTAL_DOMAIN_PREFIXES) == 2
 
     all_values: list[str] = []
@@ -656,9 +656,9 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
             assert prefix.startswith("SMART-ADS:") and prefix.endswith(":V1\n")
             all_values.append(prefix)
 
-    # All 36 prefix values across the 3 tables are pairwise disjoint
-    assert len(all_values) == 36
-    assert len(set(all_values)) == 36
+    # All 47 prefix values across the 3 tables are pairwise disjoint
+    assert len(all_values) == 47
+    assert len(set(all_values)) == 47
 
     adr_bytes = (
         Path(__file__).resolve().parents[2]
@@ -681,6 +681,29 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
         assert proposals_by_schema[schema] == expected_prefix
         assert ADR_P1_DOMAIN_PREFIXES[schema] == proposals_by_schema[schema]
+
+    pr2_expected = {
+        "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
+        "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
+        "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
+        "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
+        "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
+        "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
+        "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
+        "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
+        "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
+        "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
+    }
+    assert len(pr2_expected) == 10
+    for schema, expected_prefix in pr2_expected.items():
+        assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
+        assert proposals_by_schema[schema] == expected_prefix
+
+    assert (
+        ADR_DATA_DOMAIN_PREFIXES["7b_row_universe"]
+        == "SMART-ADS:7B-ROW-UNIVERSE:V1\n"
+    )
+    assert b'UTF8("SMART-ADS:7B-ROW-UNIVERSE:V1\\n")' in adr_bytes
 
 
 def test_mapping_and_scalar_validators() -> None:
