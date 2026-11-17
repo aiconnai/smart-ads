@@ -27,11 +27,13 @@ from smart_ads.analytics.certification import (
     verify_certification_record,
 )
 from smart_ads.analytics.formulas import (
+    FORMULA_ERROR_CODES,
     CertificationInput,
     DerivedCertificationStatus,
     FormulaGraphError,
 )
 from smart_ads.analytics.intelligence import (
+    INTELLIGENCE_ERROR_CODES,
     METRIC_WINDOW_COLUMNS,
     AnalysisEvidence,
     EvaluationContext,
@@ -39,15 +41,23 @@ from smart_ads.analytics.intelligence import (
     IntelligenceError,
     evaluate_findings,
 )
-from smart_ads.analytics.policy import AnalysisPolicy, EvaluationScope
+from smart_ads.analytics.policy import (
+    POLICY_ERROR_CODES,
+    AnalysisPolicy,
+    EvaluationScope,
+    PolicyValidationError,
+)
 from smart_ads.analytics.results import (
+    RESULT_SET_ERROR_CODES,
     AnalysisExecution,
     AnalysisResult,
     AnalysisResultSchema,
     CanonicalResultEntry,
     CanonicalResultSet,
+    ResultSetMismatchError,
 )
 from smart_ads.contracts.jcs import ArtifactLocator, P1Integrity
+from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import AnalyticsLandingRow, DateRange, FactKey
 from smart_ads.domain.registry import ExpectedResourceInventory, ExpectedResourceKey
 
@@ -578,6 +588,161 @@ def test_record_rejects_non_objects_and_bad_members() -> None:
     record = _record()
     _raises("invalid_type", dataclasses.replace, record, derived_certification_status="VERIFIED")
     _raises("invalid_type", dataclasses.replace, record, finding_locators=None)
+
+
+# ------------------------------------------------------------------ re-validation at the seam
+#
+# Supplied findings, the record and the attested inputs cross the seam too: one rebound after
+# construction (object.__setattr__) is rejected with a closed code, never a bare exception.
+
+CODE_SETS: dict[type, frozenset[str]] = {
+    IntelligenceError: INTELLIGENCE_ERROR_CODES,
+    PolicyValidationError: POLICY_ERROR_CODES,
+    ResultSetMismatchError: RESULT_SET_ERROR_CODES,
+    FormulaGraphError: FORMULA_ERROR_CODES,
+}
+
+
+def _tamper(target: Any, field: str, value: Any) -> None:
+    object.__setattr__(target, field, value)
+
+
+def _coded(call: Callable[[], Any]) -> Any:
+    """The call's result, or (error type, code) of a closed coded rejection; anything else escapes."""
+    try:
+        return call()
+    except ClosedValidationError as exc:
+        assert type(exc) in CODE_SETS, repr(exc)
+        assert exc.code in CODE_SETS[type(exc)], repr(exc)  # type: ignore[attr-defined]
+        return type(exc), exc.code  # type: ignore[attr-defined]
+
+
+_Supplied = tuple[tuple[Finding, ...], AnalyticalCertificationRecord, list[AttestedCertificationInput]]
+
+
+def _fresh_supplied() -> _Supplied:
+    """Private copies (tampering mutates in place) of the scenario's findings, record and input."""
+    _, _, findings = _scenario()
+    record = AnalyticalCertificationRecord.from_dict(_record().to_dict())
+    return tuple(Finding.from_dict(f.to_dict()) for f in findings), record, [_attested("VERIFIED", "phase1_7b_base")]
+
+
+def _outcomes(findings: Any, record: Any, inputs: Any) -> tuple[Any, Any]:
+    """build / verify over the shared valid scenario, each as record bytes or a coded rejection."""
+    context, evidence, _ = _scenario()
+    return (
+        _coded(lambda: _jcs(build_certification_record(context, evidence, findings, inputs).to_dict())),
+        _coded(lambda: _jcs(verify_certification_record(record, context, evidence, findings, inputs).to_dict())),
+    )
+
+
+SUPPLIED_TARGETS: dict[str, tuple[type, Callable[..., Any], Callable[..., _Supplied]]] = {
+    "finding": (Finding, lambda f, r, i: f[0], lambda f, r, i, new: ((new, *f[1:]), r, i)),
+    "record": (AnalyticalCertificationRecord, lambda f, r, i: r, lambda f, r, i, new: (f, new, i)),
+    "attested_input": (AttestedCertificationInput, lambda f, r, i: i[0], lambda f, r, i, new: (f, r, [new])),
+    "certification_input": (
+        CertificationInput,
+        lambda f, r, i: i[0].certification_input,
+        lambda f, r, i, new: (f, r, [AttestedCertificationInput(new, i[0].independently_validated)]),
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "target", "field", "value", "verify_only"),
+    [
+        pytest.param(IntelligenceError, "invalid_type", "finding", "integrity", object(), False, id="finding-integrity"),
+        pytest.param(IntelligenceError, "unknown_value", "finding", "finding_status", "maybe", False, id="finding-status"),
+        pytest.param(IntelligenceError, "invalid_type", "record", "integrity", object(), True, id="record-integrity"),
+        pytest.param(IntelligenceError, "invalid_type", "record", "finding_locators", "abc", True, id="record-locators"),
+        pytest.param(
+            IntelligenceError, "invalid_type", "attested_input", "independently_validated", 1, False, id="attested-flag"
+        ),
+        pytest.param(
+            FormulaGraphError, "invalid_certification_status", "certification_input", "status", "VERIFIED", False,
+            id="input-status",
+        ),
+    ],
+)
+def test_tampered_supplied_object_is_rejected_with_its_code(
+    error: type, code: str, target: str, field: str, value: Any, verify_only: bool
+) -> None:
+    supplied = _fresh_supplied()
+    _tamper(SUPPLIED_TARGETS[target][1](*supplied), field, value)
+    build, verify = _outcomes(*supplied)
+    assert verify == (error, code)
+    assert build == ((_jcs(_record().to_dict())) if verify_only else (error, code))
+
+
+def test_tampered_validation_flag_cannot_admit_degraded() -> None:
+    _raises("degraded_not_permitted", _record, [_attested("DEGRADED")])
+    inputs = [_attested("DEGRADED")]
+    _tamper(inputs[0], "independently_validated", 1)  # truthy, but not the bool True
+    _raises("invalid_type", _record, inputs)
+
+
+def test_policy_emptied_after_construction_cannot_certify_nothing() -> None:
+    # Reviewer reproduction: this used to give a VERIFIED, unblocked record over zero findings.
+    context, evidence = _build()
+    _tamper(context.policy, "rules", ())
+    evidence = dataclasses.replace(evidence, bundle_analysis_policy_locator=context.policy.locator())
+    for call in (
+        lambda: build_certification_record(context, evidence, (), VERIFIED_INPUTS),
+        lambda: verify_certification_record(_record(), context, evidence, (), VERIFIED_INPUTS),
+    ):
+        with pytest.raises(PolicyValidationError) as info:
+            call()
+        assert info.value.code == "empty"
+
+
+class _Str(str):
+    """Equal to the original string, but not of type str."""
+
+
+class _Int(int):
+    """Equal to the original int, but not of type int."""
+
+
+def _hostile(original: Any) -> list[Any]:
+    """Wrong type, bool, None, empty, subclass, out-of-range and still-valid replacements."""
+    values: list[Any] = [object(), True, None, "", "zzz", 0, -1, 1 << 64, [], ()]
+    if type(original) is str:
+        values += [_Str(original), original + "x"]
+    if type(original) is int:
+        values += [_Int(original), original + 1]
+    if isinstance(original, tuple):
+        values += [list(original), original * 2, (object(),)]
+    return values
+
+
+SUPPLIED_FIELDS = [
+    (target, field.name)
+    for target, (cls, _, _) in SUPPLIED_TARGETS.items()
+    for field in dataclasses.fields(cls)
+]
+
+
+@pytest.mark.parametrize(("target", "field"), SUPPLIED_FIELDS)
+def test_tampered_supplied_field_acts_like_its_constructor_or_rejects(target: str, field: str) -> None:
+    """build / verify return what a legitimately built object gives, or raise a coded error."""
+    _, get, put = SUPPLIED_TARGETS[target]
+    baseline = _outcomes(*_fresh_supplied())
+    consumed = (target != "record", True)  # build never reads the record
+    for value in _hostile(getattr(get(*_fresh_supplied()), field)):
+        supplied = _fresh_supplied()
+        victim = get(*supplied)
+        try:
+            legit = dataclasses.replace(victim, **{field: value})
+        except Exception:  # the constructor rejects the value (or cannot even process it)
+            legit = None
+        _tamper(victim, field, value)
+        tampered = _outcomes(*supplied)
+        expected = baseline if legit is None else _outcomes(*put(*supplied, legit))
+        for got, want, reads in zip(tampered, expected, consumed, strict=True):
+            if legit is None and reads:
+                assert type(got) is tuple, (value, got)
+            else:
+                assert type(got) is tuple or got == want, (value, got, want)
 
 
 def test_module_holds_no_numeric_literal_and_no_float() -> None:

@@ -5,7 +5,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields
 import re
 from types import MappingProxyType
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Final, Self, TypeVar
 
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES,
@@ -90,6 +90,7 @@ _PHASE1_SCOPE_VALUES: Final[tuple[tuple[str, str], ...]] = (
     ("currency", "BRL"),
 )
 _Check = Callable[..., Any]
+_T = TypeVar("_T")
 
 
 class _CodedError(ClosedValidationError):
@@ -125,6 +126,34 @@ class PolicyNotApplicableError(_CodedError):
 
 def _fail(code: str, detail: str) -> PolicyValidationError:
     return PolicyValidationError(code, detail)
+
+
+# Raised by a shared parser, or by `to_dict()`, on an object whose frozen fields were rebound after
+# construction (object.__setattr__); ClosedValidationError is a ValueError, so it is matched first.
+_RAW_ERRORS: Final[tuple[type[Exception], ...]] = (
+    AttributeError, IndexError, KeyError, TypeError, ValueError,
+)
+_Error = Callable[[str, str], ClosedValidationError]
+
+
+def _recheck(error: _Error, code: str, fn: Callable[..., _T], *args: Any) -> _T:
+    """Run `fn(*args)` at the evaluator seam without letting a bare exception out.
+
+    A typed rejection propagates; a plain ClosedValidationError or a raw error becomes `error(code)`.
+    """
+    try:
+        return fn(*args)
+    except ClosedValidationError as exc:
+        if type(exc) is not ClosedValidationError:
+            raise
+        raise error(code, str(exc)) from exc
+    except _RAW_ERRORS as exc:
+        raise error(code, f"{type(exc).__name__}: {exc}") from exc
+
+
+def _reparsed(error: _Error, code: str, cls: Any, value: Any) -> Any:
+    """`cls.from_dict(value.to_dict())` under `_recheck`; the integrity block is kept."""
+    return _recheck(error, code, lambda: cls.from_dict(value.to_dict()))
 
 
 def _require_str(value: object, field_name: str) -> str:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import contextlib
 import dataclasses
 import datetime
 import hashlib
@@ -19,6 +20,17 @@ from typing import Any, Callable
 import pytest
 
 from smart_ads.analytics import intelligence
+from smart_ads.analytics.certification import (
+    AttestedCertificationInput,
+    build_certification_record,
+    verify_certification_record,
+)
+from smart_ads.analytics.formulas import (
+    FORMULA_ERROR_CODES,
+    CertificationInput,
+    DerivedCertificationStatus,
+    FormulaGraphError,
+)
 from smart_ads.analytics.intelligence import (
     INTELLIGENCE_ERROR_CODES,
     METRIC_WINDOW_COLUMNS,
@@ -29,14 +41,19 @@ from smart_ads.analytics.intelligence import (
     evaluate_findings,
 )
 from smart_ads.analytics.lattice import classify_restatement, select_winner
-from smart_ads.analytics.policy import RestatementRule, SaturationRule, WasteRule
+from smart_ads.analytics.policy import RestatementRule, SaturationRule, StalledDeliveryRule, WasteRule
 from smart_ads.analytics.policy import (
+    POLICY_ERROR_CODES,
+    POLICY_NOT_APPLICABLE_CODES,
     AnalysisPolicy,
+    ApplicabilityScope,
     EvaluationScope,
     PolicyNotApplicableError,
     PolicyValidationError,
+    PolicyValidity,
 )
 from smart_ads.analytics.results import (
+    RESULT_SET_ERROR_CODES,
     AnalysisExecution,
     AnalysisResult,
     AnalysisResultSchema,
@@ -45,6 +62,7 @@ from smart_ads.analytics.results import (
     ResultSetMismatchError,
 )
 from smart_ads.contracts.jcs import ArtifactLocator, P1Integrity
+from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import AnalyticsLandingRow, DateRange, FactKey
 from smart_ads.domain.registry import ExpectedResourceInventory, ExpectedResourceKey
 
@@ -1595,6 +1613,417 @@ def test_finding_key_depends_only_on_stable_identity() -> None:
     assert renamed.finding_key not in (detected.finding_key, bumped.finding_key)
     (wider,) = _run((_waste_rule(window=4),), _metric(R0, (_day(3), END), SPEND, "1000"))
     assert wider.finding_key == _expected_key("rule:waste", "waste", R0, _day(3), END)
+
+
+# ------------------------------------------------------------------ re-validation at the seam
+#
+# Frozen inputs validate once, in __post_init__, and object.__setattr__ can rebind a field
+# afterwards. Every entry point re-checks what crosses it: a tampered object is rejected with a
+# closed code, as its wire form would be, and never leaks a bare TypeError/AttributeError/...
+
+ATTESTED = [
+    AttestedCertificationInput(
+        CertificationInput(DerivedCertificationStatus.VERIFIED, "phase1_7b_base"), False
+    )
+]
+CODE_SETS: dict[type, frozenset[str]] = {
+    IntelligenceError: INTELLIGENCE_ERROR_CODES,
+    PolicyValidationError: POLICY_ERROR_CODES,
+    PolicyNotApplicableError: frozenset(POLICY_NOT_APPLICABLE_CODES),
+    ResultSetMismatchError: RESULT_SET_ERROR_CODES,
+    FormulaGraphError: FORMULA_ERROR_CODES,
+}
+
+
+def _tamper(target: Any, field: str, value: Any) -> None:
+    object.__setattr__(target, field, value)
+
+
+def _coded(call: Callable[[], Any]) -> Any:
+    """The call's result, or (error type, code) of a closed coded rejection; anything else escapes."""
+    try:
+        return call()
+    except ClosedValidationError as exc:
+        assert type(exc) in CODE_SETS, repr(exc)
+        assert exc.code in CODE_SETS[type(exc)], repr(exc)  # type: ignore[attr-defined]
+        return type(exc), exc.code  # type: ignore[attr-defined]
+
+
+def _entry_points(context: Any, evidence: Any, findings: Any, record: Any) -> tuple[Any, ...]:
+    """evaluate / build / verify, each as result bytes or a coded rejection."""
+    return (
+        _coded(lambda: _payload(evaluate_findings(context, evidence))),
+        _coded(lambda: _jcs(build_certification_record(context, evidence, findings, ATTESTED).to_dict())),
+        _coded(
+            lambda: _jcs(
+                verify_certification_record(record, context, evidence, findings, ATTESTED).to_dict()
+            )
+        ),
+    )
+
+
+def _seam_scenario() -> tuple[EvaluationContext, AnalysisEvidence]:
+    """Every object fresh (tampering mutates in place): four rule types and a restated history."""
+    rules = (_waste_rule(), _saturation_rule(), _stalled_rule(), _restatement_rule())
+    rows = _waste_rows("1000", "0") + _daily(_obs("1", "1", "1"))
+    history = (_landing(raw="100"), _landing(raw="200", at=T2))
+    return _build(rules, rows, history=history, scope=dataclasses.replace(SCOPE))
+
+
+@functools.cache
+def _seam_baseline() -> tuple[tuple[Finding, ...], Any]:
+    context, evidence = _seam_scenario()
+    findings = evaluate_findings(context, evidence)
+    return findings, build_certification_record(context, evidence, findings, ATTESTED)
+
+
+def _expect(error: type, code: str, context: Any, evidence: Any) -> None:
+    """All three entry points reject with exactly `error` and `code`."""
+    findings, record = _seam_baseline()
+    assert _entry_points(context, evidence, findings, record) == ((error, code),) * 3
+
+
+def _rule_of(policy: AnalysisPolicy, cls: type) -> Any:
+    return next(rule for rule in policy.rules if type(rule) is cls)
+
+
+def _rebound(context: EvaluationContext, evidence: AnalysisEvidence) -> AnalysisEvidence:
+    """The reviewer's step: bind the evidence to the tampered policy's new locator."""
+    return dataclasses.replace(evidence, bundle_analysis_policy_locator=context.policy.locator())
+
+
+POLICY_TAMPERS: list[Any] = [
+    # Reviewer reproduction: previously 0 findings and a VERIFIED, unblocked record.
+    pytest.param("empty", lambda p: _tamper(p, "rules", ()), id="rules-empty"),
+    pytest.param("out_of_range", lambda p: _tamper(_rule_of(p, WasteRule), "window_days", 0), id="window-0"),
+    pytest.param(
+        "invalid_type",
+        lambda p: _tamper(_rule_of(p, RestatementRule), "restatement_kinds", "abc"),
+        id="kinds-str",
+    ),
+    pytest.param(
+        "invalid_grammar", lambda p: _tamper(_rule_of(p, WasteRule), "min_spend_minor", "abc"), id="spend-abc"
+    ),
+    pytest.param(
+        "unsupported_value",
+        lambda p: _tamper(_rule_of(p, SaturationRule), "outcome_metric_ref", SPEND),
+        id="outcome-money",
+    ),
+    pytest.param(
+        "invalid_validity_window",
+        lambda p: _tamper(p.validity, "valid_from_utc", p.validity.valid_until_utc),
+        id="validity",
+    ),
+]
+
+
+@pytest.mark.parametrize(("code", "tamper"), POLICY_TAMPERS)
+def test_tampered_policy_is_rejected_like_its_wire_form(code: str, tamper: Callable[[Any], None]) -> None:
+    context, evidence = _seam_scenario()
+    tamper(context.policy)
+    with pytest.raises(PolicyValidationError) as wire:
+        AnalysisPolicy.from_dict(context.policy.to_dict())
+    assert wire.value.code == code
+    _expect(PolicyValidationError, code, context, _rebound(context, evidence))
+
+
+@pytest.mark.parametrize("window", [1, 3])
+@pytest.mark.parametrize(("make_rule", "refs"), MISTYPED_REF_CASES)
+def test_mistyped_ref_rebound_after_construction_rejects_whatever_the_window(
+    make_rule: Callable[..., dict[str, Any]], refs: dict[str, str], window: int
+) -> None:
+    context, evidence = _build((make_rule(window=window),), MISTYPED_ROWS, resources=RES)
+    (rule,) = context.policy.rules
+    for name, ref in refs.items():
+        _tamper(rule, name, ref)
+    with pytest.raises(PolicyValidationError) as info:
+        evaluate_findings(context, _rebound(context, evidence))
+    assert info.value.code == "unsupported_value"
+
+
+def _broken_copy(locator: ArtifactLocator) -> ArtifactLocator:
+    """A private copy of a shared locator constant whose content digest is rebound to an int."""
+    copy = ArtifactLocator.from_dict(locator.to_dict())
+    _tamper(copy, "content_digest", 5)
+    return copy
+
+
+DEPENDENCY_TAMPERS: list[Any] = [
+    pytest.param(
+        IntelligenceError, "invalid_history",
+        lambda c, e: _tamper(c.restatement_history[0], "collected_at_utc", "zzz"), id="history-collected-at",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_history",
+        lambda c, e: _tamper(c.restatement_history[1], "raw_numeric_value", "300"), id="history-raw-value",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_history",
+        lambda c, e: _tamper(c.restatement_history[1], "fact_key", None), id="history-fact-key",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_inventory", lambda c, e: _tamper(c.inventory, "tenant_ref", "zzz"),
+        id="inventory-tenant",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_inventory", lambda c, e: _tamper(c.inventory, "date_range", object()),
+        id="inventory-date-range",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_inventory", lambda c, e: _tamper(c.inventory, "expected_resources", ()),
+        id="inventory-empty",
+    ),
+    pytest.param(
+        PolicyValidationError, "invalid_grammar", lambda c, e: _tamper(c.scope, "currency", "brl"),
+        id="scope-currency",
+    ),
+    pytest.param(
+        PolicyValidationError, "invalid_type", lambda c, e: _tamper(c.scope, "tenant_ref", None),
+        id="scope-tenant",
+    ),
+    pytest.param(
+        PolicyValidationError, "invalid_type", lambda c, e: _tamper(c.policy, "integrity", object()),
+        id="policy-integrity",
+    ),
+    pytest.param(
+        ResultSetMismatchError, "field_invalid", lambda c, e: _tamper(e.execution, "integrity", object()),
+        id="execution-integrity",
+    ),
+    pytest.param(
+        ResultSetMismatchError, "field_invalid", lambda c, e: _tamper(e.resolved_results[1], "result_key", 7),
+        id="result-key",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_locator",
+        lambda c, e: _tamper(e, "bundle_dataset_snapshot_locator", _broken_copy(SNAPSHOT)), id="snapshot-locator",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_locator",
+        lambda c, e: _tamper(e, "bundle_analysis_policy_locator", _broken_copy(e.bundle_analysis_policy_locator)),
+        id="policy-locator",
+    ),
+    pytest.param(
+        IntelligenceError, "window_after_instant", lambda c, e: _tamper(c, "window_end_date", "2026-11-12"),
+        id="context-window-after-instant",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_grammar", lambda c, e: _tamper(c, "window_end_date", "2026-02-30"),
+        id="context-window-end-grammar",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_grammar", lambda c, e: _tamper(c, "curation_anchor_date", "2026-02-30"),
+        id="context-curation-anchor",
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_type", lambda c, e: _tamper(c, "inventory", None), id="context-inventory"
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_type", lambda c, e: _tamper(e, "require_signed", 1), id="evidence-signed"
+    ),
+    pytest.param(
+        IntelligenceError, "invalid_type", lambda c, e: _tamper(e, "resolved_results", None),
+        id="evidence-results",
+    ),
+]
+
+
+@pytest.mark.parametrize(("error", "code", "tamper"), DEPENDENCY_TAMPERS)
+def test_tampered_dependency_raises_its_own_coded_error(
+    error: type, code: str, tamper: Callable[[Any, Any], None]
+) -> None:
+    context, evidence = _seam_scenario()
+    tamper(context, evidence)
+    _expect(error, code, context, evidence)
+
+
+def test_curation_window_dates_are_parsed_with_a_code() -> None:
+    context, _ = _seam_scenario()
+    _tamper(context, "curation_anchor_date", "2026-02-30")
+    _raises("invalid_grammar", intelligence._check_curation_window, context)
+    _tamper(context, "curation_anchor_date", END)
+    _tamper(context, "window_end_date", None)
+    _raises("invalid_type", intelligence._check_curation_window, context)
+
+
+def test_tampered_signed_inputs_break_their_digest_and_signed_inputs_survive() -> None:
+    rules = (_waste_rule(), _restatement_rule())
+    history = (_landing(raw="100"), _landing(raw="200", at=T2))
+    context, evidence = _build(rules, _waste_rows("1000", "0"), history=history, signed=True)
+    findings = tuple(_sign(finding) for finding in evaluate_findings(context, evidence))
+    record = _sign(build_certification_record(context, evidence, findings, ATTESTED))
+    assert verify_certification_record(record, context, evidence, findings, ATTESTED) is record
+    assert all(f.integrity is not None and f.integrity.is_signed for f in findings)
+    _tamper(_rule_of(context.policy, WasteRule), "min_spend_minor", "999")  # still a valid threshold
+    with pytest.raises(PolicyValidationError) as info:
+        evaluate_findings(context, _rebound(context, evidence))
+    assert info.value.code == "content_digest_mismatch"
+    context, evidence = _build(rules, _waste_rows("1000", "0"), history=history, signed=True)
+    _tamper(context.inventory, "inventory_id", "inventory:i2")  # well formed, but not what was signed
+    _raises("invalid_inventory", evaluate_findings, context, evidence)
+
+
+class _Str(str):
+    """Equal to the original string, but not of type str."""
+
+
+class _Int(int):
+    """Equal to the original int, but not of type int."""
+
+
+def _hostile(original: Any) -> list[Any]:
+    """Wrong type, bool, None, empty, subclass, out-of-range and still-valid replacements."""
+    values: list[Any] = [object(), True, None, "", "zzz", 0, -1, 1 << 64, [], ()]
+    if type(original) is str:
+        values += [_Str(original), original + "x"]
+    if type(original) is int:
+        values += [_Int(original), original + 1]
+    if isinstance(original, tuple):
+        values += [list(original), original * 2, (object(),)]
+    return values
+
+
+def _with_policy(context: Any, evidence: Any, policy: Any) -> tuple[Any, Any]:
+    return dataclasses.replace(context, policy=policy), dataclasses.replace(
+        evidence, bundle_analysis_policy_locator=policy.locator()
+    )
+
+
+def _rule_target(cls: type) -> tuple[type, Callable[..., Any], Callable[..., Any]]:
+    def put(context: Any, evidence: Any, old: Any, new: Any) -> tuple[Any, Any]:
+        rules = tuple(new if rule is old else rule for rule in context.policy.rules)
+        return _with_policy(context, evidence, dataclasses.replace(context.policy, rules=rules))
+
+    return cls, lambda context, evidence: _rule_of(context.policy, cls), put
+
+
+def _member_target(cls: type, owner: str, name: str) -> tuple[type, Callable[..., Any], Callable[..., Any]]:
+    """A member of the policy or of the context, put back by legitimate reconstruction."""
+    def put(context: Any, evidence: Any, old: Any, new: Any) -> tuple[Any, Any]:
+        if owner == "policy":
+            return _with_policy(context, evidence, dataclasses.replace(context.policy, **{name: new}))
+        return dataclasses.replace(context, **{name: new}), evidence
+
+    holder: Callable[[Any], Any] = (lambda c: c.policy) if owner == "policy" else (lambda c: c)
+    return cls, lambda context, evidence: getattr(holder(context), name), put
+
+
+SEAM_TARGETS: dict[str, tuple[type, Callable[..., Any], Callable[..., Any]]] = {
+    "waste_rule": _rule_target(WasteRule),
+    "saturation_rule": _rule_target(SaturationRule),
+    "stalled_delivery_rule": _rule_target(StalledDeliveryRule),
+    "restatement_rule": _rule_target(RestatementRule),
+    "policy": (AnalysisPolicy, lambda c, e: c.policy, lambda c, e, old, new: _with_policy(c, e, new)),
+    "applicability_scope": _member_target(ApplicabilityScope, "policy", "applicability_scope"),
+    "validity": _member_target(PolicyValidity, "policy", "validity"),
+    "scope": _member_target(EvaluationScope, "context", "scope"),
+    "inventory": _member_target(ExpectedResourceInventory, "context", "inventory"),
+    "history_row": (
+        AnalyticsLandingRow,
+        lambda c, e: c.restatement_history[0],
+        lambda c, e, old, new: (
+            dataclasses.replace(c, restatement_history=(new, *c.restatement_history[1:])), e
+        ),
+    ),
+    "context": (EvaluationContext, lambda c, e: c, lambda c, e, old, new: (new, e)),
+    "evidence": (AnalysisEvidence, lambda c, e: e, lambda c, e, old, new: (c, new)),
+}
+POLICY_MEMBERS = frozenset(
+    {"waste_rule", "saturation_rule", "stalled_delivery_rule", "restatement_rule", "policy",
+     "applicability_scope", "validity"}
+)
+SEAM_FIELDS = [
+    (target, field.name) for target, (cls, _, _) in SEAM_TARGETS.items() for field in dataclasses.fields(cls)
+]
+
+
+@pytest.mark.parametrize(("target", "field"), SEAM_FIELDS)
+def test_tampered_field_acts_like_its_constructor_or_rejects_with_a_code(target: str, field: str) -> None:
+    """Each entry point returns what a legitimately built object gives, or raises a coded error."""
+    findings, record = _seam_baseline()
+    _, get, put = SEAM_TARGETS[target]
+    for value in _hostile(getattr(get(*_seam_scenario()), field)):
+        context, evidence = _seam_scenario()
+        victim = get(context, evidence)
+        try:
+            legit = dataclasses.replace(victim, **{field: value})
+        except Exception:  # the constructor rejects the value (or cannot even process it)
+            legit = None
+        _tamper(victim, field, value)
+        if target in POLICY_MEMBERS:
+            with contextlib.suppress(Exception):
+                evidence = _rebound(context, evidence)
+        tampered = _entry_points(context, evidence, findings, record)
+        if all(type(outcome) is tuple for outcome in tampered):
+            continue  # every entry point rejected with a closed code
+        assert legit is not None, (value, tampered)
+        expected = _entry_points(*put(context, evidence, victim, legit), findings, record)
+        for got, want in zip(tampered, expected, strict=True):
+            assert type(got) is tuple or got == want, (value, got, want)
+
+
+def _hand_finding(
+    context: EvaluationContext,
+    evidence: AnalysisEvidence,
+    rule: tuple[str, str],
+    start: str,
+    status: str,
+    cited: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """finding/v1 for R0 and a window ending at END, built from the inputs with json + hashlib."""
+    rule_id, rule_type = rule
+    result_locator = _locator_dict(RESULT_TYPE, evidence.resolved_results[1].to_dict())
+    core = {
+        "$schema": FINDING_TYPE,
+        "analysis_execution_locator": _locator_dict(EXECUTION_TYPE, evidence.execution.to_dict()),
+        "result_locator": result_locator,
+        "result_key": METRICS_KEY,
+        "finding_key": _expected_key(rule_id, rule_type, R0, start, END),
+        "finding_type": rule_type,
+        "finding_status": status,
+        "mutation_recommendation_blocked": rule_type == "restatement" or status == "inconclusive",
+        "evidence_locators": cited if cited is not None else [result_locator],
+        "analysis_policy_locator": _locator_dict(POLICY_TYPE, context.policy.to_dict()),
+    }
+    return {**core, "finding_digest": _sha(core)}
+
+
+@pytest.mark.parametrize("signed", [False, True])
+def test_valid_inputs_give_the_hand_computed_findings_and_record(signed: bool) -> None:
+    context, evidence = _seam_scenario() if not signed else _build(
+        (_waste_rule(), _saturation_rule(), _stalled_rule(), _restatement_rule()),
+        _waste_rows("1000", "0") + _daily(_obs("1", "1", "1")),
+        history=(_landing(raw="100"), _landing(raw="200", at=T2)),
+        signed=True,
+    )
+    expected = [
+        _hand_finding(context, evidence, ("rule:waste", "waste"), _day(2), "detected"),
+        _hand_finding(context, evidence, ("rule:saturation", "saturation"), _day(3), "inconclusive"),
+        _hand_finding(context, evidence, ("rule:stalled", "stalled_delivery"), _day(2), "detected"),
+        _hand_finding(
+            context, evidence, ("rule:restatement", "restatement"), _day(6), "detected",
+            _restatement_evidence(evidence),
+        ),
+    ]
+    expected.sort(key=lambda finding: finding["finding_key"].encode("utf-8"))
+    findings = evaluate_findings(context, evidence)
+    assert _payload(findings) == _jcs(expected)
+    supplied = tuple(_sign(finding) for finding in findings) if signed else findings
+    record = build_certification_record(context, evidence, supplied, ATTESTED)
+    preimage = evidence.execution.canonical_result_set.to_dict()
+    del preimage["canonical_result_digest"]
+    assert _jcs(record.to_dict()) == _jcs(
+        {
+            "$schema": "smart_ads/certification_record/v1",
+            "finding_locators": sorted(
+                (_locator_dict(FINDING_TYPE, finding.to_dict()) for finding in supplied), key=_jcs
+            ),
+            "derived_certification_status": "VERIFIED",
+            "mutation_recommendations_blocked": True,
+            "output_digest": _sha(preimage),
+        }
+    )
+    final = _sign(record) if signed else record
+    assert verify_certification_record(final, context, evidence, supplied, ATTESTED) is final
 
 
 # ------------------------------------------------------------------ module purity
