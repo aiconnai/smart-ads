@@ -5,6 +5,7 @@ import base64
 import copy
 import hashlib
 import itertools
+import json
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from smart_ads.contracts.jcs import (
     P1Integrity,
     canonicalize_jcs,
     p1_content_digest,
+    p1_signing_message,
 )
 from smart_ads.contracts.numerics import (
     MAX_INT64,
@@ -320,6 +322,30 @@ def test_divide_money_by_money_requires_same_currency() -> None:
     assert exc_info.value.code == "malformed"
 
 
+def test_operand_errors_take_precedence_over_currency_errors() -> None:
+    # Stated precedence: operands first, then currency, then division by zero.
+    for numerator, denominator, code in ((True, 3, "invalid_operand"), (1, -1, "operand_out_of_range")):
+        with pytest.raises(FormulaGraphError) as exc_info:
+            divide_money_by_money(
+                numerator, denominator, numerator_currency="BRL", denominator_currency="USD"  # type: ignore[arg-type]
+            )
+        assert exc_info.value.code == code
+        with pytest.raises(FormulaGraphError) as exc_info:
+            divide_money_by_money(
+                numerator, denominator, numerator_currency="brl", denominator_currency="BRL"  # type: ignore[arg-type]
+            )
+        assert exc_info.value.code == code
+        with pytest.raises(FormulaGraphError) as exc_info:
+            divide_money_by_count(numerator, denominator, currency="brl")  # type: ignore[arg-type]
+        assert exc_info.value.code == code
+    with pytest.raises(FormulaGraphError) as exc_info:
+        divide_money_by_money(0, 0, numerator_currency="BRL", denominator_currency="USD")
+    assert exc_info.value.code == "currency_mismatch"
+    with pytest.raises(FormulaGraphError) as exc_info:
+        divide_money_by_count(1, 0, currency="brl")
+    assert exc_info.value.code == "malformed"
+
+
 def test_division_by_zero_returns_null_division_by_zero_row() -> None:
     for numerator in (0, 1, MAX_INT64):
         _assert_division_by_zero(divide_money_by_count(numerator, 0, currency="BRL"))
@@ -542,6 +568,38 @@ def test_metric_ref_grammar_matches_base_metric_definition(candidate: str) -> No
     assert derived_accepts() is base_accepts()
 
 
+def test_metric_ref_regex_is_identical_to_numerics_and_sweep_agrees() -> None:
+    from smart_ads.analytics import formulas
+    from smart_ads.contracts import numerics
+
+    ours = formulas._METRIC_SEMANTIC_REF_RE
+    theirs = numerics._METRIC_SEMANTIC_REF_RE
+    assert ours.pattern == theirs.pattern
+    assert ours.flags == theirs.flags
+    alphabet = ("a", "z", "v", "A", "0", "1", "_", "-", ".", ":", "\n", "é", " ")
+    templates = (
+        "metric:{}_v1",
+        "metric:a{}_v1",
+        "metric:a_v{}",
+        "metric:{}",
+        "{}metric:a_v1",
+        "metric:a_v1{}",
+    )
+    checked = 0
+    accepted = 0
+    for length in range(5):
+        for chars in itertools.product(alphabet, repeat=length):
+            middle = "".join(chars)
+            for template in templates:
+                candidate = template.format(middle)
+                verdict = ours.fullmatch(candidate) is not None
+                assert verdict is (theirs.fullmatch(candidate) is not None), candidate
+                checked += 1
+                accepted += verdict
+    assert checked == len(templates) * sum(len(alphabet) ** n for n in range(5))
+    assert 0 < accepted < checked
+
+
 def test_definition_constructor_rejects_wrong_types() -> None:
     with pytest.raises(FormulaGraphError) as exc_info:
         DerivedMetricDefinition(
@@ -662,23 +720,169 @@ def test_bundle_rejects_dependency_outside_base_registry() -> None:
     ],
 )
 def test_bundle_rejects_operand_signature_mismatch(definition: DerivedMetricDefinition) -> None:
+    other = _base("metric:other_v1", "other", "decimal_ratio")
+    registry = dict(PHASE1_BASE_METRICS, **{other.metric_semantic_ref: other})
     bases = _phase1_bases()
-    if "metric:other_v1" in definition.input_metrics:
-        bases = bases + (
-            BaseMetricDefinition(
-                metric_semantic_ref="metric:other_v1",
-                canonical_name="other",
-                value_type="decimal_ratio",
-                unit="ratio",
-                currency_rule="must_be_null",
-                dimensions=PHASE1_DIMENSIONS,
-                aggregation_semantics="non_additive",
-            ),
-        )
+    if other.metric_semantic_ref in definition.input_metrics:
+        bases = bases + (other,)
     definitions = (definition, _defn("metric:derived_ctr_v1", CBC, CLICKS, IMPRESSIONS))
     with pytest.raises(FormulaGraphError) as exc_info:
-        FormulaBundle(base_metrics=bases, definitions=definitions)
+        FormulaBundle(base_metrics=bases, definitions=definitions, base_metric_registry=registry)
     assert exc_info.value.code == "operand_type_mismatch"
+
+
+def _base(ref: str, name: str, value_type: str) -> BaseMetricDefinition:
+    unit, rule = {
+        "int64_count": ("count", "must_be_null"),
+        "int64_minor_currency": ("minor_currency", "must_be_query_currency"),
+        "decimal_ratio": ("ratio", "must_be_null"),
+    }[value_type]
+    return BaseMetricDefinition(
+        metric_semantic_ref=ref,
+        canonical_name=name,
+        value_type=value_type,  # type: ignore[arg-type]
+        unit=unit,  # type: ignore[arg-type]
+        currency_rule=rule,  # type: ignore[arg-type]
+        dimensions=PHASE1_DIMENSIONS,
+        aggregation_semantics="additive_across_none",
+    )
+
+
+CONVERSIONS = "metric:conversions_v1"
+_CPA = "metric:derived_cpa_v1"
+
+
+def _custom_registry() -> dict[str, BaseMetricDefinition]:
+    return {
+        CLICKS: PHASE1_BASE_METRICS[CLICKS],
+        CONVERSIONS: _base(CONVERSIONS, "conversions", "int64_count"),
+        SPEND: PHASE1_BASE_METRICS[SPEND],
+    }
+
+
+def test_bundle_accepts_custom_base_metric_registry_on_both_paths() -> None:
+    registry = _custom_registry()
+    raw = _bundle_dict(
+        [_defn_dict(_CPA, MBC, SPEND, CONVERSIONS)],
+        topological_order=[CLICKS, CONVERSIONS, SPEND, _CPA],
+        base_metric_refs=[CLICKS, CONVERSIONS, SPEND],
+    )
+    parsed =FormulaBundle.from_dict(raw, base_metric_registry=registry)
+    assert parsed.to_dict() == raw
+    built = FormulaBundle(
+        base_metrics=tuple(registry.values()),
+        definitions=(_defn(_CPA, MBC, SPEND, CONVERSIONS),),
+        base_metric_registry=registry,
+    )
+    assert built == parsed
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(  # conversions is not in the default Phase-1 registry
+            base_metrics=tuple(registry.values()),
+            definitions=(_defn(_CPA, MBC, SPEND, CONVERSIONS),),
+        )
+    assert exc_info.value.code == "unknown_base_metric"
+
+
+@pytest.mark.parametrize(
+    "registry",
+    [
+        [PHASE1_BASE_METRICS[CLICKS]],
+        None,
+        "metric:clicks_v1",
+        {CLICKS: PHASE1_BASE_METRICS[SPEND], SPEND: PHASE1_BASE_METRICS[SPEND]},
+        {"metric:alias_v1": PHASE1_BASE_METRICS[CLICKS], SPEND: PHASE1_BASE_METRICS[SPEND]},
+        {CLICKS: CLICKS, SPEND: PHASE1_BASE_METRICS[SPEND]},
+        {7: PHASE1_BASE_METRICS[CLICKS]},
+    ],
+)
+def test_bundle_rejects_malformed_registry_on_both_paths(registry: object) -> None:
+    raw = _bundle_dict(
+        [_defn_dict(_CPC, MBC, SPEND, CLICKS)],
+        topological_order=[CLICKS, SPEND, _CPC],
+        base_metric_refs=[CLICKS, SPEND],
+    )
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle.from_dict(raw, base_metric_registry=registry)  # type: ignore[arg-type]
+    assert exc_info.value.code == "malformed"
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(
+            base_metrics=(PHASE1_BASE_METRICS[CLICKS], PHASE1_BASE_METRICS[SPEND]),
+            definitions=(_defn(_CPC, MBC, SPEND, CLICKS),),
+            base_metric_registry=registry,  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == "malformed"
+
+
+def test_derived_output_never_shadows_any_registry_base_metric() -> None:
+    # metric:clicks_v1 is registered (int64_count) but not listed in the bundle.
+    bases = (PHASE1_BASE_METRICS[IMPRESSIONS], PHASE1_BASE_METRICS[SPEND])
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(base_metrics=bases, definitions=(_defn(CLICKS, MBC, SPEND, IMPRESSIONS),))
+    assert exc_info.value.code == "duplicate_output"
+    registry = _custom_registry()
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(
+            base_metrics=(registry[CLICKS], registry[SPEND]),
+            definitions=(_defn(CONVERSIONS, MBC, SPEND, CLICKS),),
+            base_metric_registry=registry,
+        )
+    assert exc_info.value.code == "duplicate_output"
+    raw = _bundle_dict(
+        [_defn_dict(CONVERSIONS, MBC, SPEND, CLICKS)],
+        topological_order=[CLICKS, SPEND, CONVERSIONS],
+        base_metric_refs=[CLICKS, SPEND],
+    )
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle.from_dict(raw, base_metric_registry=registry)
+    assert exc_info.value.code == "duplicate_output"
+    assert FormulaBundle.from_dict(raw).definitions[0].metric_semantic_ref == CONVERSIONS
+
+
+def test_listed_base_must_be_the_registered_definition() -> None:
+    edited = _base(CLICKS, "clicks_edited", "int64_count")
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(
+            base_metrics=(edited, PHASE1_BASE_METRICS[SPEND]),
+            definitions=(_defn(_CPC, MBC, SPEND, CLICKS),),
+        )
+    assert exc_info.value.code == "unknown_base_metric"
+
+
+@pytest.mark.parametrize("bad", [0, "x", {}, [], object()])
+def test_bundle_rejects_non_p1_integrity_as_malformed(bad: object) -> None:
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(
+            base_metrics=_phase1_bases(),
+            definitions=_sample_definitions(),
+            integrity=bad,  # type: ignore[arg-type]
+        )
+    assert exc_info.value.code == "malformed"
+
+
+def test_bundle_rejects_wrong_schema_digest_grammar_and_require_signed_type() -> None:
+    out = FormulaBundle(base_metrics=_phase1_bases(), definitions=_sample_definitions()).to_dict()
+    body = {k: v for k, v in out.items() if k != "bundle_digest"}
+    for schema in ("smart_ads/formula_bundle/v2", "smart_ads/derived_metric_definition/v1", None):
+        wrong = dict(body, **{"$schema": schema})
+        with pytest.raises(FormulaGraphError) as exc_info:
+            FormulaBundle.from_dict(dict(wrong, bundle_digest=_sha(wrong)))
+        assert exc_info.value.code == "malformed"
+    for digest in ("", None, out["bundle_digest"].upper(), out["bundle_digest"][7:]):
+        with pytest.raises(FormulaGraphError) as exc_info:
+            FormulaBundle.from_dict(dict(out, bundle_digest=digest))
+        assert exc_info.value.code == "malformed"
+    with pytest.raises(FormulaGraphError) as exc_info:
+        FormulaBundle(
+            base_metrics=_phase1_bases(),
+            definitions=_sample_definitions(),
+            bundle_digest=out["bundle_digest"].upper(),
+        )
+    assert exc_info.value.code == "malformed"
+    for flag in (0, 1, "", None):
+        with pytest.raises(FormulaGraphError) as exc_info:
+            FormulaBundle.from_dict(out, require_signed=flag)  # type: ignore[arg-type]
+        assert exc_info.value.code == "malformed"
+    assert FormulaBundle.from_dict(out, require_signed=False).to_dict() == out
 
 
 # The six mandatory negative fixtures of ADR-0001 §5.6 (L1421-1424).
@@ -753,6 +957,15 @@ NEGATIVE_FIXTURES: list[tuple[str, dict[str, Any], str]] = [
         _bundle_dict(
             [_defn_dict(IMPRESSIONS, MBC, SPEND, CLICKS)],
             topological_order=[CLICKS, IMPRESSIONS, SPEND],
+        ),
+        "duplicate_output",
+    ),
+    (
+        "duplicate_output_shadowing_unlisted_registry_base_metric",
+        _bundle_dict(
+            [_defn_dict(CLICKS, MBC, SPEND, IMPRESSIONS)],
+            topological_order=[IMPRESSIONS, SPEND, CLICKS],
+            base_metric_refs=[IMPRESSIONS, SPEND],
         ),
         "duplicate_output",
     ),
@@ -893,7 +1106,18 @@ def test_bundle_p1_integrity_content_digest() -> None:
     with pytest.raises(ClosedValidationError):
         FormulaBundle.from_dict(unsigned_dict, require_signed=True)
 
-    content_digest = p1_content_digest(unsigned_dict)
+    # ADR-0001 L3488-3493, by hand: P = envelope minus /integrity/{content_digest,
+    # signature_base64}; D = SHA-256(RFC8785(P)); content_digest = "sha256:" || hex(D);
+    # M = UTF8(prefix) || 0x00 || D. All members are ASCII strings/arrays/objects, so
+    # sorted-key compact json.dumps is byte-identical to RFC 8785 here.
+    preimage = json.dumps(unsigned_dict, sort_keys=True, separators=(",", ":")).encode("ascii")
+    raw_digest = hashlib.sha256(preimage).digest()
+    content_digest = "sha256:" + raw_digest.hex()
+    assert content_digest == p1_content_digest(unsigned_dict)
+    signing_message = b"SMART-ADS:FORMULA-BUNDLE:V1\n" + b"\x00" + raw_digest
+    assert signing_message == p1_signing_message(
+        unsigned_dict, ADR_P1_DOMAIN_PREFIXES[FormulaBundle.SCHEMA]
+    )
     signature = base64.b64encode(b"\x00" * 64).decode("ascii")
     signed_dict = dict(
         unsigned_dict,
@@ -987,6 +1211,13 @@ def test_phase1_7b_base_input_never_originates_degraded() -> None:
     for worse in ORDER[:3]:
         base = CertificationInput(worse, "phase1_7b_base")
         assert combine_derived_certification((base, degraded)) is worse  # never softened
+
+
+@pytest.mark.parametrize("bad", [None, 0, True, 1.5, object()])
+def test_combination_rejects_non_iterable_inputs_with_closed_code(bad: object) -> None:
+    with pytest.raises(FormulaGraphError) as exc_info:
+        combine_derived_certification(bad)  # type: ignore[arg-type]
+    assert exc_info.value.code == "malformed"
 
 
 def test_certification_input_rejects_unprofiled_or_malformed_values() -> None:

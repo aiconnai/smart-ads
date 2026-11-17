@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import enum
 import functools
 import re
@@ -46,29 +46,16 @@ _RATIO_FACTOR: Final[int] = 10**RATIO_SCALE
 
 FORMULA_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
-        "malformed",
-        "invalid_operand",
-        "operand_out_of_range",
-        "currency_mismatch",
-        "invalid_operator",
-        "output_type_mismatch",
-        "invalid_rounding_mode",
-        "same_operand",
-        "input_metrics_mismatch",
-        "formula_digest_mismatch",
-        "self_reference",
-        "cycle",
-        "unknown_dependency",
-        "unknown_base_metric",
-        "duplicate_output",
-        "unsorted",
-        "operand_type_mismatch",
-        "topological_order_mismatch",
-        "bundle_digest_mismatch",
-        "content_digest_mismatch",
-        "invalid_certification_status",
-        "unprofiled_input_origin",
-        "degraded_from_phase1_7b",
+        # grammar, operands and operator signatures
+        "malformed", "invalid_operand", "operand_out_of_range", "currency_mismatch",
+        "invalid_operator", "output_type_mismatch", "invalid_rounding_mode", "same_operand",
+        "input_metrics_mismatch", "formula_digest_mismatch",
+        # bundle graph and envelope
+        "self_reference", "cycle", "unknown_dependency", "unknown_base_metric",
+        "duplicate_output", "unsorted", "operand_type_mismatch", "topological_order_mismatch",
+        "bundle_digest_mismatch", "content_digest_mismatch",
+        # derived certification
+        "invalid_certification_status", "unprofiled_input_origin", "degraded_from_phase1_7b",
         "empty_certification_inputs",
     }
 )
@@ -532,8 +519,16 @@ class FormulaBundle:
     topological_order: tuple[str, ...] | None = None
     bundle_digest: str = ""
     integrity: P1Integrity | None = None
+    # Not serialized: the base metric registry the bundle is validated against.
+    base_metric_registry: Mapping[str, BaseMetricDefinition] = field(
+        default_factory=lambda: PHASE1_BASE_METRICS, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
+        if self.integrity is not None and not isinstance(self.integrity, P1Integrity):
+            raise FormulaGraphError("malformed", "formula_bundle.integrity: expected P1Integrity")
+        registry = _checked_registry(self.base_metric_registry)
+        object.__setattr__(self, "base_metric_registry", registry)
         bases = _require_typed_tuple(
             self.base_metrics, BaseMetricDefinition, field_name="formula_bundle.base_metrics"
         )
@@ -544,6 +539,7 @@ class FormulaBundle:
             raise FormulaGraphError(
                 "malformed", "formula_bundle: base_metrics and definitions must be non-empty"
             )
+        _check_against_registry(bases, defs, registry)
         order = compute_topological_order((b.metric_semantic_ref for b in bases), defs)
         _check_operand_signatures(bases, defs)
         object.__setattr__(
@@ -587,8 +583,6 @@ class FormulaBundle:
         return expected
 
     def _check_integrity(self) -> None:
-        if self.integrity is not None and not isinstance(self.integrity, P1Integrity):
-            raise FormulaGraphError("malformed", "formula_bundle.integrity: expected P1Integrity")
         if self.integrity is not None and self.integrity.is_signed:
             expected = p1_content_digest(self.to_dict())
             if self.integrity.content_digest != expected:
@@ -636,7 +630,8 @@ class FormulaBundle:
         for member in ("base_metric_refs", "definitions", "topological_order"):
             if not isinstance(mapping[member], list):
                 raise FormulaGraphError("malformed", f"formula_bundle.{member}: expected JSON array")
-        bases = _resolve_base_refs(mapping["base_metric_refs"], base_metric_registry)
+        registry = _checked_registry(base_metric_registry)
+        bases = _resolve_base_refs(mapping["base_metric_refs"], registry)
         defs = tuple(DerivedMetricDefinition.from_dict(item) for item in mapping["definitions"])
         _require_canonical_order(
             [d.metric_semantic_ref for d in defs], field_name="formula_bundle.definitions"
@@ -653,6 +648,7 @@ class FormulaBundle:
             topological_order=tuple(mapping["topological_order"]),
             bundle_digest=digest,
             integrity=integrity,
+            base_metric_registry=registry,
         )
 
 
@@ -683,22 +679,47 @@ def _require_canonical_order(refs: list[str], *, field_name: str) -> None:
         )
 
 
+def _checked_registry(registry: object) -> Mapping[str, BaseMetricDefinition]:
+    """Validate a base metric registry (each key equals its entry's ref) and freeze a copy."""
+    if not isinstance(registry, Mapping):
+        raise FormulaGraphError("malformed", "base_metric_registry: expected Mapping")
+    for key, defn in registry.items():
+        if not isinstance(defn, BaseMetricDefinition) or key != defn.metric_semantic_ref:
+            raise FormulaGraphError(
+                "malformed", f"base_metric_registry: key {key!r} does not match its definition"
+            )
+    return MappingProxyType(dict(registry))
+
+
+def _check_against_registry(
+    bases: tuple[BaseMetricDefinition, ...],
+    definitions: tuple[DerivedMetricDefinition, ...],
+    registry: Mapping[str, BaseMetricDefinition],
+) -> None:
+    """Listed bases must be the registered definitions; no derived output may reuse a registry ref."""
+    for base in bases:
+        registered = registry.get(base.metric_semantic_ref)
+        if registered is None or registered.metric_definition_digest != base.metric_definition_digest:
+            raise FormulaGraphError(
+                "unknown_base_metric", f"{base.metric_semantic_ref!r} is not the registered base metric"
+            )
+    for defn in definitions:
+        if defn.metric_semantic_ref in registry:
+            raise FormulaGraphError(
+                "duplicate_output",
+                f"derived {defn.metric_semantic_ref!r} shadows a registry base metric",
+            )
+
+
 def _resolve_base_refs(
     raw_refs: list[object], registry: Mapping[str, BaseMetricDefinition]
 ) -> tuple[BaseMetricDefinition, ...]:
-    if not isinstance(registry, Mapping):
-        raise FormulaGraphError("malformed", "base_metric_registry: expected Mapping")
     refs = [_validate_metric_ref(r, field_name="formula_bundle.base_metric_refs") for r in raw_refs]
     _require_canonical_order(refs, field_name="formula_bundle.base_metric_refs")
-    resolved: list[BaseMetricDefinition] = []
     for ref in refs:
-        defn = registry.get(ref)
-        if not isinstance(defn, BaseMetricDefinition) or defn.metric_semantic_ref != ref:
-            raise FormulaGraphError(
-                "unknown_base_metric", f"{ref!r} is not in the base metric registry"
-            )
-        resolved.append(defn)
-    return tuple(resolved)
+        if ref not in registry:
+            raise FormulaGraphError("unknown_base_metric", f"{ref!r} is not in the registry")
+    return tuple(registry[ref] for ref in refs)
 
 
 # --------------------------------------------------------------------------- certification
@@ -762,28 +783,16 @@ def combine_derived_certification(
     inputs: Iterable[CertificationInput],
 ) -> DerivedCertificationStatus:
     """Derived certification inherits the worst (minimum) input status."""
-    checked = _require_typed_tuple(tuple(inputs), CertificationInput, field_name="inputs")
+    checked = _require_typed_tuple(inputs, CertificationInput, field_name="inputs")
     if not checked:
         raise FormulaGraphError("empty_certification_inputs", "at least one input is required")
     return min(item.status for item in checked)
 
 
 __all__ = [
-    "FORMULA_ERROR_CODES",
-    "OPERATOR_SIGNATURES",
-    "RATIO_SCALE",
-    "ROUND_HALF_UP",
-    "CertificationInput",
-    "CertificationInputOrigin",
-    "DerivedCertificationStatus",
-    "DerivedMetricDefinition",
-    "FormulaAst",
-    "FormulaBundle",
-    "FormulaGraphError",
-    "FormulaOperator",
-    "combine_derived_certification",
-    "compute_topological_order",
-    "divide_count_by_count",
-    "divide_money_by_count",
-    "divide_money_by_money",
+    "FORMULA_ERROR_CODES", "OPERATOR_SIGNATURES", "RATIO_SCALE", "ROUND_HALF_UP",
+    "CertificationInput", "CertificationInputOrigin", "DerivedCertificationStatus",
+    "DerivedMetricDefinition", "FormulaAst", "FormulaBundle", "FormulaGraphError",
+    "FormulaOperator", "combine_derived_certification", "compute_topological_order",
+    "divide_count_by_count", "divide_money_by_count", "divide_money_by_money",
 ]
