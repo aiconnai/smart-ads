@@ -5,7 +5,7 @@ This module imports from `smart_ads.analytics.intelligence`; never the reverse.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, ClassVar, Final
 
 from smart_ads.analytics.formulas import (
@@ -128,6 +128,17 @@ def _without_integrity(envelope: dict[str, Any]) -> bytes:
     return canonicalize_jcs({key: value for key, value in envelope.items() if key != "integrity"})
 
 
+def _identical(given: object, fresh: object) -> bool:
+    """Exact types and equal values at every depth (dataclass members and tuple elements)."""
+    if type(given) is not type(fresh):
+        return False
+    if isinstance(given, tuple):
+        return len(given) == len(fresh) and all(map(_identical, given, fresh))  # type: ignore[arg-type]
+    if is_dataclass(given):
+        return all(_identical(getattr(given, f.name), getattr(fresh, f.name)) for f in fields(given))
+    return given == fresh
+
+
 def _fresh_inputs(inputs: _CertificationInputs) -> tuple[AttestedCertificationInput, ...]:
     """Each attested input, and its CertificationInput, re-constructed so rebound fields are checked."""
     def fresh(item: AttestedCertificationInput) -> AttestedCertificationInput:
@@ -152,7 +163,8 @@ def build_certification_record(
     but integrity must equal the recomputation byte for byte, in `finding_key` order. The record
     binds the supplied envelopes' locators and, as `output_digest`, the verified execution's
     `canonical_result_digest`. Every argument is checked again first (see `_fresh_context`):
-    supplied findings are re-parsed from their wire form, attested inputs re-constructed.
+    supplied findings and `integrity` are re-parsed from their wire form, attested inputs
+    re-constructed.
     """
     execution, expected = _evaluate(context, evidence)
     supplied = tuple(
@@ -165,12 +177,16 @@ def build_certification_record(
         _without_integrity(f.to_dict()) for f in expected
     ]:
         raise _fail("findings_mismatch", "supplied findings differ from the recomputed findings")
+    _integrity_type(integrity, "integrity")
+    checked = None if integrity is None else _reparsed(_fail, "invalid_integrity", P1Integrity, integrity)
+    if not _identical(integrity, checked):  # to_dict() drops a partial signature state
+        raise _fail("invalid_integrity", "integrity is not the block its wire form parses to")
     return AnalyticalCertificationRecord(
         finding_locators=_sorted_unique_locators(finding.locator() for finding in supplied),
         derived_certification_status=_derive_certification_status(_fresh_inputs(certification_inputs)),
         mutation_recommendations_blocked=any(f.mutation_recommendation_blocked for f in supplied),
         output_digest=execution.canonical_result_set.canonical_result_digest,
-        integrity=integrity,
+        integrity=checked,
     )
 
 
@@ -186,13 +202,16 @@ def verify_certification_record(
     Everything but `integrity` must match: finding locators, derived status, the blocking flag
     (a record that certifies a blocking finding with `mutation_recommendations_blocked: false`
     is rejected) and `output_digest`. The record's own signed digest was already checked when it
-    was constructed. With `evidence.require_signed` the record must be signed too. The record is
-    compared as its wire form re-parses; the object returned is the one supplied.
+    was constructed. With `evidence.require_signed` the record must be signed too. The object
+    returned is the one supplied, so it must be exactly what its wire form re-parses to: same
+    types and values at every depth.
     """
     _require(record, AnalyticalCertificationRecord, "record")
-    _require(evidence, AnalysisEvidence, "evidence")
+    evidence = _recheck(_fail, "invalid_type", replace, _require(evidence, AnalysisEvidence, "evidence"))
     fresh = _reparsed(_fail, "invalid_type", AnalyticalCertificationRecord, record)
-    if _strict(evidence.require_signed, bool, "evidence.require_signed") and not _is_signed(fresh.integrity):
+    if not _identical(record, fresh):
+        raise _fail("invalid_type", "certification_record is not the object its wire form parses to")
+    if evidence.require_signed and not _is_signed(fresh.integrity):
         raise _fail("unsigned_artifact", "certification_record must carry a finalized P1 signature")
     expected = build_certification_record(context, evidence, findings, certification_inputs)
     if _without_integrity(fresh.to_dict()) != _without_integrity(expected.to_dict()):

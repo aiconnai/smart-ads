@@ -745,6 +745,140 @@ def test_tampered_supplied_field_acts_like_its_constructor_or_rejects(target: st
                 assert type(got) is tuple or got == want, (value, got, want)
 
 
+# ------------------------------------------------------------------ the integrity argument of build
+
+
+def _integrity_block(signed: bool) -> P1Integrity:
+    """A fresh integrity block valid for the default record: unsigned, or signed over its preimage."""
+    block = _sign(_record()).integrity if signed else _unsigned_integrity()
+    assert block is not None
+    return block
+
+
+def _built_with(integrity: Any) -> Any:
+    """build_certification_record with `integrity`, as record bytes or a coded rejection.
+
+    A returned record must also parse back through AnalyticalCertificationRecord.from_dict; that
+    check runs outside `_coded`, so a record its own parser rejects fails the test.
+    """
+    context, evidence, findings = _scenario()
+    outcome = _coded(
+        lambda: build_certification_record(context, evidence, findings, VERIFIED_INPUTS, integrity=integrity)
+    )
+    if type(outcome) is tuple:
+        return outcome
+    wire = outcome.to_dict()
+    assert AnalyticalCertificationRecord.from_dict(wire).to_dict() == wire
+    return _jcs(wire)
+
+
+@pytest.mark.parametrize(
+    ("signed", "field", "value"),
+    [
+        pytest.param(False, "key_id", None, id="key-id-none"),  # used to serialise key_id null
+        pytest.param(True, "signature_base64", 0, id="signature-int"),  # used to be accepted
+        pytest.param(False, "key_registry_snapshot_locator", "abc", id="registry-str"),  # bare AttributeError
+    ],
+)
+def test_tampered_integrity_argument_is_rejected_with_a_code(signed: bool, field: str, value: Any) -> None:
+    block = _integrity_block(signed)
+    _tamper(block, field, value)
+    assert _built_with(block) == (IntelligenceError, "invalid_integrity")
+
+
+def test_integrity_argument_of_another_type_is_rejected() -> None:
+    assert _built_with("integrity") == (IntelligenceError, "invalid_integrity")
+    assert _built_with(_unsigned_integrity().to_dict()) == (IntelligenceError, "invalid_integrity")
+
+
+@pytest.mark.parametrize("signed", [False, True])
+@pytest.mark.parametrize("field", [f.name for f in dataclasses.fields(P1Integrity)])
+def test_tampered_integrity_slot_acts_like_its_constructor_or_rejects(signed: bool, field: str) -> None:
+    valid = _built_with(_integrity_block(signed))
+    assert type(valid) is bytes
+    for value in _hostile(getattr(_integrity_block(signed), field)):
+        block = _integrity_block(signed)
+        try:
+            legit = dataclasses.replace(block, **{field: value})
+        except Exception:  # the constructor rejects the value (or cannot even process it)
+            legit = None
+        _tamper(block, field, value)
+        got = _built_with(block)
+        if legit is None:
+            assert type(got) is tuple, (value, got)
+        else:
+            assert type(got) is tuple or got == _built_with(legit), (value, got)
+
+
+# ------------------------------------------------------------------ the record verify returns
+
+
+class _FakeStatus:
+    """Not a DerivedCertificationStatus, but serialises like one."""
+
+    value = "VERIFIED"
+
+
+class _SubLocator(ArtifactLocator):
+    """An ArtifactLocator subclass: one level below the record's fields."""
+
+
+class _SubIntegrity(P1Integrity):
+    """A P1Integrity subclass carried in the record's integrity slot."""
+
+
+def _subclassed(cls: type, value: Any) -> Any:
+    return cls(**{f.name: getattr(value, f.name) for f in dataclasses.fields(value)})
+
+
+def _first_locator_subclassed(record: AnalyticalCertificationRecord) -> tuple[ArtifactLocator, ...]:
+    first, *rest = record.finding_locators
+    return (_subclassed(_SubLocator, first), *rest)
+
+
+@pytest.mark.parametrize(
+    ("field", "make"),
+    [
+        pytest.param("derived_certification_status", lambda r: _FakeStatus(), id="status-not-enum"),
+        pytest.param("finding_locators", lambda r: list(r.finding_locators), id="locators-list"),
+        pytest.param("finding_locators", _first_locator_subclassed, id="locator-subclass"),
+        pytest.param(
+            "integrity", lambda r: _subclassed(_SubIntegrity, _unsigned_integrity()), id="integrity-subclass"
+        ),
+    ],
+)
+def test_verify_rejects_a_record_that_is_not_what_its_wire_form_parses_to(
+    field: str, make: Callable[[AnalyticalCertificationRecord], Any]
+) -> None:
+    context, evidence, findings = _scenario()
+    record = AnalyticalCertificationRecord.from_dict(_record().to_dict())
+    _tamper(record, field, make(record))
+    assert AnalyticalCertificationRecord.from_dict(record.to_dict()).to_dict() == record.to_dict()
+    _raises("invalid_type", verify_certification_record, record, context, evidence, findings, VERIFIED_INPUTS)
+
+
+def test_verify_still_returns_the_genuine_record_it_was_given() -> None:
+    context, evidence, findings = _scenario()
+    for record in (_record(), _sign(_record()), AnalyticalCertificationRecord.from_dict(_record().to_dict())):
+        assert verify_certification_record(record, context, evidence, findings, VERIFIED_INPUTS) is record
+
+
+# ------------------------------------------------------------------ a deleted evidence slot
+
+
+def test_deleted_require_signed_slot_gives_the_same_code_on_every_entry_point() -> None:
+    record = _record()
+    calls: list[Callable[[EvaluationContext, AnalysisEvidence], Any]] = [
+        evaluate_findings,
+        lambda c, e: build_certification_record(c, e, _scenario()[2], VERIFIED_INPUTS),
+        lambda c, e: verify_certification_record(record, c, e, _scenario()[2], VERIFIED_INPUTS),
+    ]
+    for call in calls:
+        context, evidence = _build()
+        object.__delattr__(evidence, "require_signed")
+        _raises("invalid_type", call, context, evidence)
+
+
 def test_module_holds_no_numeric_literal_and_no_float() -> None:
     tree = ast.parse(Path(certification.__file__).read_text(encoding="utf-8"))
     numbers = {
