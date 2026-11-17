@@ -130,13 +130,20 @@ class ResultIndex:
 
     @classmethod
     def of(cls, result: CollectionResult) -> ResultIndex:
+        """Index a re-parsed result. Its locator is the one canonicalization of the whole
+        result, so a result that is no JSON value (``checked_result`` does not test it)
+        is ``malformed_member`` here."""
         facts = complete_facts(result)
         grouped: dict[MetricPairKey, list[NormalizedCollectionFact]] = {}
         for fact in facts:
             grouped.setdefault(pair_of(fact), []).append(fact)
+        try:
+            locator = collection_result_locator(result)
+        except Bundle7BDefectError as exc:
+            raise Bundle7BDefectError("malformed_member", f"result_index: {exc}") from exc
         return cls(
             result=result,
-            locator=collection_result_locator(result),
+            locator=locator,
             set_digest=_require_digest_present(result),
             facts_by_pair=MappingProxyType({k: tuple(v) for k, v in grouped.items()}),
         )
@@ -221,8 +228,11 @@ class FactEvidenceSelector:
 
 
 def checked_result(result: object, *, label: str = "collection_result") -> CollectionResult:
-    """``result`` re-parsed from its wire form: the copy is what callers index and read."""
-    return reparsed(result, CollectionResult, label=label)
+    """``result`` re-parsed from its wire form: the copy is what callers index and read.
+
+    Its canonicalization is left to ``ResultIndex.of`` (the one the locator needs).
+    """
+    return reparsed(result, CollectionResult, label=label, canonical=False)
 
 
 def select_fact_evidence(result: CollectionResult, pair: MetricPairKey) -> FactEvidenceSelector:

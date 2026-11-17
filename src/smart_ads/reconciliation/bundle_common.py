@@ -200,7 +200,7 @@ def require_count(value: object, *, label: str) -> int:
     return value
 
 
-def reparsed(value: T, expected: Any, *, label: str) -> T:
+def reparsed(value: T, expected: Any, *, label: str, canonical: bool = True) -> T:
     """A fresh ``expected`` rebuilt from the wire form of ``value``: ``from_dict(to_dict())``.
 
     A frozen object that crosses a public seam is untrusted: its ``__post_init__``
@@ -210,9 +210,24 @@ def reparsed(value: T, expected: Any, *, label: str) -> T:
     ``ClosedValidationError`` or a bare error from ``to_dict`` or ``from_dict`` is
     ``malformed_member``), and the caller must use the copy, never ``value``. A wrong
     class is ``malformed_argument``. Signed ``integrity`` blocks round-trip intact.
+
+    A validator that compares with ``!=`` lets through an object that is no JSON
+    value yet claims equality with every literal, and the copy carries it by
+    reference. With ``canonical`` the copy's own wire form must canonicalize
+    (RFC 8785), so every later digest of it is total: such an object is
+    ``malformed_member`` here instead of a plain error (or an accept) downstream.
+    ``checked_result`` skips it: ``ResultIndex.of`` canonicalizes the whole result
+    once for its locator, and a second pass over it is the cost this avoids.
     """
     require_type(value, expected, label=label)
-    return guard_any("malformed_member", label, lambda: expected.from_dict(value.to_dict()))
+
+    def build() -> T:
+        fresh: T = expected.from_dict(value.to_dict())
+        if canonical:
+            canonicalize_jcs(fresh.to_dict())  # type: ignore[attr-defined]
+        return fresh
+
+    return guard_any("malformed_member", label, build)
 
 
 def require_callable(value: object, *, label: str) -> None:

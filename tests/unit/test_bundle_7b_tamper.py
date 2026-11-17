@@ -71,14 +71,29 @@ class IntSub(int):
     """An int subclass: rejected wherever the grammar says strict int."""
 
 
+class AlwaysEq:
+    """Not a str, equal to everything: a validator that compares with ``!=`` lets it through,
+    and it is no JSON value, so canonicalizing it later fails."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Tamper machinery
 # ---------------------------------------------------------------------------
 
 
-def hostile_values(value: object) -> list[object]:
-    """Hostile replacements: wrong type, bool, None, empty, list-for-tuple, subclass, digest."""
-    out: list[object] = [None, True, 12345, "not-valid", (), object(), MISSING]
+def hostile_values(value: object, light: bool = False) -> list[object]:
+    """Hostile replacements: wrong type, bool, None, empty, list-for-tuple, subclass, digest,
+    and an always-equal object that is no JSON value. ``light`` keeps the four that matter
+    most (None, always-equal, wrong grammar, deletion) for arguments that share a code path."""
+    if light:
+        return [None, AlwaysEq(), "not-valid", MISSING]
+    out: list[object] = [None, True, 12345, "not-valid", (), AlwaysEq(), MISSING]
     if isinstance(value, bool):
         out.append(not value)
     if isinstance(value, tuple):
@@ -149,12 +164,14 @@ def rebuild(obj: Any) -> Any:
 
 
 def wire_outcome(
-    root: Any, entry: Callable[[Any], object], clean: Any, valid: Outcome
+    root: Any, entry: Callable[[Any], object], clean: Any, valid: Outcome, *, lying: bool = False
 ) -> Outcome:
     """What the entry point must do with ``root``: what it does with its wire form.
 
     A wire form equal to the clean object's behaves as the valid object (``valid``);
     any other parse is run through the entry point, which then sees a clean object.
+    ``lying``: a tampered value claims equality with everything (``AlwaysEq``), so equality
+    proves nothing and the wire form must canonicalize, or it is no wire form at all.
     """
     try:
         fresh = rebuild(root)
@@ -162,19 +179,34 @@ def wire_outcome(
         return ("coded", exc.code)
     except Exception:  # noqa: BLE001 - a bare error of any kind is a malformed member
         return ("coded", "malformed_member")
+    if lying and not serializable(fresh):
+        return ("coded", "malformed_member")
     return valid if fresh == clean else run(lambda: entry(fresh))
 
 
-def sweep(root: Any, entry: Callable[[Any], object]) -> list[str]:
+def serializable(obj: Any) -> bool:
+    """Whether ``obj`` has a wire form that RFC 8785 can canonicalize (equality can lie);
+    ``ResolvedGate3SelectionState`` has none, so its locator stands for it."""
+    to_dict = getattr(obj, "to_dict", None) or obj.locator.to_dict
+    try:
+        canonicalize_jcs(to_dict())
+    except Exception:  # noqa: BLE001 - any failure means there is no canonical wire form
+        return False
+    return True
+
+
+def sweep(root: Any, entry: Callable[[Any], object], light: bool = False) -> list[str]:
     """Tamper every field of every reachable object with every hostile value; list the misses."""
     misses: list[str] = []
     clean, valid = rebuild(root), run(lambda: entry(root))
-    assert valid == ("ok", None)
+    if valid != ("ok", None):
+        raise AssertionError(f"the untampered root must be accepted, got {valid}")
     for owner in list(reachable(root)):
         for field in dataclasses.fields(owner):
-            for value in hostile_values(getattr(owner, field.name)):
+            for value in hostile_values(getattr(owner, field.name), light):
                 with hostile_set(owner, field.name, value):
-                    expected = wire_outcome(root, entry, clean, valid)
+                    lying = isinstance(value, AlwaysEq)
+                    expected = wire_outcome(root, entry, clean, valid, lying=lying)
                     actual = run(lambda: entry(root))
                 if actual != expected:
                     shown = repr(value)[:36]
@@ -307,6 +339,16 @@ VERIFY_ROOTS = (
 )
 
 
+# The reference arguments share the candidate's code path: they are swept under their own
+# names (a dropped re-parse must fail a case) with the light hostile set, for the runtime.
+LIGHT_ROOTS = (
+    "reference_admission",
+    "reference_result",
+    "reference_effect_proof_locator",
+    "reference_effect_result_locator",
+)
+
+
 @pytest.mark.parametrize("name", VERIFY_ROOTS)
 def test_verify_sweep_every_field_of_every_reachable_object(
     world: World, record: b7.Certification7BRecord, name: str
@@ -323,7 +365,7 @@ def test_verify_sweep_every_field_of_every_reachable_object(
             else copy_of(original)
         )
         entry = lambda obj: _verify(world, record, **{name: obj})  # noqa: E731
-    assert_no_misses(sweep(root, entry))
+    assert_no_misses(sweep(root, entry, light=name in LIGHT_ROOTS))
 
 
 RECONCILE_ROOTS = (
@@ -495,6 +537,78 @@ def test_wrong_class_arguments_stay_malformed_argument(
     parts: dict[str, Any], call: Callable[[dict[str, Any]], object]
 ) -> None:
     assert run(lambda: call(parts)) == ("coded", "malformed_argument")
+
+
+def _always_eq_cases(
+    parts: dict[str, Any], world: World, record: b7.Certification7BRecord
+) -> dict[str, tuple[Any, str, Callable[[], object]]]:
+    """name -> (owner, field, call): the field is one a foreign validator compares with ``!=``
+    against a literal, so an always-equal object passes the wire-form round trip."""
+    key, other_key = copy_of(parts["key"]), parts["other_key"]
+    pair, query = copy_of(parts["pair"]), canonical_query()
+    projection, side = copy_of(parts["projection"]), copy_of(parts["reconciliations"][0])
+    cand, ref = results(ONE_RESOURCE, ONE_RESOURCE)
+    recs = parts["reconciliations"]
+    return {
+        "reconcile_7b_fact_sets(query.resource_level)": (
+            query, "resource_level", lambda: reconcile(cand, ref, canonical_query_contract=query)),
+        "check_native_request(query.resource_level)": (
+            query, "resource_level", lambda: _check_native(parts["projection"], query, parts)),
+        "check_native_request(projection.attribution_omission_state)": (
+            projection, "attribution_omission_state", lambda: _check_native(projection, canonical_query(), parts)),
+        "compute_canonical_fact_key_digest": (
+            key, "resource_level", lambda: b7.compute_canonical_fact_key_digest(key)),
+        "compute_row_universe": (
+            key, "resource_level", lambda: b7.compute_row_universe([key, other_key])),
+        "compute_row_universe_digest": (
+            key, "resource_level", lambda: b7.compute_row_universe_digest((key, other_key))),
+        "expected_pair_universe": (
+            key, "resource_level", lambda: b7.expected_pair_universe((key,))),
+        "compute_pair_universe": (
+            pair.canonical_fact_key, "resource_level", lambda: b7.compute_pair_universe([pair])),
+        "compute_logical_fact_reconciliation_digest": (
+            side.tolerance_profile_locator, "store_kind",
+            lambda: b7.compute_logical_fact_reconciliation_digest((side, *recs[1:]))),
+        "verify_certification_7b_record(record.bundle_outcome)": (
+            record, "bundle_outcome", lambda: _verify(world, record)),
+        "verify_certification_7b_record(execution.result_status)": (
+            record.candidate_execution, "result_status", lambda: _verify(world, record)),
+    }
+
+
+ALWAYS_EQ_NAMES = (
+    "reconcile_7b_fact_sets(query.resource_level)",
+    "check_native_request(query.resource_level)",
+    "check_native_request(projection.attribution_omission_state)",
+    "compute_canonical_fact_key_digest",
+    "compute_row_universe",
+    "compute_row_universe_digest",
+    "expected_pair_universe",
+    "compute_pair_universe",
+    "compute_logical_fact_reconciliation_digest",
+    "verify_certification_7b_record(record.bundle_outcome)",
+    "verify_certification_7b_record(execution.result_status)",
+)
+
+
+@pytest.mark.parametrize("name", ALWAYS_EQ_NAMES)
+def test_an_always_equal_object_is_a_malformed_member_not_a_bare_error(
+    parts: dict[str, Any], world: World, record: b7.Certification7BRecord, name: str
+) -> None:
+    """Not a str, ``!=`` always False: it passes ``from_dict(to_dict())``, is carried by
+    reference and is no JSON value, so a later canonicalization used to raise a plain
+    ``ClosedValidationError`` (or, for the record, nothing at all)."""
+    owner, field, call = _always_eq_cases(parts, world, record)[name]
+    assert run(call) == ("ok", None)
+    with hostile_set(owner, field, AlwaysEq()):
+        assert run(call) == ("coded", "malformed_member")
+    assert run(call) == ("ok", None)
+
+
+def test_every_always_equal_case_is_named(
+    parts: dict[str, Any], world: World, record: b7.Certification7BRecord
+) -> None:
+    assert tuple(_always_eq_cases(parts, world, record)) == ALWAYS_EQ_NAMES
 
 
 def test_locator_primitives_never_leak_a_bare_error(parts: dict[str, Any]) -> None:
