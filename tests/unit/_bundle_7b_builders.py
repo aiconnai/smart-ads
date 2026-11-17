@@ -162,6 +162,40 @@ BASE_VALUES: dict[tuple[str, str], str] = {
 CANDIDATE_VALUES = {**BASE_VALUES, (REF_A, CLICKS): "101"}
 
 
+def many_resource_refs(count: int) -> list[str]:
+    """``count`` distinct canonical 256-bit base32 resource refs."""
+    refs = []
+    for index in range(count):
+        raw = hashlib.sha256(f"resource-{index}".encode("ascii")).digest()
+        refs.append("resource:" + base64.b32encode(raw).decode("ascii").rstrip("=").lower())
+    return refs
+
+
+def many_rows(count: int) -> dict[tuple[str, str], str]:
+    return {
+        (ref, metric): "7" for ref in many_resource_refs(count) for metric in (
+            IMPRESSIONS, CLICKS, SPEND
+        )
+    }
+
+
+class LocatorCallCounter:
+    """Counts whole-result canonicalizations through ``collection_result_locator``."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from smart_ads.reconciliation import bundle_evidence, bundle_verify
+
+        self.calls = 0
+        original = bundle_evidence.collection_result_locator
+
+        def counting(result: CollectionResult) -> ArtifactLocator:
+            self.calls += 1
+            return original(result)
+
+        for module in (bundle_evidence, bundle_verify):
+            monkeypatch.setattr(module, "collection_result_locator", counting, raising=False)
+
+
 def transport_ok() -> TransportOutcome:
     return TransportOutcome(
         network_ok=True,

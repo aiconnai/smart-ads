@@ -26,8 +26,10 @@ from tests.unit._bundle_7b_builders import (
     REF_C,
     SPEND,
     WITHIN_TOLERANCE_ROW,
+    LocatorCallCounter,
     canonical_query,
     code_of,
+    many_rows,
     collection_result,
     default_profiles,
     different_value,
@@ -426,6 +428,17 @@ def test_verifier_requires_every_fact_inside_the_admitted_query(
         query_checked=False,
     )
     assert verify_defect(outside) == code
+
+
+def test_verifier_indexes_each_result_once_for_100_rows_per_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = many_rows(100)
+    large = build_world(rows, rows)
+    assert len(large.record["fact_reconciliations"]) == 300
+    counter = LocatorCallCounter(monkeypatch)
+    large.verify()
+    assert counter.calls == 2
 
 
 def test_verifier_never_mutates_its_inputs(world: World) -> None:

@@ -28,6 +28,7 @@ from smart_ads.reconciliation.bundle_common import (
 from smart_ads.reconciliation.bundle_evidence import (
     FactReconciliation,
     ReconciliationSide,
+    ResultIndex,
     addressed_fact,
     complete_facts,
     compute_logical_fact_reconciliation_digest,
@@ -146,15 +147,15 @@ def _universe_codes(cand: SideUniverse, ref: SideUniverse) -> set[str]:
     return codes
 
 
-def _evidence_side(result: CollectionResult, pair: MetricPairKey) -> ReconciliationSide:
-    selector = select_fact_evidence(result, pair)
-    return ReconciliationSide.for_fact(addressed_fact(result, pair), selector)
+def _evidence_side(index: ResultIndex, pair: MetricPairKey) -> ReconciliationSide:
+    selector = select_fact_evidence(index, pair)
+    return ReconciliationSide.for_fact(addressed_fact(index, pair), selector)
 
 
 def _reconcile_pair(
     pair: MetricPairKey,
-    candidate_result: CollectionResult,
-    reference_result: CollectionResult,
+    candidate_result: ResultIndex,
+    reference_result: ResultIndex,
     resolved: tuple[ToleranceProfile, ArtifactLocator],
 ) -> FactReconciliation:
     profile, profile_locator = resolved
@@ -231,10 +232,9 @@ def reconcile_7b_fact_sets(
     ):
         codes.add("retrieval_skew_exceeded")
     common = set(ref.pairs)
+    cand_index, ref_index = ResultIndex.of(candidate_result), ResultIndex.of(reference_result)
     reconciliations = tuple(
-        _reconcile_pair(
-            pair, candidate_result, reference_result, profiles[pair.canonical_metric_ref]
-        )
+        _reconcile_pair(pair, cand_index, ref_index, profiles[pair.canonical_metric_ref])
         for pair in cand.pairs
         if pair in common and pair.canonical_metric_ref in profiles
     )

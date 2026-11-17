@@ -24,8 +24,10 @@ from tests.unit._bundle_7b_builders import (
     SPEND,
     QUERY_DIGEST,
     WITHIN_TOLERANCE_ROW,
+    LocatorCallCounter,
     canonical_query,
     code_of,
+    many_rows,
     default_profiles,
     fact,
     facts_for,
@@ -268,6 +270,18 @@ def test_reconcile_binds_profiles_to_the_digest_of_the_supplied_query() -> None:
     with pytest.raises(Bundle7BDefectError) as excinfo:
         reconcile(cand, ref, canonical_query_contract=other)
     assert code_of(excinfo) == "tolerance_profile_unbound"
+
+
+def test_reconcile_indexes_each_result_once_for_100_rows_per_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = many_rows(100)
+    cand, ref = results(rows, rows)
+    counter = LocatorCallCounter(monkeypatch)
+    result = reconcile(cand, ref)
+    assert result.bundle_outcome == "verified"
+    assert len(result.fact_reconciliations) == 300
+    assert counter.calls == 2
 
 
 def test_reconcile_result_is_immutable_and_its_codes_are_closed() -> None:

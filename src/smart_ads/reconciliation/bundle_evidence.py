@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, ClassVar, Final
 
 from smart_ads.contracts.jcs import (
@@ -90,16 +91,6 @@ def complete_facts(result: CollectionResult) -> tuple[NormalizedCollectionFact, 
     return result.normalized_fact_set
 
 
-def addressed_fact(result: CollectionResult, pair: MetricPairKey) -> NormalizedCollectionFact:
-    matches = [fact for fact in complete_facts(result) if pair_of(fact) == pair]
-    if len(matches) != 1:
-        raise Bundle7BDefectError(
-            "evidence_not_addressable",
-            f"fact_evidence_selector: {len(matches)} facts carry identity {pair.kfive()}",
-        )
-    return matches[0]
-
-
 def _require_digest_present(result: CollectionResult) -> str:
     complete_facts(result)
     digest = result.normalized_fact_set_digest
@@ -108,6 +99,47 @@ def _require_digest_present(result: CollectionResult) -> str:
             "collection_result_incomplete", "collection_result: no set digest"
         )
     return digest
+
+
+@dataclass(frozen=True, slots=True)
+class ResultIndex:
+    """A complete result with its locator, set digest and facts indexed by pair, built once.
+
+    Canonicalizing a whole ``collection_result/v1`` per pair is quadratic; every
+    caller resolving many selectors against one result shares one index.
+    """
+
+    result: CollectionResult
+    locator: ArtifactLocator
+    set_digest: str
+    facts_by_pair: Mapping[MetricPairKey, tuple[NormalizedCollectionFact, ...]]
+
+    @classmethod
+    def of(cls, result: CollectionResult | ResultIndex) -> ResultIndex:
+        if isinstance(result, ResultIndex):
+            return result
+        facts = complete_facts(result)
+        grouped: dict[MetricPairKey, list[NormalizedCollectionFact]] = {}
+        for fact in facts:
+            grouped.setdefault(pair_of(fact), []).append(fact)
+        return cls(
+            result=result,
+            locator=collection_result_locator(result),
+            set_digest=_require_digest_present(result),
+            facts_by_pair=MappingProxyType({k: tuple(v) for k, v in grouped.items()}),
+        )
+
+
+def addressed_fact(
+    result: CollectionResult | ResultIndex, pair: MetricPairKey
+) -> NormalizedCollectionFact:
+    matches = ResultIndex.of(result).facts_by_pair.get(pair, ())
+    if len(matches) != 1:
+        raise Bundle7BDefectError(
+            "evidence_not_addressable",
+            f"fact_evidence_selector: {len(matches)} facts carry identity {pair.kfive()}",
+        )
+    return matches[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,13 +210,16 @@ class FactEvidenceSelector:
         )
 
 
-def select_fact_evidence(result: CollectionResult, pair: MetricPairKey) -> FactEvidenceSelector:
+def select_fact_evidence(
+    result: CollectionResult | ResultIndex, pair: MetricPairKey
+) -> FactEvidenceSelector:
     """Build the selector addressing exactly one fact of ``pair`` inside ``result``."""
     require_type(pair, MetricPairKey, label="pair")
-    target = addressed_fact(result, pair)
+    index = ResultIndex.of(result)
+    target = addressed_fact(index, pair)
     return FactEvidenceSelector(
-        collection_result_locator=collection_result_locator(result),
-        normalized_fact_set_digest=_require_digest_present(result),
+        collection_result_locator=index.locator,
+        normalized_fact_set_digest=index.set_digest,
         reconciliation_row_key=pair.canonical_fact_key,
         canonical_metric_ref=pair.canonical_metric_ref,
         fact_projection_digest=compute_fact_projection_digest(target),
@@ -192,20 +227,20 @@ def select_fact_evidence(result: CollectionResult, pair: MetricPairKey) -> FactE
 
 
 def resolve_fact_evidence(
-    selector: FactEvidenceSelector, result: CollectionResult
+    selector: FactEvidenceSelector, result: CollectionResult | ResultIndex
 ) -> NormalizedCollectionFact:
     """Resolve a selector against the side's resolved result; every member is recomputed."""
     require_type(selector, FactEvidenceSelector, label="fact_evidence_selector")
-    set_digest = _require_digest_present(result)
-    if selector.collection_result_locator != collection_result_locator(result):
+    index = ResultIndex.of(result)
+    if selector.collection_result_locator != index.locator:
         raise Bundle7BDefectError(
             "evidence_container_mismatch", "fact_evidence_selector: container is another result"
         )
-    if selector.normalized_fact_set_digest != set_digest:
+    if selector.normalized_fact_set_digest != index.set_digest:
         raise Bundle7BDefectError(
             "normalized_fact_set_digest_mismatch", "fact_evidence_selector: set digest differs"
         )
-    target = addressed_fact(result, selector.pair_key())
+    target = addressed_fact(index, selector.pair_key())
     if compute_fact_projection_digest(target) != selector.fact_projection_digest:
         raise Bundle7BDefectError(
             "fact_projection_digest_mismatch", "fact_evidence_selector: projection digest differs"

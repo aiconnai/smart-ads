@@ -21,7 +21,7 @@ from smart_ads.reconciliation.bundle_common import (
 from smart_ads.reconciliation.bundle_evidence import (
     FactReconciliation,
     ReconciliationSide,
-    collection_result_locator,
+    ResultIndex,
     resolve_fact_evidence,
 )
 from smart_ads.reconciliation.bundle_executions import (
@@ -185,14 +185,15 @@ def _verify_result_binding(execution: Any, result: CollectionResult, call_side: 
 def _verify_result(
     record: Certification7BRecord,
     execution: Any,
-    result: CollectionResult,
+    index: ResultIndex,
     call_side: str,
     effect_result: ArtifactLocator,
 ) -> SideUniverse:
+    result = index.result
     facts = side_facts(result, call_side)
     _verify_result_binding(execution, result, call_side)
     require_facts_in_query(facts, record.canonical_query_contract, label=f"{call_side}_result")
-    if collection_result_locator(result) != effect_result:
+    if index.locator != effect_result:
         raise Bundle7BDefectError(
             "effect_result_mismatch", f"{call_side}: effect proof result is another result"
         )
@@ -214,13 +215,14 @@ def _verify_result(
 
 def _verify_side(
     record: Certification7BRecord, call_side: str, arguments: Mapping[str, Any]
-) -> SideUniverse:
+) -> tuple[SideUniverse, ResultIndex]:
     execution = getattr(record, f"{call_side}_execution")
     _verify_admission(record, execution, arguments[f"{call_side}_admission"])
+    index = ResultIndex.of(arguments[f"{call_side}_result"])
     universe = _verify_result(
         record,
         execution,
-        arguments[f"{call_side}_result"],
+        index,
         call_side,
         arguments[f"{call_side}_effect_result_locator"],
     )
@@ -231,7 +233,7 @@ def _verify_side(
         algorithm_digest=execution.native_to_canonical_projection_algorithm_digest,
         project_native_request=arguments["project_native_request"],
     )
-    return universe
+    return universe, index
 
 
 def _verify_universes(
@@ -247,7 +249,7 @@ def _verify_universes(
 
 
 def _verify_side_evidence(
-    item: FactReconciliation, side_name: str, result: CollectionResult
+    item: FactReconciliation, side_name: str, result: ResultIndex
 ) -> ComparisonSide:
     side = getattr(item, side_name)
     fact = resolve_fact_evidence(side.fact_evidence_selector, result)
@@ -264,10 +266,12 @@ def _verify_side_evidence(
 
 
 def _verify_reconciliation(
-    item: FactReconciliation, arguments: Mapping[str, Any], profiles: ResolvedProfiles
+    item: FactReconciliation,
+    indexes: Mapping[str, ResultIndex],
+    profiles: ResolvedProfiles,
 ) -> None:
-    candidate = _verify_side_evidence(item, "candidate", arguments["candidate_result"])
-    reference = _verify_side_evidence(item, "reference", arguments["reference_result"])
+    candidate = _verify_side_evidence(item, "candidate", indexes["candidate"])
+    reference = _verify_side_evidence(item, "reference", indexes["reference"])
     metric = item.canonical_metric_ref
     profile, profile_locator = profiles[metric]
     if item.tolerance_profile_locator != profile_locator:
@@ -282,7 +286,10 @@ def _verify_reconciliation(
 
 
 def _verify_reconciliations(
-    record: Certification7BRecord, arguments: Mapping[str, Any], tolerance_profiles: object
+    record: Certification7BRecord,
+    arguments: Mapping[str, Any],
+    indexes: Mapping[str, ResultIndex],
+    tolerance_profiles: object,
 ) -> None:
     """Resolve the protected profiles under the record's run, query, scope and selection."""
     fingerprint = arguments["gate3_certification_fingerprint"]
@@ -294,7 +301,7 @@ def _verify_reconciliations(
     )
     profiles = resolve_profiles(tolerance_profiles, binding)
     for item in record.fact_reconciliations:
-        _verify_reconciliation(item, arguments, profiles)
+        _verify_reconciliation(item, indexes, profiles)
 
 
 def verify_certification_7b_record(
@@ -340,7 +347,8 @@ def verify_certification_7b_record(
     }
     _verify_arguments(record, arguments)
     _verify_bindings(record, arguments)
-    cand = _verify_side(record, "candidate", arguments)
-    ref = _verify_side(record, "reference", arguments)
+    cand, cand_index = _verify_side(record, "candidate", arguments)
+    ref, ref_index = _verify_side(record, "reference", arguments)
     _verify_universes(record, cand, ref)
-    _verify_reconciliations(record, arguments, tolerance_profiles)
+    indexes = {"candidate": cand_index, "reference": ref_index}
+    _verify_reconciliations(record, arguments, indexes, tolerance_profiles)
