@@ -1546,6 +1546,41 @@ def test_applicability_does_not_depend_on_rule_parameters() -> None:
     )
 
 
+EXPECTED_PUBLIC_API = frozenset(
+    {
+        "AnalysisPolicy",
+        "AnalysisRule",
+        "ApplicabilityScope",
+        "EvaluationScope",
+        "METRIC_REF_PATTERN",
+        "POLICY_NOT_APPLICABLE_CODES",
+        "PolicyNotApplicableError",
+        "PolicyValidity",
+        "RESTATEMENT_KINDS",
+        "RULE_TYPES",
+        "RULE_TYPE_RESTATEMENT",
+        "RULE_TYPE_SATURATION",
+        "RULE_TYPE_STALLED_DELIVERY",
+        "RULE_TYPE_WASTE",
+        "RestatementRule",
+        "SaturationRule",
+        "StalledDeliveryRule",
+        "WasteRule",
+        "decimal6_to_micros",
+        "policy_applicability_code",
+        "require_policy_applicable",
+        "rule_from_dict",
+    }
+)
+
+
+def test_public_api_is_pinned_and_every_export_resolves() -> None:
+    assert len(pol.__all__) == len(set(pol.__all__))
+    assert set(pol.__all__) == EXPECTED_PUBLIC_API
+    for name in pol.__all__:
+        assert hasattr(pol, name), name
+
+
 # --------------------------------------------------------------------------------------
 # Module hygiene: no float, no threshold literals, no clock
 # --------------------------------------------------------------------------------------
