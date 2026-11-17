@@ -28,6 +28,7 @@ from smart_ads.reconciliation.bundle_common import (
     member_locator,
     parse_member_locator,
     parse_query,
+    reparsed,
     require_member,
     require_type,
     scope_ref,
@@ -109,9 +110,15 @@ def require_same_fingerprint(
     *,
     label: str,
 ) -> None:
-    """Byte-for-byte equality of two complete fingerprints; any one member differing fails 7B."""
+    """Byte-for-byte equality of two complete fingerprints; any one member differing fails 7B.
+
+    Both are re-parsed from their wire forms first: a tampered fingerprint is rejected as
+    its wire form would be, never with a bare error.
+    """
     require_type(left, Gate3CertificationFingerprint, label=f"{label}.left")
     require_type(right, Gate3CertificationFingerprint, label=f"{label}.right")
+    left = reparsed(left, Gate3CertificationFingerprint, label=f"{label}.left")
+    right = reparsed(right, Gate3CertificationFingerprint, label=f"{label}.right")
     if canonicalize_jcs(left.to_dict()) != canonicalize_jcs(right.to_dict()):
         differing = [n for n in left.KEYS if getattr(left, n) != getattr(right, n)]
         raise Bundle7BDefectError(

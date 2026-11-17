@@ -1,9 +1,11 @@
 """``verify_certification_7b_record``: recompute everything; any failure is fatal."""
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
 import copy
 import dataclasses
+import pathlib
 from typing import Any
 
 import pytest
@@ -491,6 +493,27 @@ def test_verifier_never_mutates_its_inputs(world: World) -> None:
     world.verify()
     assert world.record == before
     assert world.kwargs["tolerance_profiles"] == profiles_before
+
+
+def test_bundle_modules_keep_the_repo_style_limits() -> None:
+    """Functions under 50 lines, source lines at most 99 characters, files at most 800 lines."""
+    breaches: list[str] = []
+    for path in sorted(pathlib.Path(b7.__file__).parent.glob("bundle_*.py")):
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        if len(lines) > 800:
+            breaches.append(f"{path.name}: {len(lines)} lines")
+        breaches += [
+            f"{path.name}:{number}: {len(line)} characters"
+            for number, line in enumerate(lines, 1)
+            if len(line) > 99
+        ]
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                length = node.end_lineno - node.lineno + 1
+                if length >= 50:
+                    breaches.append(f"{path.name}: {node.name} is {length} lines")
+    assert not breaches, "; ".join(breaches)
 
 
 def test_every_defect_code_is_documented_and_closed() -> None:

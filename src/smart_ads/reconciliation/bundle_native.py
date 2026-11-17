@@ -42,6 +42,7 @@ from smart_ads.reconciliation.bundle_common import (
     hyphen_ref,
     parse_integrity,
     query_bytes,
+    reparsed,
     require_callable,
     require_member,
     require_strictly_ascending,
@@ -308,12 +309,18 @@ def check_native_request(
     reject only by raising ``ClosedValidationError``; any other exception
     (``ValueError``, ``KeyError``, ``TypeError`` ...) is the caller's bug and
     propagates unchanged, deliberately not caught here.
+
+    ``projection`` and ``canonical_query`` are re-parsed from their wire forms first
+    (the copies are what is digested and handed to the algorithm): a tampered object
+    is rejected as its wire form would be, never with a bare error.
     """
     require_type(projection, NativeRequestProjection, label="native_request_projection")
     require_type(canonical_query, CanonicalQueryContract, label="canonical_query")
     sha256_member(native_request_digest, label="native_request_digest")
     sha256_member(algorithm_digest, label="native_to_canonical_projection_algorithm_digest")
     require_callable(project_native_request, label="project_native_request")
+    projection = reparsed(projection, NativeRequestProjection, label="native_request_projection")
+    canonical_query = reparsed(canonical_query, CanonicalQueryContract, label="canonical_query")
     if projection.native_request_digest != native_request_digest:
         raise Bundle7BDefectError(
             "native_request_digest_mismatch", "native_request_digest differs"

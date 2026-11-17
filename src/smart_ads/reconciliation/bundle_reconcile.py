@@ -18,8 +18,9 @@ from smart_ads.reconciliation.bundle_common import (
     RUN_CONTEXT_SCHEMA,
     Bundle7BDefectError,
     artifact_locator_for,
+    checked_argument_locator,
     guard,
-    require_argument_locator,
+    reparsed,
     require_count,
     require_tuple_of,
     require_type,
@@ -32,14 +33,16 @@ from smart_ads.reconciliation.bundle_evidence import (
     ReconciliationSide,
     ResultIndex,
     addressed_fact,
+    checked_result,
     complete_facts,
-    compute_logical_fact_reconciliation_digest,
+    logical_digest,
+    require_reconciliations,
     select_indexed_evidence,
 )
 from smart_ads.reconciliation.bundle_universe import (
     MetricPairKey,
     SideUniverse,
-    compute_canonical_fact_key_digest,
+    digest_fact_key,
     require_facts_in_query,
 )
 from smart_ads.reconciliation.tolerance import ToleranceProfile, compare_sides
@@ -72,23 +75,28 @@ def binding_members(
     authorized_certification_scope: object,
     migration_run_context_locator: object,
 ) -> dict[str, Any]:
-    """Validate the four binding members (the same-named members of the 7B record)."""
-    checks = (
-        ("gate3_selection_locator", gate3_selection_locator, GATE3_SELECTION_SCHEMA),
-        ("migration_run_context_locator", migration_run_context_locator, RUN_CONTEXT_SCHEMA),
-    )
-    for name, value, artifact_type in checks:
-        require_argument_locator(value, artifact_type, label=name)
+    """Validate the four binding members (the same-named members of the 7B record).
+
+    The two locators are re-parsed from their wire forms; the returned copies are
+    what callers bind to (a tampered locator is ``malformed_member``).
+    """
+    locators = {
+        name: checked_argument_locator(value, artifact_type, label=name)
+        for name, value, artifact_type in (
+            ("gate3_selection_locator", gate3_selection_locator, GATE3_SELECTION_SCHEMA),
+            ("migration_run_context_locator", migration_run_context_locator, RUN_CONTEXT_SCHEMA),
+        )
+    }
     try:
         sha256_member(canonical_query_digest, label="canonical_query_digest")
         scope_ref(authorized_certification_scope, label="authorized_certification_scope")
     except Bundle7BDefectError as exc:
         raise Bundle7BDefectError("malformed_argument", str(exc)) from exc
     return {
-        "gate3_selection_locator": gate3_selection_locator,
+        "gate3_selection_locator": locators["gate3_selection_locator"],
         "canonical_query_digest": canonical_query_digest,
         "authorized_certification_scope": authorized_certification_scope,
-        "migration_run_context_locator": migration_run_context_locator,
+        "migration_run_context_locator": locators["migration_run_context_locator"],
     }
 
 
@@ -129,7 +137,7 @@ def resolve_profiles(tolerance_profiles: object, binding: Mapping[str, Any]) -> 
 
 
 def side_facts(result: object, call_side: str) -> tuple[NormalizedCollectionFact, ...]:
-    """The complete fact set of a result produced by ``call_side``."""
+    """The complete fact set of a result produced by ``call_side`` (``result`` is trusted)."""
     label = f"{call_side}_result"
     require_type(result, CollectionResult, label=label)
     if result.call_side != call_side:
@@ -137,6 +145,14 @@ def side_facts(result: object, call_side: str) -> tuple[NormalizedCollectionFact
             "collection_result_mismatch", f"{label}: call_side must be {call_side!r}"
         )
     return complete_facts(result)
+
+
+def checked_side(
+    result: object, call_side: str
+) -> tuple[CollectionResult, tuple[NormalizedCollectionFact, ...]]:
+    """``result`` re-parsed from its wire form, with its complete fact set; use the copy."""
+    fresh = checked_result(result, label=f"{call_side}_result")
+    return fresh, side_facts(fresh, call_side)
 
 
 def _universe_codes(cand: SideUniverse, ref: SideUniverse) -> set[str]:
@@ -147,6 +163,22 @@ def _universe_codes(cand: SideUniverse, ref: SideUniverse) -> set[str]:
         codes.add("row_universe_mismatch")
     if cand.pairs != ref.pairs:
         codes.add("pair_universe_mismatch")
+    return codes
+
+
+def _set_codes(
+    cand: SideUniverse,
+    ref: SideUniverse,
+    cand_result: CollectionResult,
+    ref_result: CollectionResult,
+) -> set[str]:
+    """Universe defects and retrieval skew between the two sides."""
+    codes = _universe_codes(cand, ref)
+    if not within_skew(
+        cand_result.retrieval_context.retrieved_at_utc,
+        ref_result.retrieval_context.retrieved_at_utc,
+    ):
+        codes.add("retrieval_skew_exceeded")
     return codes
 
 
@@ -172,7 +204,7 @@ def _reconcile_pair(
     )
     return FactReconciliation(
         canonical_fact_key=pair.canonical_fact_key,
-        canonical_fact_key_digest=compute_canonical_fact_key_digest(pair.canonical_fact_key),
+        canonical_fact_key_digest=digest_fact_key(pair.canonical_fact_key),
         canonical_metric_ref=pair.canonical_metric_ref,
         candidate=candidate,
         reference=reference,
@@ -232,28 +264,27 @@ def reconcile_7b_fact_sets(
     that are not ``VERIFIED`` are returned as sorted ``defect_codes`` with
     ``bundle_outcome == "failed"``. Reconciliations cover the required pairs
     present on both sides.
+
+    Both results, the query and the locators are re-parsed from their wire forms
+    first and only the copies are used: a tampered frozen object is
+    ``malformed_member``, never a bare error and never an accept.
     """
-    cand_facts = side_facts(candidate_result, "candidate")
-    ref_facts = side_facts(reference_result, "reference")
-    require_type(canonical_query_contract, CanonicalQueryContract, label="canonical_query")
-    require_facts_in_query(cand_facts, canonical_query_contract, label="candidate_result")
-    require_facts_in_query(ref_facts, canonical_query_contract, label="reference_result")
+    cand_result, cand_facts = checked_side(candidate_result, "candidate")
+    ref_result, ref_facts = checked_side(reference_result, "reference")
+    query = reparsed(canonical_query_contract, CanonicalQueryContract, label="canonical_query")
+    require_facts_in_query(cand_facts, query, label="candidate_result")
+    require_facts_in_query(ref_facts, query, label="reference_result")
     binding = binding_members(
         gate3_selection_locator=gate3_selection_locator,
-        canonical_query_digest=canonical_query_contract.canonical_query_digest,
+        canonical_query_digest=query.canonical_query_digest,
         authorized_certification_scope=authorized_certification_scope,
         migration_run_context_locator=migration_run_context_locator,
     )
     profiles = resolve_profiles(tolerance_profiles, binding)
     cand, ref = SideUniverse.of(cand_facts), SideUniverse.of(ref_facts)
-    codes = _universe_codes(cand, ref)
-    if not within_skew(
-        candidate_result.retrieval_context.retrieved_at_utc,
-        reference_result.retrieval_context.retrieved_at_utc,
-    ):
-        codes.add("retrieval_skew_exceeded")
+    codes = _set_codes(cand, ref, cand_result, ref_result)
     common = set(ref.pairs)
-    cand_index, ref_index = ResultIndex.of(candidate_result), ResultIndex.of(reference_result)
+    cand_index, ref_index = ResultIndex.of(cand_result), ResultIndex.of(ref_result)
     reconciliations = tuple(
         _reconcile_pair(pair, cand_index, ref_index, profiles[pair.canonical_metric_ref])
         for pair in cand.pairs
@@ -274,7 +305,9 @@ def _reconciliation_result(
         if rec.metric_verification_status != "VERIFIED"
     }
     digest = (
-        compute_logical_fact_reconciliation_digest(reconciliations) if reconciliations else None
+        logical_digest(require_reconciliations(reconciliations, label="fact_reconciliations"))
+        if reconciliations
+        else None
     )
     return Reconciliation7BResult(
         bundle_outcome="failed" if codes or not reconciliations else "verified",

@@ -24,6 +24,7 @@ from smart_ads.reconciliation.bundle_common import (
     require_strictly_ascending,
     require_tuple_of,
     require_type,
+    reparsed,
 )
 
 _ROW_KEY_MEMBERS: Final[tuple[str, ...]] = (
@@ -85,9 +86,21 @@ def compute_row_universe(
     """``U7``: unique complete ``C(f)`` objects sorted by raw bytes of ``RFC8785(K(f))``.
 
     A duplicate ``K(f)`` with identical ``C(f)`` bytes is one row; conflicting
-    bytes for one ``K(f)`` reject before any closure check.
+    bytes for one ``K(f)`` reject before any closure check. A key object is
+    re-parsed from its wire form first (a tampered one is ``malformed_member``).
     """
     items = require_collection(row_keys, label="row_universe")
+    return build_row_universe(tuple(_fresh_row_key(item) for item in items))
+
+
+def _fresh_row_key(item: object) -> object:
+    if isinstance(item, ReconciliationRowKey):
+        return reparsed(item, ReconciliationRowKey, label="row_universe.entry")
+    return item
+
+
+def build_row_universe(items: Iterable[object]) -> tuple[ReconciliationRowKey, ...]:
+    """Internal ``compute_row_universe`` over entries that are already trusted."""
     unique = _collapse(
         (_row_entry(item) for item in items),
         conflict_code="row_universe_conflict",
@@ -106,8 +119,22 @@ def _require_row_keys(universe: object, *, label: str) -> tuple[ReconciliationRo
 
 
 def compute_row_universe_digest(universe: Sequence[ReconciliationRowKey]) -> str:
-    """``row_universe_digest`` over a non-empty, already sorted, unique ``U7``."""
-    rows = _require_row_keys(universe, label="row_universe")
+    """``row_universe_digest`` over a non-empty, already sorted, unique ``U7``.
+
+    Every key is re-parsed from its wire form first (a tampered one is ``malformed_member``).
+    """
+    return digest_row_universe(_checked_rows(universe, label="row_universe"))
+
+
+def _checked_rows(universe: object, *, label: str) -> tuple[ReconciliationRowKey, ...]:
+    """Non-empty row keys, each re-parsed from its wire form (the copies are what is used)."""
+    rows = _require_row_keys(universe, label=label)
+    return tuple(reparsed(row, ReconciliationRowKey, label=f"{label}.entry") for row in rows)
+
+
+def digest_row_universe(rows: Sequence[ReconciliationRowKey]) -> str:
+    """Internal ``compute_row_universe_digest`` over rows that are already trusted."""
+    rows = _require_row_keys(rows, label="row_universe")
     require_strictly_ascending(
         [canonicalize_jcs(row_k(row)) for row in rows], label="row_universe"
     )
@@ -117,7 +144,16 @@ def compute_row_universe_digest(universe: Sequence[ReconciliationRowKey]) -> str
 
 
 def compute_canonical_fact_key_digest(canonical_fact_key: ReconciliationRowKey) -> str:
-    """``canonical_fact_key_digest`` of one closed four-member ``C`` object."""
+    """``canonical_fact_key_digest`` of one closed four-member ``C`` object.
+
+    The key is re-parsed from its wire form first (a tampered one is ``malformed_member``).
+    """
+    key = reparsed(canonical_fact_key, ReconciliationRowKey, label="canonical_fact_key")
+    return digest_fact_key(key)
+
+
+def digest_fact_key(canonical_fact_key: ReconciliationRowKey) -> str:
+    """Internal ``compute_canonical_fact_key_digest`` over a key that is already trusted."""
     require_type(canonical_fact_key, ReconciliationRowKey, label="canonical_fact_key")
     return domain_jcs_sha256(
         ADR_DATA_DOMAIN_PREFIXES["7b_canonical_fact_key"], canonical_fact_key.to_dict()
@@ -184,8 +220,24 @@ def _pair_entry(item: object) -> tuple[bytes, bytes, object]:
 def compute_pair_universe(
     entries: Iterable[NormalizedCollectionFact | MetricPairKey | Mapping[str, Any]],
 ) -> tuple[MetricPairKey, ...]:
-    """``U7M``: unique metric-scoped entries sorted by raw bytes of ``RFC8785(Kfive(f))``."""
+    """``U7M``: unique metric-scoped entries sorted by raw bytes of ``RFC8785(Kfive(f))``.
+
+    A fact or pair object is re-parsed from its wire form first (a tampered one is
+    ``malformed_member``).
+    """
     items = require_collection(entries, label="pair_universe")
+    return build_pair_universe(tuple(_fresh_pair_entry(item) for item in items))
+
+
+def _fresh_pair_entry(item: object) -> object:
+    for expected in (NormalizedCollectionFact, MetricPairKey):
+        if isinstance(item, expected):
+            return reparsed(item, expected, label="pair_universe.entry")
+    return item
+
+
+def build_pair_universe(items: Iterable[object]) -> tuple[MetricPairKey, ...]:
+    """Internal ``compute_pair_universe`` over entries that are already trusted."""
     unique = _collapse(
         (_pair_entry(item) for item in items),
         conflict_code="pair_universe_conflict",
@@ -200,9 +252,19 @@ def compute_pair_universe(
 def expected_pair_universe(
     row_universe: Sequence[ReconciliationRowKey],
 ) -> tuple[MetricPairKey, ...]:
-    """``U7 x required_metrics`` in ``Kfive`` order (the only valid ``U7M``)."""
+    """``U7 x required_metrics`` in ``Kfive`` order (the only valid ``U7M``).
+
+    Every key is re-parsed from its wire form first (a tampered one is ``malformed_member``).
+    """
+    return build_expected_pairs(_checked_rows(row_universe, label="row_universe"))
+
+
+def build_expected_pairs(
+    row_universe: Sequence[ReconciliationRowKey],
+) -> tuple[MetricPairKey, ...]:
+    """Internal ``expected_pair_universe`` over rows that are already trusted."""
     rows = _require_row_keys(row_universe, label="row_universe")
-    return compute_pair_universe(
+    return build_pair_universe(
         MetricPairKey(row, metric) for row in rows for metric in REQUIRED_7B_METRICS
     )
 
@@ -248,14 +310,14 @@ class SideUniverse:
     @classmethod
     def of(cls, facts: Sequence[NormalizedCollectionFact]) -> SideUniverse:
         return cls(
-            rows=compute_row_universe(f.fact_key.reconciliation_row_key for f in facts),
-            pairs=compute_pair_universe(facts),
+            rows=build_row_universe(f.fact_key.reconciliation_row_key for f in facts),
+            pairs=build_pair_universe(facts),
         )
 
     @property
     def is_complete(self) -> bool:
-        return self.pairs == expected_pair_universe(self.rows)
+        return self.pairs == build_expected_pairs(self.rows)
 
     @property
     def row_universe_digest(self) -> str:
-        return compute_row_universe_digest(self.rows)
+        return digest_row_universe(self.rows)
