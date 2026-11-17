@@ -1636,10 +1636,12 @@ def _execution_dicts(
     *,
     drv_loc: ArtifactLocator,
     adm_loc: ArtifactLocator,
+    ref_adm_loc: ArtifactLocator,
     reg_loc: ArtifactLocator,
     cand: CollectionResult,
     ref: CollectionResult,
-    rec: b7.Reconciliation7BResult,
+    row_count: int,
+    row_digest: str,
     fp: dict[str, str],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cand_native = native_dict(
@@ -1649,14 +1651,16 @@ def _execution_dicts(
     )
     ref_native = native_dict()
     shared = {
-        "admitted_collection_locator": adm_loc.to_dict(),
         "canonical_query_projection": canonical_query().to_dict(),
         "canonical_query_projection_digest": QUERY_DIGEST,
         "result_status": "complete",
         "gate3_certification_fingerprint": fp,
+        "row_count": row_count,
+        "row_universe_digest": row_digest,
     }
     candidate = {
         **shared,
+        "admitted_collection_locator": adm_loc.to_dict(),
         "driver_id": "pipeboard_hosted",
         "provider_target_ref": CANDIDATE_PROVIDER,
         "effect_proof_locator": CAND_EFFECT.to_dict(),
@@ -1672,12 +1676,11 @@ def _execution_dicts(
         "native_request_digest": "sha256:" + hashlib.sha256(oracle_jcs(cand_native)).hexdigest(),
         "native_to_canonical_projection_algorithm_digest": CAND_ALGO,
         "retrieved_at_utc": cand.retrieval_context.retrieved_at_utc,
-        "row_count": rec.candidate_row_count,
-        "row_universe_digest": rec.candidate_row_universe_digest,
         "normalized_fact_set_digest": cand.normalized_fact_set_digest,
     }
     reference = {
         **shared,
+        "admitted_collection_locator": ref_adm_loc.to_dict(),
         "reference_workload_ref": "workload:independent_meta_reference_harness",
         "provider_target_ref": REFERENCE_PROVIDER,
         "effect_proof_locator": REF_EFFECT.to_dict(),
@@ -1689,8 +1692,6 @@ def _execution_dicts(
         "native_request_digest": "sha256:" + hashlib.sha256(oracle_jcs(ref_native)).hexdigest(),
         "native_to_canonical_projection_algorithm_digest": REF_ALGO,
         "retrieved_at_utc": ref.retrieval_context.retrieved_at_utc,
-        "row_count": rec.reference_row_count,
-        "row_universe_digest": rec.reference_row_universe_digest,
         "normalized_fact_set_digest": ref.normalized_fact_set_digest,
         "reference_run_digest": _sha("0"),
     }
@@ -1705,22 +1706,41 @@ def build_world(
     ref_values: dict[tuple[str, str], str] = BASE_VALUES,
     *,
     ref_at: str = REFERENCE_AT,
+    cand_facts: list[NormalizedCollectionFact] | None = None,
+    require_verified: bool = True,
+    separate_reference_admission: bool = False,
 ) -> World:
     contract = make_pipeboard_contract()
     drv_loc = locate(PipeboardPhase1Contract.SCHEMA, contract)
     reg_loc = _loc("smart_ads/private_registry_snapshot/v1", "e")
     admission = make_admission(canonical_query(), drv_loc, reg_loc)
+    ref_admission = (
+        make_admission(canonical_query(), drv_loc, reg_loc, admission_id="admission:adm-7b-002")
+        if separate_reference_admission
+        else admission
+    )
     adm_loc = locate(AdmittedCollection.SCHEMA, admission)
-    cand = collection_result(facts_for(cand_values), side="candidate", retrieved_at=CANDIDATE_AT,
-                             admitted_locator=adm_loc, registry_locator=reg_loc)
+    ref_adm_loc = locate(AdmittedCollection.SCHEMA, ref_admission)
+    cand = collection_result(
+        cand_facts if cand_facts is not None else facts_for(cand_values),
+        side="candidate", retrieved_at=CANDIDATE_AT, admitted_locator=adm_loc,
+        registry_locator=reg_loc,
+    )
     ref = collection_result(facts_for(ref_values, side="reference"), side="reference",
-                            retrieved_at=ref_at, admitted_locator=adm_loc, registry_locator=reg_loc)
+                            retrieved_at=ref_at, admitted_locator=ref_adm_loc, registry_locator=reg_loc)
     fp = fingerprint_dict(candidate_driver_contract_digest=drv_loc.content_digest,
                           canonical_query_digest=QUERY_DIGEST)
     rec = reconcile(cand, ref)
-    assert rec.bundle_outcome == "verified", rec.defect_codes
+    if require_verified:
+        assert rec.bundle_outcome == "verified", rec.defect_codes
+    z_rows: list[dict[str, str]] = []
+    for item in rec.fact_reconciliations:
+        if item.canonical_fact_key.to_dict() not in z_rows:
+            z_rows.append(item.canonical_fact_key.to_dict())
     candidate, reference = _execution_dicts(
-        drv_loc=drv_loc, adm_loc=adm_loc, reg_loc=reg_loc, cand=cand, ref=ref, rec=rec, fp=fp
+        drv_loc=drv_loc, adm_loc=adm_loc, ref_adm_loc=ref_adm_loc, reg_loc=reg_loc, cand=cand,
+        ref=ref, row_count=len(rec.fact_reconciliations),
+        row_digest=oracle_domain_digest("SMART-ADS:7B-ROW-UNIVERSE:V1\n", z_rows), fp=fp,
     )
     record = {
         "$schema": "smart_ads/certification_7b_record/v1",
@@ -1754,7 +1774,7 @@ def build_world(
         "gate3_certification_fingerprint": b7.Gate3CertificationFingerprint.from_dict(fp),
         "driver_contract": contract,
         "candidate_admission": admission,
-        "reference_admission": admission,
+        "reference_admission": ref_admission,
         "candidate_result": cand,
         "reference_result": ref,
         "candidate_effect_proof_locator": CAND_EFFECT,
@@ -2066,3 +2086,383 @@ def test_record_from_dict_rejects_non_mappings_and_bad_flags(world: World) -> No
     with pytest.raises(Bundle7BDefectError) as excinfo:
         b7.Certification7BRecord.from_dict(world.record, require_signed="yes")  # type: ignore[arg-type]
     assert code_of(excinfo) == "malformed_argument"
+
+
+# ===========================================================================
+# Slice 7 - verify_certification_7b_record (recompute everything; any failure is fatal)
+# ===========================================================================
+
+
+def verify_defect(world: World, record: dict[str, Any] | None = None, **overrides: Any) -> str:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        world.verify(record, **overrides)
+    return code_of(excinfo)
+
+
+def _gate3_state(world: World, **changes: Any) -> ResolvedGate3SelectionState:
+    return dataclasses.replace(world.kwargs["gate3_selection"], **changes)
+
+
+def test_verifier_accepts_the_consistent_world(world: World) -> None:
+    assert world.verify() is None
+
+
+def test_verifier_accepts_exactly_300_seconds_of_skew_and_separate_admissions() -> None:
+    build_world(ref_at="2026-11-11T04:20:00.000000Z").verify()
+    build_world(ref_at="2026-11-11T04:10:00.000000Z").verify()
+    build_world(separate_reference_admission=True).verify()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "migration_run_context_locator", "gate3_selection", "gate3_certification_fingerprint",
+        "driver_contract", "candidate_admission", "reference_admission", "candidate_result",
+        "reference_result", "candidate_effect_proof_locator", "candidate_effect_result_locator",
+        "reference_effect_proof_locator", "reference_effect_result_locator",
+    ],
+)
+def test_verifier_rejects_wrongly_typed_arguments(world: World, name: str) -> None:
+    assert verify_defect(world, **{name: "not-an-artifact"}) == "malformed_argument"
+
+
+def test_verifier_rejects_a_wrongly_typed_record_or_callable(world: World) -> None:
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        b7.verify_certification_7b_record(world.record, **world.kwargs)  # type: ignore[arg-type]
+    assert code_of(excinfo) == "malformed_argument"
+    assert verify_defect(world, project_native_request=None) == "malformed_argument"
+    assert verify_defect(world, tolerance_profiles=[]) == "malformed_argument"
+
+
+def test_verifier_requires_the_same_run(world: World) -> None:
+    other_run = _loc("smart_ads/migration_run_context/v1", "e")
+    assert verify_defect(world, migration_run_context_locator=other_run) == "run_context_mismatch"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"locator": _loc("smart_ads/gate3_selection_receipt/v1", "e")},
+        {"selection_role": "operational_renewal"},
+        {"candidate_driver_contract_digest": _sha("e")},
+        {"canonical_query_digest": _sha("e")},
+        {"schema_bundle_digest": _sha("e")},
+        {"resource_mapping_contract_digest": _sha("e")},
+        {"authorized_certification_scope": "scope:other-scope"},
+    ],
+)
+def test_verifier_requires_the_resolved_certification_role_selection(
+    world: World, changes: dict[str, Any]
+) -> None:
+    assert verify_defect(world, gate3_selection=_gate3_state(world, **changes)) == (
+        "gate3_selection_mismatch"
+    )
+
+
+@pytest.mark.parametrize("member", FINGERPRINT_MEMBERS)
+def test_verifier_fails_on_any_single_member_of_the_resolved_fingerprint(
+    world: World, member: str
+) -> None:
+    resolved = world.kwargs["gate3_certification_fingerprint"]
+    changed = dataclasses.replace(
+        resolved, **{member: _different_value(member, getattr(resolved, member))}
+    )
+    assert verify_defect(world, gate3_certification_fingerprint=changed) == "fingerprint_mismatch"
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["reference_client_identity_digest", "official_source_locators_digest",
+     "schema_bundle_digest", "resource_mapping_contract_digest", "authorized_certification_scope"],
+)
+def test_verifier_rejects_a_fingerprint_changed_identically_on_both_sides(
+    world: World, member: str
+) -> None:
+    record = world.record
+    value = _different_value(member, record["candidate_execution"]["gate3_certification_fingerprint"][member])
+    for side in ("candidate_execution", "reference_execution"):
+        record = tampered(record, (side, "gate3_certification_fingerprint", member), value)
+    assert verify_defect(world, record) == "fingerprint_mismatch"
+
+
+def test_verifier_resolves_the_exact_phase1_driver_contract(world: World) -> None:
+    other = dataclasses.replace(make_pipeboard_contract(), contract_id="driver-contract:other-v1")
+    assert verify_defect(world, driver_contract=other) == "driver_contract_unresolved"
+
+
+def _admission_variant(world: World, **changes: Any) -> AdmittedCollection:
+    return dataclasses.replace(world.kwargs["candidate_admission"], **changes)
+
+
+@pytest.mark.parametrize("side", ["candidate", "reference"])
+def test_verifier_resolves_each_side_admission_by_locator(world: World, side: str) -> None:
+    other = _admission_variant(world, admission_id="admission:other")
+    assert verify_defect(world, **{f"{side}_admission": other}) == "admission_mismatch"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda q, d, r: make_admission(q, d, r, purpose="fixture_7a"),
+        lambda q, d, r: make_admission(
+            dataclasses.replace(q, tzdb_version="2026b"), d, r
+        ),
+        lambda q, d, r: make_admission(q, _loc("smart_ads/pipeboard_phase1_contract/v1", "e"), r),
+        lambda q, d, r: make_admission(q, d, _loc("smart_ads/private_registry_snapshot/v1", "f")),
+    ],
+)
+def test_verifier_rejects_a_located_admission_for_another_purpose_query_or_driver(
+    world: World, variant: Callable[..., AdmittedCollection]
+) -> None:
+    base = world.kwargs["candidate_admission"]
+    admission = variant(
+        canonical_query(), base.driver_contract_locator, base.registry_snapshot_locator
+    )
+    record = tampered(world.record, ("candidate_execution", "admitted_collection_locator"),
+                      locate(AdmittedCollection.SCHEMA, admission).to_dict())
+    assert verify_defect(world, record, candidate_admission=admission) == "admission_mismatch"
+
+
+def test_verifier_rejects_results_from_the_wrong_side_or_admission(world: World) -> None:
+    cand, ref = world.kwargs["candidate_result"], world.kwargs["reference_result"]
+    assert verify_defect(world, candidate_result=ref) == "collection_result_mismatch"
+    assert verify_defect(world, reference_result=cand) == "collection_result_mismatch"
+    moved = dataclasses.replace(
+        cand,
+        admitted_collection_locator=_loc("smart_ads/admitted_collection/v1", "e"),
+        admitted_collection_digest=_sha("e"),
+    )
+    assert verify_defect(world, candidate_result=moved,
+                         candidate_effect_result_locator=oracle_result_locator(moved)) == (
+        "collection_result_mismatch"
+    )
+
+
+def test_verifier_binds_the_retrieval_time_and_fact_set_of_each_result(world: World) -> None:
+    later = collection_result(facts_for(CANDIDATE_VALUES), side="candidate",
+                              retrieved_at="2026-11-11T04:15:01.000000Z",
+                              admitted_locator=world.kwargs["candidate_result"].admitted_collection_locator,
+                              registry_locator=world.kwargs["candidate_result"].registry_snapshot_locator)
+    assert verify_defect(world, candidate_result=later,
+                         candidate_effect_result_locator=oracle_result_locator(later)) == (
+        "collection_result_mismatch"
+    )
+    other_values = collection_result(facts_for({**CANDIDATE_VALUES, (REF_B, CLICKS): "1"}),
+                                     side="candidate", retrieved_at=CANDIDATE_AT,
+                                     admitted_locator=later.admitted_collection_locator,
+                                     registry_locator=later.registry_snapshot_locator)
+    assert verify_defect(world, candidate_result=other_values,
+                         candidate_effect_result_locator=oracle_result_locator(other_values)) == (
+        "normalized_fact_set_digest_mismatch"
+    )
+
+
+@pytest.mark.parametrize("side", ["candidate", "reference"])
+def test_verifier_binds_each_effect_proof_and_its_result_locator(world: World, side: str) -> None:
+    other_proof = _loc("smart_ads/effect_proof/v1", "e")
+    assert verify_defect(world, **{f"{side}_effect_proof_locator": other_proof}) == (
+        "effect_proof_mismatch"
+    )
+    other_result = _loc("smart_ads/collection_result/v1", "e")
+    assert verify_defect(world, **{f"{side}_effect_result_locator": other_result}) == (
+        "effect_result_mismatch"
+    )
+
+
+def test_verifier_rejects_one_effect_result_for_both_sides(world: World) -> None:
+    same = world.kwargs["candidate_effect_result_locator"]
+    assert verify_defect(world, reference_effect_result_locator=same) == "effect_proof_not_distinct"
+
+
+def test_verifier_runs_the_injected_digest_pinned_native_algorithm(world: World) -> None:
+    record = tampered(world.record,
+                      ("candidate_execution", "native_to_canonical_projection_algorithm_digest"),
+                      _sha("e"))
+    assert verify_defect(world, record) == "native_projection_mismatch"
+    narrower = dataclasses.replace(canonical_query(), metric_semantic_refs=(CLICKS, SPEND))
+    assert verify_defect(world, project_native_request=lambda p, d: narrower) == (
+        "native_projection_mismatch"
+    )
+
+
+@pytest.mark.parametrize(
+    ("profiles", "code"),
+    [
+        ({CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000", signed=False)},
+         "tolerance_profile_unsigned"),
+        ({SPEND: profile_dict(SPEND, signed=False)}, "tolerance_profile_unsigned"),
+        ({CLICKS: profile_dict(CLICKS, max_abs="6", max_rel="0.050000")},
+         "tolerance_profile_locator_mismatch"),
+        ({SPEND: profile_dict(IMPRESSIONS)}, "tolerance_profile_metric_mismatch"),
+        ({CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000", query_digest=_sha("e"))},
+         "tolerance_profile_unbound"),
+        ({CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000", scope="scope:other")},
+         "tolerance_profile_unbound"),
+        ({CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000",
+                               run=_loc("smart_ads/migration_run_context/v1", "e"))},
+         "tolerance_profile_unbound"),
+        ({CLICKS: profile_dict(CLICKS, max_abs="5", max_rel="0.050000",
+                               gate3=_loc("smart_ads/gate3_selection_receipt/v1", "e"))},
+         "tolerance_profile_unbound"),
+    ],
+)
+def test_verifier_requires_signed_located_and_bound_tolerance_profiles(
+    world: World, profiles: dict[str, Any], code: str
+) -> None:
+    merged = dict(world.kwargs["tolerance_profiles"], **profiles)
+    assert verify_defect(world, tolerance_profiles=merged) == code
+
+
+def test_verifier_rejects_an_unresolved_tolerance_profile(world: World) -> None:
+    profiles = {k: v for k, v in world.kwargs["tolerance_profiles"].items() if k != SPEND}
+    assert verify_defect(world, tolerance_profiles=profiles) == "tolerance_profile_unresolved"
+
+
+def _with_reconciliation(world: World, index: int, path: tuple[Any, ...], value: Any) -> dict[str, Any]:
+    return reseal(tampered(world.record, ("fact_reconciliations", index, *path), value))
+
+
+@pytest.mark.parametrize(
+    ("path", "value_from", "code"),
+    [
+        (("candidate", "fact_evidence_selector", "collection_result_locator"),
+         "reference_result_locator", "evidence_container_mismatch"),
+        (("reference", "fact_evidence_selector", "collection_result_locator"),
+         "candidate_result_locator", "evidence_container_mismatch"),
+        (("candidate", "fact_evidence_selector", "normalized_fact_set_digest"),
+         "reference_set_digest", "normalized_fact_set_digest_mismatch"),
+        (("candidate", "fact_evidence_selector", "fact_projection_digest"),
+         "zero_digest", "fact_projection_digest_mismatch"),
+        (("candidate", "raw_numeric_value"), "102", "evidence_value_mismatch"),
+        (("reference", "source_metric_ref"), "source-metric:provider:meta.reach:v1",
+         "evidence_value_mismatch"),
+        (("candidate",), "reference_side", "evidence_container_mismatch"),
+        (("tolerance_profile_locator",), "spend_profile_locator",
+         "tolerance_profile_locator_mismatch"),
+    ],
+)
+def test_verifier_resolves_every_selector_and_copied_field(
+    world: World, path: tuple[Any, ...], value_from: str, code: str
+) -> None:
+    clicks = world.record["fact_reconciliations"][0]
+    values = {
+        "reference_result_locator": world.kwargs["reference_effect_result_locator"].to_dict(),
+        "candidate_result_locator": world.kwargs["candidate_effect_result_locator"].to_dict(),
+        "reference_set_digest": world.kwargs["reference_result"].normalized_fact_set_digest,
+        "zero_digest": _sha("0"),
+        "reference_side": clicks["reference"],
+        "spend_profile_locator": oracle_profile_locator(default_profiles()[SPEND]).to_dict(),
+    }
+    value = values.get(value_from, value_from)
+    assert verify_defect(world, _with_reconciliation(world, 0, path, value)) == code
+
+
+@pytest.mark.parametrize(
+    ("index", "asserted"),
+    [
+        # REF_A clicks, recomputed within tolerance: abs 1, rel 0.010000.
+        (0, dict(WITHIN_TOLERANCE_ROW, measured_absolute_delta="2")),
+        (0, dict(WITHIN_TOLERANCE_ROW, measured_relative_delta="0.020000")),
+        # REF_A impressions, recomputed exact_match: assert a tolerance outcome.
+        (1, dict(WITHIN_TOLERANCE_ROW, measured_absolute_delta="1",
+                 measured_relative_delta="0.001000")),
+        # REF_B impressions, recomputed reference_zero: assert a computed status.
+        (4, dict(EXACT_ROW)),
+    ],
+)
+def test_verifier_recomputes_asserted_comparison_members(
+    world: World, index: int, asserted: dict[str, Any]
+) -> None:
+    recs = copy.deepcopy(world.record["fact_reconciliations"])
+    recs[index].update(asserted)
+    assert verify_defect(world, reseal(dict(world.record, fact_reconciliations=recs))) == (
+        "asserted_comparison_mismatch"
+    )
+
+
+@pytest.mark.parametrize(
+    ("member", "value"),
+    [
+        ("relative_delta_status", "reference_zero"),
+        ("reconciliation_outcome", "exact_match"),
+        ("metric_verification_status", "UNRECONCILED"),
+        ("measured_absolute_delta", "0"),
+        ("measured_relative_delta", None),
+    ],
+)
+def test_single_member_divergence_that_breaks_the_truth_table_is_malformed(
+    world: World, member: str, value: Any
+) -> None:
+    record = _with_reconciliation(world, 0, (member,), value)
+    assert record_defect(record) == "asserted_comparison_malformed"
+
+
+def test_verifier_recomputes_the_status_from_canonical_values() -> None:
+    # Candidate 200 vs reference 100 is UNRECONCILED; the record asserts VERIFIED.
+    mismatch = build_world({**CANDIDATE_VALUES, (REF_A, CLICKS): "200"}, require_verified=False)
+    recs = copy.deepcopy(mismatch.record["fact_reconciliations"])
+    assert recs[0]["metric_verification_status"] == "UNRECONCILED"
+    recs[0].update(dict(WITHIN_TOLERANCE_ROW, measured_absolute_delta="100",
+                        measured_relative_delta="1.000000"))
+    record = reseal(dict(mismatch.record, fact_reconciliations=recs))
+    assert verify_defect(mismatch, record) == "asserted_comparison_mismatch"
+
+
+def test_verifier_recomputes_each_side_universe_from_its_result() -> None:
+    extra_row = {(REF_C, IMPRESSIONS): "1", (REF_C, CLICKS): "1", (REF_C, SPEND): "1"}
+    wider = build_world({**CANDIDATE_VALUES, **extra_row}, require_verified=False)
+    assert verify_defect(wider) == "row_universe_digest_mismatch"
+    extra_metric = build_world(
+        cand_facts=facts_for(CANDIDATE_VALUES) + [fact(REF_A, "metric:reach_v1", "9")],
+        require_verified=False,
+    )
+    assert verify_defect(extra_metric) == "pair_universe_incomplete"
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "code"),
+    [
+        (("migration_run_context_locator",),
+         _loc("smart_ads/migration_run_context/v1", "e").to_dict(), "run_context_mismatch"),
+        (("gate3_selection_locator",),
+         _loc("smart_ads/gate3_selection_receipt/v1", "e").to_dict(), "gate3_selection_mismatch"),
+        (("candidate_execution", "admitted_collection_locator"),
+         _loc("smart_ads/admitted_collection/v1", "e").to_dict(), "admission_mismatch"),
+        (("reference_execution", "admitted_collection_locator"),
+         _loc("smart_ads/admitted_collection/v1", "e").to_dict(), "admission_mismatch"),
+        (("candidate_execution", "effect_proof_locator"),
+         _loc("smart_ads/effect_proof/v1", "e").to_dict(), "effect_proof_mismatch"),
+        (("reference_execution", "effect_proof_locator"),
+         _loc("smart_ads/effect_proof/v1", "e").to_dict(), "effect_proof_mismatch"),
+        (("candidate_execution", "registry_snapshot_locator"),
+         _loc("smart_ads/private_registry_snapshot/v1", "f").to_dict(), "admission_mismatch"),
+        (("candidate_execution", "retrieved_at_utc"), "2026-11-11T04:15:00.000001Z",
+         "collection_result_mismatch"),
+        (("reference_execution", "retrieved_at_utc"), "2026-11-11T04:17:30.000001Z",
+         "collection_result_mismatch"),
+        (("candidate_execution", "normalized_fact_set_digest"), _sha("e"),
+         "normalized_fact_set_digest_mismatch"),
+        (("reference_execution", "normalized_fact_set_digest"), _sha("e"),
+         "normalized_fact_set_digest_mismatch"),
+        (("reference_execution", "native_to_canonical_projection_algorithm_digest"), _sha("e"),
+         "native_projection_mismatch"),
+    ],
+)
+def test_verifier_binds_each_evidence_member_of_the_record(
+    world: World, path: tuple[Any, ...], value: Any, code: str
+) -> None:
+    assert verify_defect(world, tampered(world.record, path, value)) == code
+
+
+def test_verifier_never_mutates_its_inputs(world: World) -> None:
+    before = copy.deepcopy(world.record)
+    profiles_before = copy.deepcopy(world.kwargs["tolerance_profiles"])
+    world.verify()
+    assert world.record == before
+    assert world.kwargs["tolerance_profiles"] == profiles_before
+
+
+def test_every_defect_code_is_documented_and_closed() -> None:
+    with pytest.raises(ClosedValidationError):
+        Bundle7BDefectError("not_a_code", "x")
+    assert all(code == code.lower() and " " not in code for code in b7.DEFECT_CODES)
