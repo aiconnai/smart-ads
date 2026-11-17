@@ -1,8 +1,13 @@
-"""Tests for smart_ads.analytics.policy (ADR-0001 section 7, section 12.7 analysis_policy/v1)."""
+"""Tests for smart_ads.analytics.policy (ADR-0001 section 7, section 12.7 analysis_policy/v1).
+
+Every negative test asserts the closed error `code`, never the message (spec section 4).
+"""
 from __future__ import annotations
 
 import ast
 import base64
+from collections.abc import Iterator
+import contextlib
 import copy
 import dataclasses
 from decimal import Decimal
@@ -31,8 +36,18 @@ POLICY_MODULE_PATH = (
     Path(__file__).resolve().parents[2] / "src" / "smart_ads" / "analytics" / "policy.py"
 )
 
+
+@contextlib.contextmanager
+def rejects(code: str) -> Iterator[None]:
+    """Expect a coded PolicyValidationError carrying exactly `code`."""
+    with pytest.raises(pol.PolicyValidationError) as caught:
+        yield
+    assert caught.value.code == code, f"expected {code!r}, got {caught.value}"
+
+
 # --------------------------------------------------------------------------------------
 # Wire fixtures. Every threshold below is test data, never a module constant.
+# int64-valued thresholds are canonical unsigned decimal strings; day counts are JSON ints.
 # --------------------------------------------------------------------------------------
 
 SATURATION_WIRE: dict[str, Any] = {
@@ -43,7 +58,7 @@ SATURATION_WIRE: dict[str, Any] = {
     "outcome_metric_ref": "metric:aggregate_conversions_v1",
     "min_spend_growth": "0.200000",
     "max_outcome_growth": "0.050000",
-    "min_baseline_spend_minor": 10000,
+    "min_baseline_spend_minor": "10000",
 }
 WASTE_WIRE: dict[str, Any] = {
     "rule_id": "rule:waste-14d",
@@ -51,14 +66,14 @@ WASTE_WIRE: dict[str, Any] = {
     "window_days": 14,
     "spend_metric_ref": "metric:spend_v1",
     "outcome_metric_ref": "metric:aggregate_conversions_v1",
-    "min_spend_minor": 50000,
-    "max_outcome_count": 0,
+    "min_spend_minor": "50000",
+    "max_outcome_count": "0",
 }
 STALLED_WIRE: dict[str, Any] = {
     "rule_id": "rule:stalled-3d",
     "rule_type": "stalled_delivery",
     "min_consecutive_days": 3,
-    "max_impressions": 0,
+    "max_impressions": "0",
 }
 RESTATEMENT_WIRE: dict[str, Any] = {
     "rule_id": "rule:restatement-28d",
@@ -73,9 +88,7 @@ RULE_CASES = (
     pytest.param(
         "stalled_delivery", pol.StalledDeliveryRule, STALLED_WIRE, id="stalled_delivery"
     ),
-    pytest.param(
-        "restatement", pol.RestatementRule, RESTATEMENT_WIRE, id="restatement"
-    ),
+    pytest.param("restatement", pol.RestatementRule, RESTATEMENT_WIRE, id="restatement"),
 )
 
 EXPECTED_RULE_KEYS: dict[str, frozenset[str]] = {
@@ -110,16 +123,19 @@ EXPECTED_RULE_KEYS: dict[str, frozenset[str]] = {
     ),
 }
 
-# (rule_type, field, minimum) for every strict integer parameter of the closed union.
-INT_FIELD_CASES = (
-    ("saturation", "window_days", 1),
-    ("saturation", "min_baseline_spend_minor", 0),
-    ("waste", "window_days", 1),
-    ("waste", "min_spend_minor", 0),
-    ("waste", "max_outcome_count", 0),
-    ("stalled_delivery", "min_consecutive_days", 1),
-    ("stalled_delivery", "max_impressions", 0),
-    ("restatement", "lookback_days", 1),
+# Strict JSON-integer parameters: positive day counts within the JCS-safe range.
+DAY_FIELD_CASES = (
+    ("saturation", "window_days"),
+    ("waste", "window_days"),
+    ("stalled_delivery", "min_consecutive_days"),
+    ("restatement", "lookback_days"),
+)
+# Canonical unsigned int64 strings, each with a parsed-int accessor named `<field>_int`.
+UINT64_FIELD_CASES = (
+    ("saturation", "min_baseline_spend_minor"),
+    ("waste", "min_spend_minor"),
+    ("waste", "max_outcome_count"),
+    ("stalled_delivery", "max_impressions"),
 )
 RATIO_FIELD_CASES = (
     ("saturation", "min_spend_growth"),
@@ -145,6 +161,9 @@ WIRE_BY_TYPE = {
     "restatement": RESTATEMENT_WIRE,
 }
 
+MAX_UINT64_TEXT = str(MAX_INT64)  # "9223372036854775807"
+FIVE_THOUSAND_DIGITS = "9" * 5000
+
 
 class _IntSubclass(int):
     """A non-strict int: `type(v) is int` must reject it."""
@@ -160,6 +179,76 @@ def _without(mapping: dict[str, Any], key: str) -> dict[str, Any]:
 
 def _kwargs(kind: str, /, **overrides: Any) -> dict[str, Any]:
     return {k: v for k, v in _wire(kind, **overrides).items() if k != "rule_type"}
+
+
+@pytest.fixture(params=["interpreter_default", "unlimited"])
+def digit_limit(request: pytest.FixtureRequest) -> Iterator[str]:
+    """Run a test under the default and under a disabled int/str digit limit."""
+    previous = sys.get_int_max_str_digits()
+    if request.param == "unlimited":
+        sys.set_int_max_str_digits(0)
+    try:
+        yield request.param
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+# --------------------------------------------------------------------------------------
+# Error types: closed code sets
+# --------------------------------------------------------------------------------------
+
+
+def test_policy_error_codes_are_a_closed_frozenset_disjoint_from_applicability_codes() -> None:
+    assert isinstance(pol.POLICY_ERROR_CODES, frozenset)
+    assert pol.POLICY_ERROR_CODES == frozenset(
+        {
+            "invalid_type",
+            "invalid_grammar",
+            "out_of_range",
+            "unknown_member",
+            "missing_member",
+            "schema_mismatch",
+            "unknown_rule_type",
+            "empty",
+            "duplicate_rule_id",
+            "duplicate_restatement_kind",
+            "unsorted",
+            "unsupported_value",
+            "invalid_validity_window",
+            "invalid_integrity",
+            "content_digest_mismatch",
+        }
+    )
+    assert not pol.POLICY_ERROR_CODES & set(pol.POLICY_NOT_APPLICABLE_CODES)
+
+
+def test_policy_validation_error_carries_a_code_and_rejects_codes_outside_the_set() -> None:
+    assert issubclass(pol.PolicyValidationError, ClosedValidationError)
+    for code in sorted(pol.POLICY_ERROR_CODES):
+        error = pol.PolicyValidationError(code, "detail")
+        assert (error.code, error.detail) == (code, "detail")
+        assert code in str(error)
+    for bad in ("", "tenant_mismatch", "INVALID_TYPE", None, 1, ["empty"]):
+        with pytest.raises(ClosedValidationError) as caught:
+            pol.PolicyValidationError(bad, "detail")  # type: ignore[arg-type]
+        assert type(caught.value) is ClosedValidationError
+
+
+def test_both_error_types_survive_copy_and_pickle_with_their_code() -> None:
+    errors = (
+        pol.PolicyValidationError("out_of_range", "too big"),
+        pol.PolicyNotApplicableError("expired", "window closed"),
+    )
+    for error in errors:
+        for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
+            assert type(clone) is type(error)
+            assert (clone.code, clone.detail) == (error.code, error.detail)
+            assert str(clone) == str(error)
+
+
+def test_the_two_error_types_are_distinct_siblings() -> None:
+    assert not issubclass(pol.PolicyNotApplicableError, pol.PolicyValidationError)
+    assert not issubclass(pol.PolicyValidationError, pol.PolicyNotApplicableError)
 
 
 # --------------------------------------------------------------------------------------
@@ -203,19 +292,26 @@ def test_rule_to_dict_key_set_is_exactly_the_spec_parameters(
 
 
 @pytest.mark.parametrize(("rule_type", "cls", "wire"), RULE_CASES)
-def test_rules_are_frozen(rule_type: str, cls: Any, wire: dict[str, Any]) -> None:
+def test_rules_are_frozen_and_hashable(
+    rule_type: str, cls: Any, wire: dict[str, Any]
+) -> None:
     rule = cls.from_dict(wire)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        rule.rule_id = "rule:other"  # type: ignore[misc]
+        rule.rule_id = "rule:other"
+    assert hash(rule) == hash(cls.from_dict(wire))
+
+
+def test_rule_to_dict_value_types_are_json_int_for_days_and_string_for_int64_and_ratios() -> None:
+    for rule_type, field in DAY_FIELD_CASES:
+        value = CLASS_BY_TYPE[rule_type].from_dict(WIRE_BY_TYPE[rule_type]).to_dict()[field]
+        assert type(value) is int
+    for rule_type, field in UINT64_FIELD_CASES + RATIO_FIELD_CASES:
+        value = CLASS_BY_TYPE[rule_type].from_dict(WIRE_BY_TYPE[rule_type]).to_dict()[field]
+        assert type(value) is str
 
 
 def test_rule_type_union_is_closed_to_the_four_finding_types() -> None:
-    assert set(pol.RULE_TYPES) == {
-        "saturation",
-        "waste",
-        "stalled_delivery",
-        "restatement",
-    }
+    assert set(pol.RULE_TYPES) == {"saturation", "waste", "stalled_delivery", "restatement"}
     assert list(pol.RULE_TYPES) == sorted(pol.RULE_TYPES, key=lambda s: s.encode())
     assert pol.AnalysisRule == (
         pol.SaturationRule | pol.WasteRule | pol.StalledDeliveryRule | pol.RestatementRule
@@ -227,21 +323,21 @@ def test_rule_type_union_is_closed_to_the_four_finding_types() -> None:
     ["mutation", "SATURATION", "", " saturation", "saturation ", "stalled-delivery"],
 )
 def test_rule_from_dict_rejects_unknown_rule_type(bad_type: str) -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_rule_type"):
         pol.rule_from_dict(_wire("saturation", rule_type=bad_type))
 
 
 @pytest.mark.parametrize("bad_type", [None, 1, True, ["saturation"], {"a": 1}])
 def test_rule_from_dict_rejects_non_string_rule_type(bad_type: Any) -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_type"):
         pol.rule_from_dict(_wire("saturation", rule_type=bad_type))
 
 
 def test_rule_from_dict_rejects_missing_rule_type_and_non_mapping() -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         pol.rule_from_dict(_without(_wire("saturation"), "rule_type"))
     for bad in (None, [], "saturation", 7):
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             pol.rule_from_dict(bad)
 
 
@@ -250,22 +346,21 @@ def test_each_rule_class_rejects_a_foreign_rule_type(
     rule_type: str, cls: Any, wire: dict[str, Any]
 ) -> None:
     for other in EXPECTED_RULE_KEYS:
-        if other == rule_type:
-            continue
-        with pytest.raises(ClosedValidationError):
-            cls.from_dict({**wire, "rule_type": other})
+        if other != rule_type:
+            with rejects("unknown_rule_type"):
+                cls.from_dict({**wire, "rule_type": other})
 
 
 @pytest.mark.parametrize(("rule_type", "cls", "wire"), RULE_CASES)
 def test_rule_rejects_extra_member_and_non_mapping(
     rule_type: str, cls: Any, wire: dict[str, Any]
 ) -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_member"):
         cls.from_dict({**wire, "extra": 1})
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_member"):
         pol.rule_from_dict({**wire, "extra": 1})
     for bad in (None, [], "rule", 7):
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             cls.from_dict(bad)
 
 
@@ -279,10 +374,15 @@ MISSING_MEMBER_CASES = [
 @pytest.mark.parametrize(("rule_type", "key"), MISSING_MEMBER_CASES)
 def test_rule_rejects_each_missing_member(rule_type: str, key: str) -> None:
     wire = _without(_wire(rule_type), key)
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         CLASS_BY_TYPE[rule_type].from_dict(wire)
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         pol.rule_from_dict(wire)
+
+
+def test_rule_from_dict_rejects_json_arrays_given_as_tuples() -> None:
+    with rejects("invalid_type"):
+        pol.rule_from_dict(_wire("restatement", restatement_kinds=("tombstone",)))
 
 
 # --------------------------------------------------------------------------------------
@@ -291,9 +391,9 @@ def test_rule_rejects_each_missing_member(rule_type: str, key: str) -> None:
 
 
 @pytest.mark.parametrize("rule_type", sorted(EXPECTED_RULE_KEYS))
-@pytest.mark.parametrize(
-    "bad_id",
-    [
+def test_rule_rejects_malformed_rule_id_by_grammar_or_type(rule_type: str) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    for bad in (
         "",
         "rule",
         "rule:",
@@ -302,19 +402,16 @@ def test_rule_rejects_each_missing_member(rule_type: str, key: str) -> None:
         "rule:has space",
         "rule:café",
         "rule:x\n",
-        None,
-        7,
-        True,
-        ["rule:x"],
-    ],
-)
-def test_rule_rejects_malformed_rule_id(rule_type: str, bad_id: Any) -> None:
-    with pytest.raises(ClosedValidationError):
-        CLASS_BY_TYPE[rule_type].from_dict(_wire(rule_type, rule_id=bad_id))
+    ):
+        with rejects("invalid_grammar"):
+            cls.from_dict(_wire(rule_type, rule_id=bad))
+    for bad in (None, 7, True, ["rule:x"]):
+        with rejects("invalid_type"):
+            cls.from_dict(_wire(rule_type, rule_id=bad))
 
 
 # --------------------------------------------------------------------------------------
-# Strict integers: type, range
+# Day counts: strict JSON integers >= 1 within the JCS-safe range
 # --------------------------------------------------------------------------------------
 
 NON_INT_VALUES: list[Any] = [
@@ -332,59 +429,148 @@ NON_INT_VALUES: list[Any] = [
 ]
 
 
-@pytest.mark.parametrize(("rule_type", "field", "minimum"), INT_FIELD_CASES)
-def test_int_parameters_reject_bool_float_str_and_int_subclasses(
-    rule_type: str, field: str, minimum: int
+@pytest.mark.parametrize(("rule_type", "field"), DAY_FIELD_CASES)
+def test_day_counts_reject_bool_float_str_and_int_subclasses(
+    rule_type: str, field: str
 ) -> None:
     cls = CLASS_BY_TYPE[rule_type]
     for bad in NON_INT_VALUES:
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             cls.from_dict(_wire(rule_type, **{field: bad}))
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             cls(**_kwargs(rule_type, **{field: bad}))
 
 
-@pytest.mark.parametrize(("rule_type", "field", "minimum"), INT_FIELD_CASES)
-def test_int_parameters_enforce_their_lower_bound(
-    rule_type: str, field: str, minimum: int
+@pytest.mark.parametrize(("rule_type", "field"), DAY_FIELD_CASES)
+def test_day_counts_are_positive_and_bounded_by_the_jcs_safe_integer(
+    rule_type: str, field: str
 ) -> None:
     cls = CLASS_BY_TYPE[rule_type]
-    assert getattr(cls.from_dict(_wire(rule_type, **{field: minimum})), field) == minimum
-    for below in (minimum - 1, -1, -MAX_INT64 - 1):
-        with pytest.raises(ClosedValidationError):
-            cls.from_dict(_wire(rule_type, **{field: below}))
-
-
-@pytest.mark.parametrize(("rule_type", "field", "minimum"), INT_FIELD_CASES)
-def test_int_parameters_accept_the_largest_json_safe_integer(
-    rule_type: str, field: str, minimum: int
-) -> None:
-    cls = CLASS_BY_TYPE[rule_type]
-    rule = cls.from_dict(_wire(rule_type, **{field: MAX_JCS_SAFE_INT}))
-    assert rule.to_dict()[field] == MAX_JCS_SAFE_INT
-    canonicalize_jcs(rule.to_dict())
-
-
-@pytest.mark.parametrize(("rule_type", "field", "minimum"), INT_FIELD_CASES)
-def test_int_parameters_above_jcs_safe_integer_are_rejected_not_deferred_to_digest_time(
-    rule_type: str, field: str, minimum: int
-) -> None:
-    # Spec range is 0..MAX_INT64, but RFC 8785 / I-JSON (canonicalize_jcs) cannot carry an
-    # integer above 2**53 - 1 as a JSON number, so the P1 preimage of such a policy would be
-    # uncomputable. The module rejects at construction instead of failing at digest time.
-    cls = CLASS_BY_TYPE[rule_type]
-    for too_big in (MAX_JCS_SAFE_INT + 1, MAX_INT64, MAX_INT64 + 1):
-        with pytest.raises(ClosedValidationError):
-            cls.from_dict(_wire(rule_type, **{field: too_big}))
-    with pytest.raises(ClosedValidationError):
-        canonicalize_jcs({"v": MAX_JCS_SAFE_INT + 1})
+    for good in (1, 2, MAX_JCS_SAFE_INT):
+        rule = cls.from_dict(_wire(rule_type, **{field: good}))
+        assert rule.to_dict()[field] == good
+        canonicalize_jcs(rule.to_dict())
+    for bad in (0, -1, -MAX_INT64 - 1, MAX_JCS_SAFE_INT + 1, MAX_INT64):
+        with rejects("out_of_range"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
 
 
 # --------------------------------------------------------------------------------------
-# decimal6 non-negative ratios
+# int64-valued thresholds: canonical unsigned decimal strings
 # --------------------------------------------------------------------------------------
 
-BAD_DECIMAL6: list[Any] = [
+BAD_UINT64_GRAMMAR: list[str] = [
+    "",
+    " ",
+    "-1",
+    "-0",
+    "+1",
+    "01",
+    "00",
+    "0x10",
+    "1e3",
+    "1.0",
+    "1,000",
+    "1_000",
+    " 1",
+    "1 ",
+    "1\n",
+    "\n1",
+    "１",
+    "NaN",
+]
+OUT_OF_RANGE_UINT64: list[str] = [
+    "9223372036854775808",
+    "9999999999999999999",
+    "10000000000000000000",
+    "1" + "0" * 30,
+    FIVE_THOUSAND_DIGITS,
+]
+
+
+@pytest.mark.parametrize(("rule_type", "field"), UINT64_FIELD_CASES)
+def test_int64_thresholds_reject_native_numbers_and_other_types(
+    rule_type: str, field: str
+) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    for bad in (0, 5, 10000, True, False, 1.0, None, [1], {"a": 1}, Decimal(1), _IntSubclass(5)):
+        with rejects("invalid_type"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+        with rejects("invalid_type"):
+            cls(**_kwargs(rule_type, **{field: bad}))
+
+
+@pytest.mark.parametrize(("rule_type", "field"), UINT64_FIELD_CASES)
+def test_int64_thresholds_reject_non_canonical_strings(rule_type: str, field: str) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    for bad in BAD_UINT64_GRAMMAR:
+        with rejects("invalid_grammar"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+        with rejects("invalid_grammar"):
+            cls(**_kwargs(rule_type, **{field: bad}))
+
+
+@pytest.mark.parametrize(("rule_type", "field"), UINT64_FIELD_CASES)
+def test_int64_thresholds_accept_exactly_up_to_max_int64(rule_type: str, field: str) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    for good in (
+        "0",
+        "1",
+        "9007199254740991",
+        "9007199254740992",
+        "9007199254740993",
+        MAX_UINT64_TEXT,
+    ):
+        rule = cls.from_dict(_wire(rule_type, **{field: good}))
+        assert rule.to_dict()[field] == good
+        canonicalize_jcs(rule.to_dict())
+    for bad in OUT_OF_RANGE_UINT64:
+        with rejects("out_of_range"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+
+
+@pytest.mark.parametrize(("rule_type", "field"), UINT64_FIELD_CASES)
+def test_int64_threshold_accessor_returns_the_exact_int_and_is_read_only(
+    rule_type: str, field: str
+) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    accessor = f"{field}_int"
+    for text in ("0", "10000", "9007199254740993", MAX_UINT64_TEXT):
+        rule = cls.from_dict(_wire(rule_type, **{field: text}))
+        value = getattr(rule, accessor)
+        assert type(value) is int
+        assert value == int(text)
+        assert str(value) == text
+    # Read-only: a getter-only property. (A frozen slots dataclass raises TypeError, not
+    # FrozenInstanceError, for non-field names because of a CPython dataclass quirk.)
+    descriptor = getattr(cls, accessor)
+    assert isinstance(descriptor, property)
+    assert descriptor.fset is None and descriptor.fdel is None
+    with pytest.raises((AttributeError, TypeError)):
+        setattr(rule, accessor, 1)
+    assert getattr(rule, accessor) == int(MAX_UINT64_TEXT)
+
+
+def test_int64_bounds_do_not_depend_on_the_interpreter_digit_limit(digit_limit: str) -> None:
+    for rule_type, field in UINT64_FIELD_CASES:
+        with rejects("out_of_range"):
+            CLASS_BY_TYPE[rule_type].from_dict(
+                _wire(rule_type, **{field: FIVE_THOUSAND_DIGITS})
+            )
+    for field in ("min_spend_growth", "max_outcome_growth"):
+        with rejects("out_of_range"):
+            pol.SaturationRule.from_dict(
+                _wire("saturation", **{field: FIVE_THOUSAND_DIGITS + ".000000"})
+            )
+    with rejects("out_of_range"):
+        pol.decimal6_to_micros(FIVE_THOUSAND_DIGITS + ".000000")
+
+
+# --------------------------------------------------------------------------------------
+# decimal6 non-negative ratios: grammar plus an explicit integer-part bound
+# --------------------------------------------------------------------------------------
+
+BAD_DECIMAL6_GRAMMAR: list[str] = [
     "",
     "0",
     "1",
@@ -412,77 +598,79 @@ BAD_DECIMAL6: list[Any] = [
     "NaN",
     "Infinity",
     "-Infinity",
-    1,
-    0,
-    1.5,
-    True,
-    None,
-    Decimal("1.000000"),
-    ["0.100000"],
+]
+BAD_DECIMAL6_TYPES: list[Any] = [1, 0, 1.5, True, None, Decimal("1.000000"), ["0.100000"]]
+OUT_OF_RANGE_DECIMAL6: list[str] = [
+    "9223372036854775808.000000",
+    "9999999999999999999.999999",
+    "10000000000000000000.000000",
+    "123456789012345678901234567890.000001",
+    FIVE_THOUSAND_DIGITS + ".000000",
 ]
 
 
 @pytest.mark.parametrize(("rule_type", "field"), RATIO_FIELD_CASES)
-def test_ratio_parameters_reject_every_non_decimal6_form(
-    rule_type: str, field: str
-) -> None:
+def test_ratio_parameters_reject_every_non_decimal6_form(rule_type: str, field: str) -> None:
     cls = CLASS_BY_TYPE[rule_type]
-    for bad in BAD_DECIMAL6:
-        with pytest.raises(ClosedValidationError):
+    for bad in BAD_DECIMAL6_GRAMMAR:
+        with rejects("invalid_grammar"):
             cls.from_dict(_wire(rule_type, **{field: bad}))
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_grammar"):
+            cls(**_kwargs(rule_type, **{field: bad}))
+    for bad in BAD_DECIMAL6_TYPES:
+        with rejects("invalid_type"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+        with rejects("invalid_type"):
             cls(**_kwargs(rule_type, **{field: bad}))
 
 
 @pytest.mark.parametrize(("rule_type", "field"), RATIO_FIELD_CASES)
-@pytest.mark.parametrize(
-    "good",
-    [
+def test_ratio_parameters_accept_decimal6_up_to_the_int64_integer_bound(
+    rule_type: str, field: str
+) -> None:
+    cls = CLASS_BY_TYPE[rule_type]
+    for good in (
         "0.000000",
         "0.000001",
         "1.000000",
         "12.345678",
         "100.500000",
-        "123456789012345678901234567890.000001",
-    ],
-)
-def test_ratio_parameters_accept_non_negative_decimal6(
-    rule_type: str, field: str, good: str
-) -> None:
-    rule = CLASS_BY_TYPE[rule_type].from_dict(_wire(rule_type, **{field: good}))
-    assert rule.to_dict()[field] == good
+        MAX_UINT64_TEXT + ".000000",
+        MAX_UINT64_TEXT + ".999999",
+    ):
+        rule = cls.from_dict(_wire(rule_type, **{field: good}))
+        assert rule.to_dict()[field] == good
+    for bad in OUT_OF_RANGE_DECIMAL6:
+        with rejects("out_of_range"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+        with rejects("out_of_range"):
+            cls(**_kwargs(rule_type, **{field: bad}))
 
 
-def test_decimal6_to_micros_is_exact_integer_arithmetic() -> None:
+def test_decimal6_to_micros_is_exact_integer_arithmetic_with_the_same_bound() -> None:
     assert pol.decimal6_to_micros("0.000000") == 0
     assert pol.decimal6_to_micros("0.000001") == 1
     assert pol.decimal6_to_micros("1.000000") == 1_000_000
     assert pol.decimal6_to_micros("12.345678") == 12_345_678
     assert pol.decimal6_to_micros("0.200000") == 200_000
-    big = "9" * 30 + ".999999"
-    assert pol.decimal6_to_micros(big) == int("9" * 30 + "999999")
-    for bad in ("-0.500000", "1", "1.5", 1, None, True):
-        with pytest.raises(ClosedValidationError):
+    top = MAX_UINT64_TEXT + ".999999"
+    assert pol.decimal6_to_micros(top) == int(MAX_UINT64_TEXT + "999999")
+    for bad in BAD_DECIMAL6_GRAMMAR:
+        with rejects("invalid_grammar"):
             pol.decimal6_to_micros(bad)
-
-
-def test_decimal6_to_micros_rejects_digit_strings_beyond_the_interpreter_int_limit() -> None:
-    limit = sys.get_int_max_str_digits()
-    if limit == 0:
-        pytest.skip("interpreter int/str digit limit disabled")
-    for field_name in ("min_spend_growth", "max_outcome_growth"):
-        too_long = "9" * limit + ".000000"
-        with pytest.raises(ClosedValidationError):
-            pol.decimal6_to_micros(too_long)
-        with pytest.raises(ClosedValidationError):
-            pol.SaturationRule.from_dict(_wire("saturation", **{field_name: too_long}))
+    for bad in BAD_DECIMAL6_TYPES:
+        with rejects("invalid_type"):
+            pol.decimal6_to_micros(bad)
+    for bad in OUT_OF_RANGE_DECIMAL6:
+        with rejects("out_of_range"):
+            pol.decimal6_to_micros(bad)
 
 
 # --------------------------------------------------------------------------------------
 # metric refs
 # --------------------------------------------------------------------------------------
 
-BAD_METRIC_REFS: list[Any] = [
+BAD_METRIC_REF_GRAMMAR: list[str] = [
     "",
     "impressions",
     "metric:",
@@ -498,20 +686,17 @@ BAD_METRIC_REFS: list[Any] = [
     "source-metric:formula:sha256:" + "a" * 64,
     "metric:spend_v1:extra",
     "metric:café_v1",
-    None,
-    1,
-    True,
-    ["metric:spend_v1"],
 ]
 
 
 @pytest.mark.parametrize(("rule_type", "field"), METRIC_FIELD_CASES)
-def test_metric_ref_parameters_reject_malformed_refs(
-    rule_type: str, field: str
-) -> None:
+def test_metric_ref_parameters_reject_malformed_refs(rule_type: str, field: str) -> None:
     cls = CLASS_BY_TYPE[rule_type]
-    for bad in BAD_METRIC_REFS:
-        with pytest.raises(ClosedValidationError):
+    for bad in BAD_METRIC_REF_GRAMMAR:
+        with rejects("invalid_grammar"):
+            cls.from_dict(_wire(rule_type, **{field: bad}))
+    for bad in (None, 1, True, ["metric:spend_v1"]):
+        with rejects("invalid_type"):
             cls.from_dict(_wire(rule_type, **{field: bad}))
 
 
@@ -526,14 +711,15 @@ def test_metric_ref_parameters_accept_phase1_and_derived_metric_refs(
         "metric:canonical_leads_v1",
         "metric:cost_per_click_v12",
     ):
-        rule = cls.from_dict(_wire(rule_type, **{field: good}))
-        assert rule.to_dict()[field] == good
+        assert cls.from_dict(_wire(rule_type, **{field: good})).to_dict()[field] == good
 
 
-def test_metric_ref_grammar_is_pinned_to_the_base_metric_definition_grammar() -> None:
-    # policy.py keeps its own copy of the grammar because numerics keeps its regex private.
-    # This pin makes any drift between the two a test failure instead of a silent split.
+def test_metric_ref_grammar_is_pinned_to_the_base_metric_definition_regex() -> None:
+    # policy.py keeps its own copy because numerics keeps its regex private; the pin makes any
+    # drift in pattern or flags a test failure instead of a silent split.
     assert pol.METRIC_REF_PATTERN == numerics._METRIC_SEMANTIC_REF_RE.pattern
+    assert pol._METRIC_REF_RE.pattern == numerics._METRIC_SEMANTIC_REF_RE.pattern
+    assert pol._METRIC_REF_RE.flags == numerics._METRIC_SEMANTIC_REF_RE.flags
 
 
 # --------------------------------------------------------------------------------------
@@ -553,74 +739,57 @@ def test_metric_ref_grammar_is_pinned_to_the_base_metric_definition_grammar() ->
         ["state_flip", "tombstone", "value_change"],
     ],
 )
-def test_restatement_kinds_accept_every_sorted_non_empty_subset(
-    kinds: list[str],
-) -> None:
+def test_restatement_kinds_accept_every_sorted_non_empty_subset(kinds: list[str]) -> None:
     rule = pol.RestatementRule.from_dict(_wire("restatement", restatement_kinds=kinds))
     assert rule.restatement_kinds == tuple(kinds)
     assert rule.to_dict()["restatement_kinds"] == kinds
 
 
-@pytest.mark.parametrize(
-    "kinds",
-    [
-        [],
-        ["tombstone", "tombstone"],
-        ["state_flip", "tombstone", "state_flip"],
-        ["value_change", "tombstone"],
-        ["tombstone", "state_flip", "value_change"],
-        ["value_change", "tombstone", "state_flip"],
-        ["unknown"],
-        ["tombstone", "unknown"],
-        ["Tombstone"],
-        ["state-flip"],
-        [""],
-        ["tombstone", None],
-        ["tombstone", 1],
-        [["tombstone"]],
-    ],
-)
-def test_restatement_kinds_reject_empty_duplicate_unsorted_and_unknown(
-    kinds: list[Any],
-) -> None:
-    with pytest.raises(ClosedValidationError):
+RESTATEMENT_KIND_CASES = [
+    ([], "empty"),
+    (["tombstone", "tombstone"], "duplicate_restatement_kind"),
+    (["state_flip", "tombstone", "state_flip"], "duplicate_restatement_kind"),
+    (["value_change", "tombstone"], "unsorted"),
+    (["tombstone", "state_flip", "value_change"], "unsorted"),
+    (["value_change", "tombstone", "state_flip"], "unsorted"),
+    (["unknown"], "unsupported_value"),
+    (["tombstone", "unknown"], "unsupported_value"),
+    (["Tombstone"], "unsupported_value"),
+    (["state-flip"], "unsupported_value"),
+    ([""], "unsupported_value"),
+    (["tombstone", None], "invalid_type"),
+    (["tombstone", 1], "invalid_type"),
+    ([["tombstone"]], "invalid_type"),
+    ("tombstone", "invalid_type"),
+    (None, "invalid_type"),
+    (1, "invalid_type"),
+    ({"tombstone": 1}, "invalid_type"),
+    ({"tombstone"}, "invalid_type"),
+    (b"tombstone", "invalid_type"),
+]
+
+
+@pytest.mark.parametrize(("kinds", "code"), RESTATEMENT_KIND_CASES)
+def test_restatement_kinds_reject_with_a_specific_code(kinds: Any, code: str) -> None:
+    with rejects(code):
         pol.RestatementRule.from_dict(_wire("restatement", restatement_kinds=kinds))
-    with pytest.raises(ClosedValidationError):
+    with rejects(code):
         pol.RestatementRule(**_kwargs("restatement", restatement_kinds=kinds))
 
 
-@pytest.mark.parametrize(
-    "bad", ["tombstone", None, 1, {"tombstone": 1}, {"tombstone"}, b"tombstone"]
-)
-def test_restatement_kinds_must_be_an_array(bad: Any) -> None:
-    with pytest.raises(ClosedValidationError):
-        pol.RestatementRule.from_dict(_wire("restatement", restatement_kinds=bad))
-    with pytest.raises(ClosedValidationError):
-        pol.RestatementRule(**_kwargs("restatement", restatement_kinds=bad))
-
-
-def test_restatement_from_dict_requires_a_json_array_but_constructor_takes_tuples() -> None:
-    with pytest.raises(ClosedValidationError):
-        pol.RestatementRule.from_dict(
-            _wire("restatement", restatement_kinds=("tombstone",))
-        )
+def test_restatement_constructor_takes_tuples_and_copies_into_an_immutable_tuple() -> None:
     rule = pol.RestatementRule(**_kwargs("restatement", restatement_kinds=("tombstone",)))
     assert rule.restatement_kinds == ("tombstone",)
-
-
-def test_restatement_kinds_are_copied_into_an_immutable_tuple() -> None:
     kinds = ["state_flip", "tombstone"]
-    rule = pol.RestatementRule(**_kwargs("restatement", restatement_kinds=kinds))
+    copied = pol.RestatementRule(**_kwargs("restatement", restatement_kinds=kinds))
     kinds.append("value_change")
-    assert rule.restatement_kinds == ("state_flip", "tombstone")
-    assert isinstance(rule.restatement_kinds, tuple)
+    assert copied.restatement_kinds == ("state_flip", "tombstone")
+    assert isinstance(copied.restatement_kinds, tuple)
 
 
 def test_restatement_kind_vocabulary_is_the_closed_three() -> None:
     assert set(pol.RESTATEMENT_KINDS) == {"tombstone", "value_change", "state_flip"}
-    assert list(pol.RESTATEMENT_KINDS) == sorted(
-        pol.RESTATEMENT_KINDS, key=lambda s: s.encode()
-    )
+    assert list(pol.RESTATEMENT_KINDS) == sorted(pol.RESTATEMENT_KINDS, key=lambda s: s.encode())
 
 
 # --------------------------------------------------------------------------------------
@@ -651,52 +820,52 @@ def test_applicability_scope_round_trips_with_exact_key_set() -> None:
 
 
 def test_applicability_scope_rejects_extra_missing_and_non_mapping() -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_member"):
         pol.ApplicabilityScope.from_dict({**SCOPE_WIRE, "extra": "x"})
     for key in SCOPE_WIRE:
-        with pytest.raises(ClosedValidationError):
+        with rejects("missing_member"):
             pol.ApplicabilityScope.from_dict(_without(SCOPE_WIRE, key))
     for bad in (None, [], "scope", 7):
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             pol.ApplicabilityScope.from_dict(bad)
 
 
-@pytest.mark.parametrize(
-    ("field", "bad"),
-    [
-        ("resource_scope_ref", ""),
-        ("resource_scope_ref", "scope"),
-        ("resource_scope_ref", "scope:"),
-        ("resource_scope_ref", "tenant:acme"),
-        ("resource_scope_ref", "Scope:acme"),
-        ("resource_scope_ref", "scope:acme\n"),
-        ("resource_scope_ref", None),
-        ("resource_scope_ref", 7),
-        ("resource_level", "adset"),
-        ("resource_level", "ad"),
-        ("resource_level", "Campaign"),
-        ("resource_level", ""),
-        ("resource_level", None),
-        ("resource_level", 1),
-        ("ad_platform_ref", "google"),
-        ("ad_platform_ref", "META"),
-        ("ad_platform_ref", ""),
-        ("ad_platform_ref", None),
-        ("currency", "USD"),
-        ("currency", "brl"),
-        ("currency", "BR"),
-        ("currency", "BRLL"),
-        ("currency", ""),
-        ("currency", None),
-        ("currency", 986),
-    ],
-)
+SCOPE_VALUE_CASES = [
+    ("resource_scope_ref", "", "invalid_grammar"),
+    ("resource_scope_ref", "scope", "invalid_grammar"),
+    ("resource_scope_ref", "scope:", "invalid_grammar"),
+    ("resource_scope_ref", "tenant:acme", "invalid_grammar"),
+    ("resource_scope_ref", "Scope:acme", "invalid_grammar"),
+    ("resource_scope_ref", "scope:acme\n", "invalid_grammar"),
+    ("resource_scope_ref", None, "invalid_type"),
+    ("resource_scope_ref", 7, "invalid_type"),
+    ("resource_level", "adset", "unsupported_value"),
+    ("resource_level", "ad", "unsupported_value"),
+    ("resource_level", "Campaign", "unsupported_value"),
+    ("resource_level", "", "unsupported_value"),
+    ("resource_level", None, "invalid_type"),
+    ("resource_level", 1, "invalid_type"),
+    ("ad_platform_ref", "google", "unsupported_value"),
+    ("ad_platform_ref", "META", "unsupported_value"),
+    ("ad_platform_ref", "", "unsupported_value"),
+    ("ad_platform_ref", None, "invalid_type"),
+    ("currency", "USD", "unsupported_value"),
+    ("currency", "brl", "unsupported_value"),
+    ("currency", "BR", "unsupported_value"),
+    ("currency", "BRLL", "unsupported_value"),
+    ("currency", "", "unsupported_value"),
+    ("currency", None, "invalid_type"),
+    ("currency", 986, "invalid_type"),
+]
+
+
+@pytest.mark.parametrize(("field", "bad", "code"), SCOPE_VALUE_CASES)
 def test_applicability_scope_rejects_each_malformed_or_non_phase1_value(
-    field: str, bad: Any
+    field: str, bad: Any, code: str
 ) -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects(code):
         pol.ApplicabilityScope.from_dict({**SCOPE_WIRE, field: bad})
-    with pytest.raises(ClosedValidationError):
+    with rejects(code):
         pol.ApplicabilityScope(**{**SCOPE_WIRE, field: bad})
 
 
@@ -725,28 +894,24 @@ def test_validity_round_trips_with_exact_key_set() -> None:
 
 def test_validity_requires_valid_from_strictly_before_valid_until() -> None:
     same = "2026-06-01T12:00:00.000000Z"
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_validity_window"):
         pol.PolicyValidity(valid_from_utc=same, valid_until_utc=same)
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_validity_window"):
         pol.PolicyValidity(
             valid_from_utc="2026-06-01T12:00:00.000001Z",
             valid_until_utc="2026-06-01T12:00:00.000000Z",
         )
-    one_microsecond = pol.PolicyValidity(
+    pol.PolicyValidity(
         valid_from_utc="2026-06-01T12:00:00.000000Z",
         valid_until_utc="2026-06-01T12:00:00.000001Z",
     )
-    assert one_microsecond.valid_until_utc > one_microsecond.valid_from_utc
-    with pytest.raises(ClosedValidationError):
-        pol.PolicyValidity.from_dict(
-            {"valid_from_utc": same, "valid_until_utc": same}
-        )
+    with rejects("invalid_validity_window"):
+        pol.PolicyValidity.from_dict({"valid_from_utc": same, "valid_until_utc": same})
 
 
 @pytest.mark.parametrize("field", sorted(EXPECTED_VALIDITY_KEYS))
-@pytest.mark.parametrize(
-    "bad",
-    [
+def test_validity_bounds_require_canonical_six_digit_utc_timestamps(field: str) -> None:
+    for bad in (
         "2026-06-01T12:00:00Z",
         "2026-06-01T12:00:00.0Z",
         "2026-06-01T12:00:00.000Z",
@@ -762,29 +927,26 @@ def test_validity_requires_valid_from_strictly_before_valid_until() -> None:
         "2026-06-01T12:00:60.000000Z",
         "2026-06-01",
         "",
-        None,
-        0,
-        1_780_000_000,
-        True,
-    ],
-)
-def test_validity_bounds_require_canonical_six_digit_utc_timestamps(
-    field: str, bad: Any
-) -> None:
-    with pytest.raises(ClosedValidationError):
-        pol.PolicyValidity.from_dict({**VALIDITY_WIRE, field: bad})
-    with pytest.raises(ClosedValidationError):
-        pol.PolicyValidity(**{**VALIDITY_WIRE, field: bad})
+    ):
+        with rejects("invalid_grammar"):
+            pol.PolicyValidity.from_dict({**VALIDITY_WIRE, field: bad})
+        with rejects("invalid_grammar"):
+            pol.PolicyValidity(**{**VALIDITY_WIRE, field: bad})
+    for bad in (None, 0, 1_780_000_000, True):
+        with rejects("invalid_type"):
+            pol.PolicyValidity.from_dict({**VALIDITY_WIRE, field: bad})
+        with rejects("invalid_type"):
+            pol.PolicyValidity(**{**VALIDITY_WIRE, field: bad})
 
 
 def test_validity_rejects_extra_missing_and_non_mapping() -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_member"):
         pol.PolicyValidity.from_dict({**VALIDITY_WIRE, "extra": "x"})
     for key in VALIDITY_WIRE:
-        with pytest.raises(ClosedValidationError):
+        with rejects("missing_member"):
             pol.PolicyValidity.from_dict(_without(VALIDITY_WIRE, key))
     for bad in (None, [], "validity", 7):
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             pol.PolicyValidity.from_dict(bad)
 
 
@@ -829,9 +991,12 @@ def _policy_wire(**overrides: Any) -> dict[str, Any]:
     return {**base, **overrides}
 
 
+def _with_unsigned(wire: dict[str, Any]) -> dict[str, Any]:
+    return {**wire, "integrity": copy.deepcopy(UNSIGNED_INTEGRITY)}
+
+
 def _signed_wire(wire: dict[str, Any], signature: str = FAKE_SIGNATURE_BASE64) -> dict[str, Any]:
-    unsigned = {**wire, "integrity": copy.deepcopy(UNSIGNED_INTEGRITY)}
-    digest = pol.AnalysisPolicy.from_dict(unsigned).p1_content_digest()
+    digest = pol.AnalysisPolicy.from_dict(_with_unsigned(wire)).p1_content_digest()
     return {
         **wire,
         "integrity": {
@@ -839,6 +1004,17 @@ def _signed_wire(wire: dict[str, Any], signature: str = FAKE_SIGNATURE_BASE64) -
             "content_digest": digest,
             "signature_base64": signature,
         },
+    }
+
+
+def _constructor_kwargs(wire: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "policy_id": wire["policy_id"],
+        "policy_version": wire["policy_version"],
+        "tenant_ref": wire["tenant_ref"],
+        "applicability_scope": pol.ApplicabilityScope.from_dict(wire["applicability_scope"]),
+        "validity": pol.PolicyValidity.from_dict(wire["validity"]),
+        "rules": tuple(pol.rule_from_dict(rule) for rule in wire["rules"]),
     }
 
 
@@ -854,7 +1030,7 @@ def test_policy_round_trips_without_integrity_and_without_touching_input() -> No
 
 
 def test_policy_round_trips_with_unsigned_and_signed_integrity() -> None:
-    unsigned_wire = _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
+    unsigned_wire = _with_unsigned(_policy_wire())
     unsigned = pol.AnalysisPolicy.from_dict(unsigned_wire)
     assert unsigned.integrity is not None and not unsigned.integrity.is_signed
     assert unsigned.to_dict() == unsigned_wire
@@ -872,9 +1048,7 @@ def test_policy_key_sets_are_exactly_the_registered_descriptor_fields() -> None:
     assert pol.AnalysisPolicy.KEYS == EXPECTED_POLICY_KEYS
     bare = pol.AnalysisPolicy.from_dict(_policy_wire())
     assert frozenset(bare.to_dict()) == EXPECTED_POLICY_CORE_KEYS
-    with_integrity = pol.AnalysisPolicy.from_dict(
-        _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
-    )
+    with_integrity = pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire()))
     assert frozenset(with_integrity.to_dict()) == EXPECTED_POLICY_KEYS
 
 
@@ -888,16 +1062,10 @@ def test_policy_is_frozen_and_rules_are_an_immutable_tuple() -> None:
 
 
 def test_policy_does_not_alias_caller_containers() -> None:
-    rules = [pol.rule_from_dict(_wire(kind)) for kind in SORTED_RULE_TYPES]
     wire = _policy_wire()
-    policy = pol.AnalysisPolicy(
-        policy_id=wire["policy_id"],
-        policy_version=wire["policy_version"],
-        tenant_ref=wire["tenant_ref"],
-        applicability_scope=pol.ApplicabilityScope.from_dict(wire["applicability_scope"]),
-        validity=pol.PolicyValidity.from_dict(wire["validity"]),
-        rules=rules,
-    )
+    kwargs = _constructor_kwargs(wire)
+    rules = list(kwargs["rules"])
+    policy = pol.AnalysisPolicy(**{**kwargs, "rules": rules})
     rules.clear()
     assert len(policy.rules) == len(SORTED_RULE_TYPES)
     first = policy.to_dict()
@@ -908,69 +1076,79 @@ def test_policy_does_not_alias_caller_containers() -> None:
 
 def test_policy_schema_member_is_required_and_exact() -> None:
     for bad in ("smart_ads/analysis_policy/v2", "analysis_policy", "", None, 1):
-        with pytest.raises(ClosedValidationError):
+        with rejects("schema_mismatch"):
             pol.AnalysisPolicy.from_dict(_policy_wire(**{"$schema": bad}))
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         pol.AnalysisPolicy.from_dict(_without(_policy_wire(), "$schema"))
 
 
 def test_policy_rejects_extra_and_each_missing_core_member() -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("unknown_member"):
         pol.AnalysisPolicy.from_dict(_policy_wire(extra="x"))
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy.from_dict(
-            _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY), extra="x")
-        )
+    with rejects("unknown_member"):
+        pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire(extra="x")))
     for key in sorted(EXPECTED_POLICY_CORE_KEYS):
-        with pytest.raises(ClosedValidationError):
+        with rejects("missing_member"):
             pol.AnalysisPolicy.from_dict(_without(_policy_wire(), key))
     for bad in (None, [], "policy", 7):
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             pol.AnalysisPolicy.from_dict(bad)
 
 
-@pytest.mark.parametrize(
-    ("field", "bad"),
-    [
-        ("policy_id", ""),
-        ("policy_id", "policy"),
-        ("policy_id", "policy:"),
-        ("policy_id", "tenant:acme"),
-        ("policy_id", "Policy:acme"),
-        ("policy_id", "policy:acme\n"),
-        ("policy_id", None),
-        ("policy_id", 1),
-        ("policy_version", ""),
-        ("policy_version", "   "),
-        ("policy_version", "v1\u0000"),
-        ("policy_version", "cafe\u0301"),
-        ("policy_version", None),
-        ("policy_version", 1),
-        ("policy_version", 1.0),
-        ("tenant_ref", ""),
-        ("tenant_ref", "tenant"),
-        ("tenant_ref", "scope:acme"),
-        ("tenant_ref", "Tenant:acme"),
-        ("tenant_ref", None),
-        ("tenant_ref", 1),
-    ],
-)
-def test_policy_rejects_malformed_identity_members(field: str, bad: Any) -> None:
-    with pytest.raises(ClosedValidationError):
+IDENTITY_CASES = [
+    ("policy_id", "", "invalid_grammar"),
+    ("policy_id", "policy", "invalid_grammar"),
+    ("policy_id", "policy:", "invalid_grammar"),
+    ("policy_id", "tenant:acme", "invalid_grammar"),
+    ("policy_id", "Policy:acme", "invalid_grammar"),
+    ("policy_id", "policy:acme\n", "invalid_grammar"),
+    ("policy_id", None, "invalid_type"),
+    ("policy_id", 1, "invalid_type"),
+    ("policy_version", "", "invalid_grammar"),
+    ("policy_version", "   ", "invalid_grammar"),
+    ("policy_version", "v1\u0000", "invalid_grammar"),
+    ("policy_version", "café", "invalid_grammar"),
+    ("policy_version", None, "invalid_type"),
+    ("policy_version", 1, "invalid_type"),
+    ("policy_version", 1.0, "invalid_type"),
+    ("tenant_ref", "", "invalid_grammar"),
+    ("tenant_ref", "tenant", "invalid_grammar"),
+    ("tenant_ref", "scope:acme", "invalid_grammar"),
+    ("tenant_ref", "Tenant:acme", "invalid_grammar"),
+    ("tenant_ref", None, "invalid_type"),
+    ("tenant_ref", 1, "invalid_type"),
+]
+
+
+@pytest.mark.parametrize(("field", "bad", "code"), IDENTITY_CASES)
+def test_policy_rejects_malformed_identity_members(field: str, bad: Any, code: str) -> None:
+    with rejects(code):
         pol.AnalysisPolicy.from_dict(_policy_wire(**{field: bad}))
 
 
 def test_policy_rejects_malformed_scope_and_validity_members() -> None:
-    for bad in (None, [], "scope", 7, {**SCOPE_WIRE, "extra": 1}, {**SCOPE_WIRE, "currency": "USD"}):
-        with pytest.raises(ClosedValidationError):
+    for bad in (None, [], "scope", 7):
+        with rejects("invalid_type"):
             pol.AnalysisPolicy.from_dict(_policy_wire(applicability_scope=bad))
+    with rejects("unknown_member"):
+        pol.AnalysisPolicy.from_dict(
+            _policy_wire(applicability_scope={**SCOPE_WIRE, "extra": 1})
+        )
+    with rejects("unsupported_value"):
+        pol.AnalysisPolicy.from_dict(
+            _policy_wire(applicability_scope={**SCOPE_WIRE, "currency": "USD"})
+        )
     reversed_window = {
         "valid_from_utc": VALIDITY_WIRE["valid_until_utc"],
         "valid_until_utc": VALIDITY_WIRE["valid_from_utc"],
     }
-    for bad in (None, [], "window", 7, {**VALIDITY_WIRE, "extra": 1}, reversed_window):
-        with pytest.raises(ClosedValidationError):
+    for bad in (None, [], "window", 7):
+        with rejects("invalid_type"):
             pol.AnalysisPolicy.from_dict(_policy_wire(validity=bad))
+    with rejects("unknown_member"):
+        pol.AnalysisPolicy.from_dict(_policy_wire(validity={**VALIDITY_WIRE, "extra": 1}))
+    with rejects("invalid_validity_window"):
+        pol.AnalysisPolicy.from_dict(_policy_wire(validity=reversed_window))
 
 
 # --------------------------------------------------------------------------------------
@@ -979,8 +1157,10 @@ def test_policy_rejects_malformed_scope_and_validity_members() -> None:
 
 
 def test_policy_rules_must_be_a_non_empty_json_array() -> None:
-    for bad in ([], None, "rules", 7, {"rule_id": "rule:x"}, tuple(_wire(k) for k in SORTED_RULE_TYPES)):
-        with pytest.raises(ClosedValidationError):
+    with rejects("empty"):
+        pol.AnalysisPolicy.from_dict(_policy_wire(rules=[]))
+    for bad in (None, "rules", 7, {"rule_id": "rule:x"}, tuple(_wire(k) for k in SORTED_RULE_TYPES)):
+        with rejects("invalid_type"):
             pol.AnalysisPolicy.from_dict(_policy_wire(rules=bad))
 
 
@@ -996,32 +1176,24 @@ def test_policy_accepts_a_single_rule_and_several_rules_of_the_same_type() -> No
 def test_policy_rejects_duplicate_rule_id_even_across_rule_types() -> None:
     waste = _wire("waste", rule_id="rule:shared")
     stalled = _wire("stalled_delivery", rule_id="rule:shared")
-    with pytest.raises(ClosedValidationError):
+    with rejects("duplicate_rule_id"):
         pol.AnalysisPolicy.from_dict(_policy_wire(rules=[waste, stalled]))
-    with pytest.raises(ClosedValidationError):
+    with rejects("duplicate_rule_id"):
         pol.AnalysisPolicy.from_dict(_policy_wire(rules=[waste, copy.deepcopy(waste)]))
 
 
 def test_policy_rejects_unsorted_rules_in_wire_and_constructor() -> None:
     wire = _policy_wire(rules=[_wire(kind) for kind in reversed(SORTED_RULE_TYPES)])
-    with pytest.raises(ClosedValidationError):
+    with rejects("unsorted"):
         pol.AnalysisPolicy.from_dict(wire)
-    good = _policy_wire()
-    scope = pol.ApplicabilityScope.from_dict(good["applicability_scope"])
-    validity = pol.PolicyValidity.from_dict(good["validity"])
+    kwargs = _constructor_kwargs(_policy_wire())
     for ordering in (
         tuple(reversed(SORTED_RULE_TYPES)),
         ("saturation", "restatement", "stalled_delivery", "waste"),
     ):
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy(
-                policy_id=good["policy_id"],
-                policy_version=good["policy_version"],
-                tenant_ref=good["tenant_ref"],
-                applicability_scope=scope,
-                validity=validity,
-                rules=tuple(pol.rule_from_dict(_wire(kind)) for kind in ordering),
-            )
+        rules = tuple(pol.rule_from_dict(_wire(kind)) for kind in ordering)
+        with rejects("unsorted"):
+            pol.AnalysisPolicy(**{**kwargs, "rules": rules})
 
 
 def test_policy_orders_rule_ids_by_raw_utf8_bytes_not_case_folded() -> None:
@@ -1030,71 +1202,46 @@ def test_policy_orders_rule_ids_by_raw_utf8_bytes_not_case_folded() -> None:
     # b"rule:Zeta" < b"rule:alpha" because 0x5A < 0x61.
     parsed = pol.AnalysisPolicy.from_dict(_policy_wire(rules=[upper, lower]))
     assert [r.rule_id for r in parsed.rules] == ["rule:Zeta", "rule:alpha"]
-    with pytest.raises(ClosedValidationError):
+    with rejects("unsorted"):
         pol.AnalysisPolicy.from_dict(_policy_wire(rules=[lower, upper]))
 
 
 def test_policy_rejects_unknown_rule_type_and_malformed_members_inside_rules() -> None:
     rules = [_wire(kind) for kind in SORTED_RULE_TYPES]
     for index in range(len(rules)):
-        unknown = copy.deepcopy(rules)
-        unknown[index]["rule_type"] = "mutation_recommendation"
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy.from_dict(_policy_wire(rules=unknown))
-        extra = copy.deepcopy(rules)
-        extra[index]["extra"] = 1
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy.from_dict(_policy_wire(rules=extra))
+        for mutate, code in (
+            (lambda r: r.update(rule_type="mutation_recommendation"), "unknown_rule_type"),
+            (lambda r: r.update(extra=1), "unknown_member"),
+            (lambda r: r.update(rule_id=7), "invalid_type"),
+        ):
+            broken = copy.deepcopy(rules)
+            mutate(broken[index])
+            with rejects(code):
+                pol.AnalysisPolicy.from_dict(_policy_wire(rules=broken))
         non_mapping = copy.deepcopy(rules)
         non_mapping[index] = "rule"
-        with pytest.raises(ClosedValidationError):
+        with rejects("invalid_type"):
             pol.AnalysisPolicy.from_dict(_policy_wire(rules=non_mapping))
-        bad_threshold = copy.deepcopy(rules)
-        bad_threshold[index]["rule_id"] = 7
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy.from_dict(_policy_wire(rules=bad_threshold))
 
 
-def test_policy_constructor_accepts_only_rule_instances() -> None:
-    good = _policy_wire()
-    scope = pol.ApplicabilityScope.from_dict(good["applicability_scope"])
-    validity = pol.PolicyValidity.from_dict(good["validity"])
+def test_policy_constructor_accepts_only_rule_instances_scope_and_validity() -> None:
+    kwargs = _constructor_kwargs(_policy_wire())
     for bad_rules in (
         ({"rule_id": "rule:x"},),
         (_wire("waste"),),
         (None,),
         ("rule:x",),
-        (),
         None,
         "rules",
     ):
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy(
-                policy_id=good["policy_id"],
-                policy_version=good["policy_version"],
-                tenant_ref=good["tenant_ref"],
-                applicability_scope=scope,
-                validity=validity,
-                rules=bad_rules,  # type: ignore[arg-type]
-            )
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy(
-            policy_id=good["policy_id"],
-            policy_version=good["policy_version"],
-            tenant_ref=good["tenant_ref"],
-            applicability_scope=SCOPE_WIRE,  # type: ignore[arg-type]
-            validity=validity,
-            rules=(pol.rule_from_dict(_wire("waste")),),
-        )
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy(
-            policy_id=good["policy_id"],
-            policy_version=good["policy_version"],
-            tenant_ref=good["tenant_ref"],
-            applicability_scope=scope,
-            validity=VALIDITY_WIRE,  # type: ignore[arg-type]
-            rules=(pol.rule_from_dict(_wire("waste")),),
-        )
+        with rejects("invalid_type"):
+            pol.AnalysisPolicy(**{**kwargs, "rules": bad_rules})
+    with rejects("empty"):
+        pol.AnalysisPolicy(**{**kwargs, "rules": ()})
+    with rejects("invalid_type"):
+        pol.AnalysisPolicy(**{**kwargs, "applicability_scope": SCOPE_WIRE})
+    with rejects("invalid_type"):
+        pol.AnalysisPolicy(**{**kwargs, "validity": VALIDITY_WIRE})
 
 
 # --------------------------------------------------------------------------------------
@@ -1110,18 +1257,15 @@ def test_p1_domain_prefix_is_the_adr_analysis_policy_prefix() -> None:
 def test_p1_preimage_is_the_envelope_without_digest_and_signature() -> None:
     signed_wire = _signed_wire(_policy_wire())
     policy = pol.AnalysisPolicy.from_dict(signed_wire, require_signed=True)
-    preimage = policy.p1_preimage()
     expected = copy.deepcopy(signed_wire)
     del expected["integrity"]["content_digest"]
     del expected["integrity"]["signature_base64"]
-    assert preimage == expected
+    assert policy.p1_preimage() == expected
     assert policy.to_dict() == signed_wire  # computing the preimage never mutates the policy
 
 
 def test_p1_content_digest_is_sha256_of_the_rfc8785_preimage() -> None:
-    policy = pol.AnalysisPolicy.from_dict(
-        _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
-    )
+    policy = pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire()))
     expected = "sha256:" + hashlib.sha256(canonicalize_jcs(policy.p1_preimage())).hexdigest()
     assert policy.p1_content_digest() == expected
     signed = pol.AnalysisPolicy.from_dict(_signed_wire(_policy_wire()), require_signed=True)
@@ -1130,9 +1274,8 @@ def test_p1_content_digest_is_sha256_of_the_rfc8785_preimage() -> None:
 
 
 def test_p1_preimage_matches_hand_written_canonical_json() -> None:
-    wire = _policy_wire(
-        rules=[_wire("restatement", restatement_kinds=["tombstone"])],
-        integrity=copy.deepcopy(UNSIGNED_INTEGRITY),
+    wire = _with_unsigned(
+        _policy_wire(rules=[_wire("restatement", restatement_kinds=["tombstone"])])
     )
     policy = pol.AnalysisPolicy.from_dict(wire)
     locator = KEY_REGISTRY_LOCATOR.content_digest
@@ -1156,34 +1299,51 @@ def test_p1_preimage_matches_hand_written_canonical_json() -> None:
     assert policy.p1_content_digest() == "sha256:" + hashlib.sha256(expected).hexdigest()
 
 
+def test_p1_preimage_carries_int64_thresholds_as_strings() -> None:
+    wire = _with_unsigned(
+        _policy_wire(rules=[_wire("waste", min_spend_minor=MAX_UINT64_TEXT)])
+    )
+    canonical = canonicalize_jcs(pol.AnalysisPolicy.from_dict(wire).p1_preimage())
+    assert b'"min_spend_minor":"9223372036854775807"' in canonical
+    assert b'"max_outcome_count":"0"' in canonical
+    assert b'"window_days":14' in canonical
+
+
+THRESHOLD_MUTATIONS = (
+    ("saturation", "window_days", 8),
+    ("saturation", "min_spend_growth", "0.200001"),
+    ("saturation", "max_outcome_growth", "0.050001"),
+    ("saturation", "min_baseline_spend_minor", "10001"),
+    ("saturation", "spend_metric_ref", "metric:clicks_v1"),
+    ("saturation", "outcome_metric_ref", "metric:impressions_v1"),
+    ("waste", "window_days", 15),
+    ("waste", "min_spend_minor", "50001"),
+    ("waste", "max_outcome_count", "1"),
+    ("stalled_delivery", "min_consecutive_days", 4),
+    ("stalled_delivery", "max_impressions", "1"),
+    ("restatement", "lookback_days", 29),
+    ("restatement", "restatement_kinds", ["tombstone"]),
+)
+
+
+def _wire_with_rule_mutation(kind: str, field: str, value: Any, **extra: Any) -> dict[str, Any]:
+    rules = [
+        _wire(k, **({field: value} if k == kind else {})) for k in SORTED_RULE_TYPES
+    ]
+    return _policy_wire(rules=rules, **extra)
+
+
 def test_p1_content_digest_changes_with_any_threshold_and_ignores_the_signature() -> None:
-    base_wire = _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
-    base = pol.AnalysisPolicy.from_dict(base_wire).p1_content_digest()
+    base = pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire())).p1_content_digest()
     other_signature = base64.b64encode(bytes([1]) * 64).decode("ascii")
     resigned = pol.AnalysisPolicy.from_dict(
         _signed_wire(_policy_wire(), signature=other_signature), require_signed=True
     )
     assert resigned.p1_content_digest() == base
-
-    mutations = (
-        ("saturation", "window_days", 8),
-        ("saturation", "min_spend_growth", "0.200001"),
-        ("saturation", "max_outcome_growth", "0.050001"),
-        ("saturation", "min_baseline_spend_minor", 10001),
-        ("waste", "min_spend_minor", 50001),
-        ("waste", "max_outcome_count", 1),
-        ("stalled_delivery", "min_consecutive_days", 4),
-        ("stalled_delivery", "max_impressions", 1),
-        ("restatement", "lookback_days", 29),
-        ("restatement", "restatement_kinds", ["tombstone"]),
-    )
     seen = {base}
-    for kind, field, value in mutations:
-        rules = [
-            _wire(k, **({field: value} if k == kind else {})) for k in SORTED_RULE_TYPES
-        ]
+    for kind, field, value in THRESHOLD_MUTATIONS:
         mutated = pol.AnalysisPolicy.from_dict(
-            _policy_wire(rules=rules, integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
+            _with_unsigned(_wire_with_rule_mutation(kind, field, value))
         )
         digest = mutated.p1_content_digest()
         assert digest not in seen
@@ -1192,74 +1352,131 @@ def test_p1_content_digest_changes_with_any_threshold_and_ignores_the_signature(
 
 def test_p1_digest_is_unavailable_without_an_integrity_block() -> None:
     policy = pol.AnalysisPolicy.from_dict(_policy_wire())
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         policy.p1_preimage()
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         policy.p1_content_digest()
 
 
 def test_signed_policy_with_a_wrong_or_stale_digest_is_rejected() -> None:
-    wire = _policy_wire()
-    good = _signed_wire(wire)
+    good = _signed_wire(_policy_wire())
     pol.AnalysisPolicy.from_dict(good, require_signed=True)
 
     wrong = copy.deepcopy(good)
     wrong["integrity"]["content_digest"] = "sha256:" + "0" * 64
-    with pytest.raises(ClosedValidationError):
+    with rejects("content_digest_mismatch"):
         pol.AnalysisPolicy.from_dict(wrong, require_signed=True)
 
     tampered = copy.deepcopy(good)
-    tampered["rules"][2]["max_impressions"] = 1  # stalled_delivery threshold after signing
-    with pytest.raises(ClosedValidationError):
+    tampered["rules"][2]["max_impressions"] = "1"  # stalled_delivery threshold after signing
+    with rejects("content_digest_mismatch"):
         pol.AnalysisPolicy.from_dict(tampered, require_signed=True)
 
     tampered_scope = copy.deepcopy(good)
     tampered_scope["applicability_scope"]["resource_scope_ref"] = "scope:other"
-    with pytest.raises(ClosedValidationError):
+    with rejects("content_digest_mismatch"):
         pol.AnalysisPolicy.from_dict(tampered_scope)
 
 
 def test_integrity_states_are_closed() -> None:
     signed = _signed_wire(_policy_wire())
-    with pytest.raises(ClosedValidationError):
+    with rejects("missing_member"):
         pol.AnalysisPolicy.from_dict(_policy_wire(), require_signed=True)
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy.from_dict(
-            _policy_wire(integrity=copy.deepcopy(UNSIGNED_INTEGRITY)), require_signed=True
-        )
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_integrity"):
+        pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire()), require_signed=True)
+    with rejects("invalid_type"):
         pol.AnalysisPolicy.from_dict(signed, require_signed="yes")  # type: ignore[arg-type]
     partial = copy.deepcopy(signed)
     del partial["integrity"]["signature_base64"]
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_integrity"):
         pol.AnalysisPolicy.from_dict(partial)
-    short_signature = _signed_wire(_policy_wire(), signature=base64.b64encode(bytes(63)).decode())
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy.from_dict(short_signature, require_signed=True)
-    extra_integrity = _policy_wire(integrity={**UNSIGNED_INTEGRITY, "extra": 1})
-    with pytest.raises(ClosedValidationError):
-        pol.AnalysisPolicy.from_dict(extra_integrity)
-    for bad in (None, [], "integrity"):
-        with pytest.raises(ClosedValidationError):
-            pol.AnalysisPolicy.from_dict(_policy_wire(integrity=bad))
-
-
-def test_policy_with_largest_json_safe_thresholds_still_has_a_computable_digest() -> None:
-    rules = [
-        _wire(
-            k,
-            **{
-                field: MAX_JCS_SAFE_INT
-                for (kind, field, _minimum) in INT_FIELD_CASES
-                if kind == k
-            },
-        )
-        for k in SORTED_RULE_TYPES
-    ]
-    policy = pol.AnalysisPolicy.from_dict(
-        _policy_wire(rules=rules, integrity=copy.deepcopy(UNSIGNED_INTEGRITY))
+    short_signature = _signed_wire(
+        _policy_wire(), signature=base64.b64encode(bytes(63)).decode()
     )
+    with rejects("invalid_integrity"):
+        pol.AnalysisPolicy.from_dict(short_signature, require_signed=True)
+    with rejects("invalid_integrity"):
+        pol.AnalysisPolicy.from_dict(_policy_wire(integrity={**UNSIGNED_INTEGRITY, "extra": 1}))
+    for bad in (None, [], "integrity"):
+        with rejects("invalid_integrity"):
+            pol.AnalysisPolicy.from_dict(_policy_wire(integrity=bad))
+    with rejects("invalid_integrity"):
+        pol.AnalysisPolicy(**{**_constructor_kwargs(_policy_wire()), "integrity": UNSIGNED_INTEGRITY})
+
+
+def test_policy_with_largest_thresholds_still_has_a_computable_digest() -> None:
+    day_fields = {field for _, field in DAY_FIELD_CASES}
+    uint_fields = {field for _, field in UINT64_FIELD_CASES}
+    rules = []
+    for kind in SORTED_RULE_TYPES:
+        overrides = {}
+        for field in EXPECTED_RULE_KEYS[kind]:
+            if field in day_fields:
+                overrides[field] = MAX_JCS_SAFE_INT
+            elif field in uint_fields:
+                overrides[field] = MAX_UINT64_TEXT
+        rules.append(_wire(kind, **overrides))
+    policy = pol.AnalysisPolicy.from_dict(_with_unsigned(_policy_wire(rules=rules)))
     assert policy.p1_content_digest().startswith("sha256:")
+
+
+# --------------------------------------------------------------------------------------
+# Locator: ArtifactLocator over the canonical bytes of the full envelope
+# --------------------------------------------------------------------------------------
+
+
+def test_locator_is_the_artifact_locator_over_the_canonical_envelope_bytes() -> None:
+    for wire in (_policy_wire(), _with_unsigned(_policy_wire()), _signed_wire(_policy_wire())):
+        policy = pol.AnalysisPolicy.from_dict(wire)
+        locator = policy.locator()
+        digest = "sha256:" + hashlib.sha256(canonicalize_jcs(policy.to_dict())).hexdigest()
+        assert isinstance(locator, ArtifactLocator)
+        assert locator == ArtifactLocator.from_digest(pol.AnalysisPolicy.SCHEMA, digest)
+        assert locator == ArtifactLocator.for_canonical_bytes(
+            pol.AnalysisPolicy.SCHEMA, canonicalize_jcs(policy.to_dict())
+        )
+        assert locator.artifact_type == "smart_ads/analysis_policy/v1"
+        assert locator.content_digest == digest
+        assert locator.object_ref == f"cell-object:{digest}"
+        assert pol.AnalysisPolicy.from_dict(policy.to_dict()).locator() == locator
+        assert policy.locator() == locator
+
+
+def _locator_of(wire: dict[str, Any]) -> ArtifactLocator:
+    return pol.AnalysisPolicy.from_dict(wire).locator()
+
+
+def test_locator_changes_when_any_member_changes() -> None:
+    base_wire = _with_unsigned(_policy_wire())
+    variants = {
+        "base": base_wire,
+        "policy_id": {**base_wire, "policy_id": "policy:acme-other"},
+        "policy_version": {**base_wire, "policy_version": "2026.11.2"},
+        "tenant_ref": {**base_wire, "tenant_ref": "tenant:other"},
+        "resource_scope_ref": {
+            **base_wire,
+            "applicability_scope": {**SCOPE_WIRE, "resource_scope_ref": "scope:other"},
+        },
+        "valid_from_utc": {
+            **base_wire,
+            "validity": {**VALIDITY_WIRE, "valid_from_utc": "2026-01-01T00:00:00.000001Z"},
+        },
+        "valid_until_utc": {
+            **base_wire,
+            "validity": {**VALIDITY_WIRE, "valid_until_utc": "2026-12-31T23:59:59.999998Z"},
+        },
+        "key_id": {
+            **base_wire,
+            "integrity": {**UNSIGNED_INTEGRITY, "key_id": "key:ed25519:" + "b" * 64},
+        },
+        "no_integrity": _policy_wire(),
+        "signed": _signed_wire(_policy_wire()),
+        "fewer_rules": {**base_wire, "rules": base_wire["rules"][:-1]},
+    }
+    for kind, field, value in THRESHOLD_MUTATIONS:
+        variants[f"{kind}.{field}"] = _with_unsigned(_wire_with_rule_mutation(kind, field, value))
+    digests = {name: _locator_of(wire).content_digest for name, wire in variants.items()}
+    assert len(set(digests.values())) == len(variants), digests
 
 
 # --------------------------------------------------------------------------------------
@@ -1289,8 +1506,8 @@ def _eval_scope(**overrides: str) -> pol.EvaluationScope:
     return pol.EvaluationScope(**{**MATCHING_SCOPE_KWARGS, **overrides})
 
 
-def test_codes_are_a_closed_set_and_the_error_is_a_closed_validation_error() -> None:
-    assert set(pol.POLICY_NOT_APPLICABLE_CODES) == {
+def test_applicability_codes_are_the_unchanged_closed_seven() -> None:
+    assert pol.POLICY_NOT_APPLICABLE_CODES == (
         "tenant_mismatch",
         "resource_scope_mismatch",
         "resource_level_mismatch",
@@ -1298,25 +1515,33 @@ def test_codes_are_a_closed_set_and_the_error_is_a_closed_validation_error() -> 
         "currency_mismatch",
         "not_yet_valid",
         "expired",
-    }
+    )
     assert issubclass(pol.PolicyNotApplicableError, ClosedValidationError)
     for code in pol.POLICY_NOT_APPLICABLE_CODES:
         error = pol.PolicyNotApplicableError(code, "detail")
         assert error.code == code
         assert code in str(error)
-        assert isinstance(error, ClosedValidationError)
-    for bad in ("", "tenant", "EXPIRED", None, 1, ["expired"]):
-        with pytest.raises(ClosedValidationError):
+    for bad in ("", "tenant", "EXPIRED", "invalid_type", None, 1, ["expired"]):
+        with pytest.raises(ClosedValidationError) as caught:
             pol.PolicyNotApplicableError(bad, "detail")  # type: ignore[arg-type]
+        assert type(caught.value) is ClosedValidationError
 
 
-def test_not_applicable_error_survives_copy_and_pickle_with_its_code() -> None:
-    error = pol.PolicyNotApplicableError("expired", "window closed")
-    for clone in (copy.copy(error), copy.deepcopy(error), pickle.loads(pickle.dumps(error))):
-        assert type(clone) is pol.PolicyNotApplicableError
-        assert clone.code == "expired"
-        assert clone.detail == "window closed"
-        assert str(clone) == str(error)
+EVAL_SCOPE_CASES = [
+    ("tenant_ref", "scope:acme", "invalid_grammar"),
+    ("tenant_ref", "", "invalid_grammar"),
+    ("tenant_ref", None, "invalid_type"),
+    ("resource_scope_ref", "tenant:acme", "invalid_grammar"),
+    ("resource_scope_ref", None, "invalid_type"),
+    ("resource_level", "", "invalid_grammar"),
+    ("resource_level", None, "invalid_type"),
+    ("resource_level", 1, "invalid_type"),
+    ("ad_platform_ref", "", "invalid_grammar"),
+    ("ad_platform_ref", None, "invalid_type"),
+    ("currency", "usd", "invalid_grammar"),
+    ("currency", "BR", "invalid_grammar"),
+    ("currency", None, "invalid_type"),
+]
 
 
 def test_evaluation_scope_requires_well_formed_members_but_not_phase1_values() -> None:
@@ -1326,25 +1551,14 @@ def test_evaluation_scope_requires_well_formed_members_but_not_phase1_values() -
         "google",
         "USD",
     )
-    for field, bad in (
-        ("tenant_ref", "scope:acme"),
-        ("tenant_ref", ""),
-        ("tenant_ref", None),
-        ("resource_scope_ref", "tenant:acme"),
-        ("resource_scope_ref", None),
-        ("resource_level", ""),
-        ("resource_level", None),
-        ("resource_level", 1),
-        ("ad_platform_ref", ""),
-        ("ad_platform_ref", None),
-        ("currency", "usd"),
-        ("currency", "BR"),
-        ("currency", None),
-    ):
-        with pytest.raises(ClosedValidationError):
-            _eval_scope(**{field: bad})  # type: ignore[arg-type]
     with pytest.raises(dataclasses.FrozenInstanceError):
         other.currency = "BRL"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(("field", "bad", "code"), EVAL_SCOPE_CASES)
+def test_evaluation_scope_rejects_malformed_members(field: str, bad: Any, code: str) -> None:
+    with rejects(code):
+        _eval_scope(**{field: bad})
 
 
 def test_matching_scope_inside_the_window_is_applicable() -> None:
@@ -1379,8 +1593,7 @@ def test_instant_one_microsecond_before_valid_from_is_not_yet_valid() -> None:
 def test_instant_one_microsecond_after_valid_until_is_expired() -> None:
     policy = _policy()
     assert (
-        pol.policy_applicability_code(policy, _eval_scope(), AFTER_VALID_UNTIL)
-        == "expired"
+        pol.policy_applicability_code(policy, _eval_scope(), AFTER_VALID_UNTIL) == "expired"
     )
     with pytest.raises(pol.PolicyNotApplicableError) as caught:
         pol.require_policy_applicable(policy, _eval_scope(), AFTER_VALID_UNTIL)
@@ -1405,10 +1618,11 @@ def test_window_comparison_is_chronological_at_microsecond_resolution() -> None:
         )
     )
     scope = _eval_scope()
-    assert pol.policy_applicability_code(policy, scope, "2026-06-01T12:00:00.000000Z") == "not_yet_valid"
-    assert pol.policy_applicability_code(policy, scope, "2026-06-01T12:00:00.000001Z") is None
-    assert pol.policy_applicability_code(policy, scope, "2026-06-01T12:00:00.000002Z") is None
-    assert pol.policy_applicability_code(policy, scope, "2026-06-01T12:00:00.000003Z") == "expired"
+    code = pol.policy_applicability_code
+    assert code(policy, scope, "2026-06-01T12:00:00.000000Z") == "not_yet_valid"
+    assert code(policy, scope, "2026-06-01T12:00:00.000001Z") is None
+    assert code(policy, scope, "2026-06-01T12:00:00.000002Z") is None
+    assert code(policy, scope, "2026-06-01T12:00:00.000003Z") == "expired"
 
 
 SCOPE_MISMATCH_CASES = (
@@ -1449,70 +1663,60 @@ def test_scope_mismatch_is_reported_before_validity_and_in_documented_order() ->
         ad_platform_ref="google",
         currency="USD",
     )
-    assert (
-        pol.policy_applicability_code(policy, everything_wrong, AFTER_VALID_UNTIL)
-        == "tenant_mismatch"
-    )
+    code = pol.policy_applicability_code
+    assert code(policy, everything_wrong, AFTER_VALID_UNTIL) == "tenant_mismatch"
     no_tenant_error = _eval_scope(
         resource_scope_ref="scope:other",
         resource_level="adset",
         ad_platform_ref="google",
         currency="USD",
     )
-    assert (
-        pol.policy_applicability_code(policy, no_tenant_error, BEFORE_VALID_FROM)
-        == "resource_scope_mismatch"
-    )
-    only_currency = _eval_scope(currency="USD")
-    assert (
-        pol.policy_applicability_code(policy, only_currency, AFTER_VALID_UNTIL)
-        == "currency_mismatch"
-    )
+    assert code(policy, no_tenant_error, BEFORE_VALID_FROM) == "resource_scope_mismatch"
+    assert code(policy, _eval_scope(currency="USD"), AFTER_VALID_UNTIL) == "currency_mismatch"
 
 
-@pytest.mark.parametrize(
-    "bad_instant",
-    [
-        "",
-        "2026-06-15T12:30:00Z",
-        "2026-06-15T12:30:00.123Z",
-        "2026-06-15T12:30:00.123456",
-        "2026-06-15T12:30:00.123456+00:00",
-        "2026-06-15 12:30:00.123456Z",
-        "2026-02-30T12:30:00.123456Z",
-        "2026-06-15T12:30:60.123456Z",
-        "2026-06-15",
-        None,
-        0,
-        1_780_000_000,
-        True,
-        b"2026-06-15T12:30:00.123456Z",
-    ],
-)
+MALFORMED_INSTANT_CASES = [
+    ("", "invalid_grammar"),
+    ("2026-06-15T12:30:00Z", "invalid_grammar"),
+    ("2026-06-15T12:30:00.123Z", "invalid_grammar"),
+    ("2026-06-15T12:30:00.123456", "invalid_grammar"),
+    ("2026-06-15T12:30:00.123456+00:00", "invalid_grammar"),
+    ("2026-06-15 12:30:00.123456Z", "invalid_grammar"),
+    ("2026-02-30T12:30:00.123456Z", "invalid_grammar"),
+    ("2026-06-15T12:30:60.123456Z", "invalid_grammar"),
+    ("2026-06-15", "invalid_grammar"),
+    (None, "invalid_type"),
+    (0, "invalid_type"),
+    (1_780_000_000, "invalid_type"),
+    (True, "invalid_type"),
+    (b"2026-06-15T12:30:00.123456Z", "invalid_type"),
+]
+
+
+@pytest.mark.parametrize(("bad_instant", "code"), MALFORMED_INSTANT_CASES)
 def test_malformed_instant_is_a_validation_error_not_a_not_applicable_verdict(
-    bad_instant: Any,
+    bad_instant: Any, code: str
 ) -> None:
     policy = _policy()
-    with pytest.raises(ClosedValidationError) as caught_code:
+    with rejects(code):
         pol.policy_applicability_code(policy, _eval_scope(), bad_instant)
-    assert not isinstance(caught_code.value, pol.PolicyNotApplicableError)
-    with pytest.raises(ClosedValidationError) as caught_require:
+    with rejects(code):
         pol.require_policy_applicable(policy, _eval_scope(), bad_instant)
-    assert not isinstance(caught_require.value, pol.PolicyNotApplicableError)
 
 
 def test_malformed_instant_is_rejected_even_when_the_scope_already_mismatches() -> None:
-    with pytest.raises(ClosedValidationError) as caught:
-        pol.policy_applicability_code(_policy(), _eval_scope(tenant_ref="tenant:other"), "not-a-time")
-    assert not isinstance(caught.value, pol.PolicyNotApplicableError)
+    with rejects("invalid_grammar"):
+        pol.policy_applicability_code(
+            _policy(), _eval_scope(tenant_ref="tenant:other"), "not-a-time"
+        )
 
 
 def test_applicability_arguments_must_be_typed_objects() -> None:
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_type"):
         pol.policy_applicability_code(_policy_wire(), _eval_scope(), INSIDE_WINDOW)  # type: ignore[arg-type]
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_type"):
         pol.policy_applicability_code(_policy(), MATCHING_SCOPE_KWARGS, INSIDE_WINDOW)  # type: ignore[arg-type]
-    with pytest.raises(ClosedValidationError):
+    with rejects("invalid_type"):
         pol.require_policy_applicable(None, _eval_scope(), INSIDE_WINDOW)  # type: ignore[arg-type]
 
 
@@ -1537,7 +1741,9 @@ def test_applicability_is_deterministic_and_leaves_the_policy_untouched() -> Non
 
 def test_applicability_does_not_depend_on_rule_parameters() -> None:
     zero_thresholds = pol.AnalysisPolicy.from_dict(
-        _policy_wire(rules=[_wire("stalled_delivery", min_consecutive_days=1, max_impressions=0)])
+        _policy_wire(
+            rules=[_wire("stalled_delivery", min_consecutive_days=1, max_impressions="0")]
+        )
     )
     assert pol.policy_applicability_code(zero_thresholds, _eval_scope(), INSIDE_WINDOW) is None
     assert (
@@ -1546,6 +1752,10 @@ def test_applicability_does_not_depend_on_rule_parameters() -> None:
     )
 
 
+# --------------------------------------------------------------------------------------
+# Public API surface
+# --------------------------------------------------------------------------------------
+
 EXPECTED_PUBLIC_API = frozenset(
     {
         "AnalysisPolicy",
@@ -1553,8 +1763,10 @@ EXPECTED_PUBLIC_API = frozenset(
         "ApplicabilityScope",
         "EvaluationScope",
         "METRIC_REF_PATTERN",
+        "POLICY_ERROR_CODES",
         "POLICY_NOT_APPLICABLE_CODES",
         "PolicyNotApplicableError",
+        "PolicyValidationError",
         "PolicyValidity",
         "RESTATEMENT_KINDS",
         "RULE_TYPES",
@@ -1582,7 +1794,7 @@ def test_public_api_is_pinned_and_every_export_resolves() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Module hygiene: no float, no threshold literals, no clock
+# Module hygiene: no float, no threshold literals, no clock, coded errors only
 # --------------------------------------------------------------------------------------
 
 
@@ -1604,3 +1816,16 @@ def test_module_contains_no_float_and_no_hardcoded_threshold_literals() -> None:
     }
     # Only structural 0 / 1 (lower bounds and indexes) may appear; every threshold is data.
     assert int_literals <= {0, 1}, f"unexpected integer literals: {sorted(int_literals)}"
+
+
+def test_every_structural_rejection_is_raised_as_a_coded_error() -> None:
+    plain_raises = [
+        node
+        for node in ast.walk(_policy_ast())
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "ClosedValidationError"
+    ]
+    # The single plain raise is the unknown-code guard inside the coded base error.
+    assert len(plain_raises) == 1
