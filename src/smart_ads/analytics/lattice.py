@@ -109,12 +109,12 @@ class DerivedStateOutcome:
 
     def __post_init__(self) -> None:
         for name in ("presence_status", "calculation_status"):
-            if not isinstance(getattr(self, name), str):
+            if type(getattr(self, name)) is not str:
                 raise ClosedValidationError(
                     f"derived_state_outcome.{name}: expected str, "
                     f"got {type(getattr(self, name)).__name__}"
                 )
-        if self.unknown_reason is not None and not isinstance(self.unknown_reason, str):
+        if self.unknown_reason is not None and type(self.unknown_reason) is not str:
             raise ClosedValidationError(
                 "derived_state_outcome.unknown_reason: expected str or None, "
                 f"got {type(self.unknown_reason).__name__}"
@@ -316,16 +316,39 @@ def _state_and_value(row: AnalyticsLandingRow) -> tuple[object, ...]:
     )
 
 
-def _carries_value(row: AnalyticsLandingRow) -> bool:
-    # The 12-row matrix gives a value to observed and computed rows only.
-    return row.raw_numeric_value is not None
+def carries_value(row: AnalyticsLandingRow) -> bool:
+    """True iff the landing row is `observed` or `computed`, the only valued matrix rows.
+
+    Defined through `classify_input_state`, so it re-runs the 12-row matrix on the
+    row's own fields: a non-observed state never reads as a value (an observed
+    zero does), and a tampered row rejects instead of answering.
+    """
+    checked = _require_landing_row(row, label="row")
+    state = NumericStateRow(
+        metric_origin=checked.metric_origin,
+        presence_status=checked.presence_status,
+        calculation_status=checked.calculation_status,
+        unknown_reason=checked.unknown_reason,
+        value_type=checked.value_type,
+        raw_numeric_value=checked.raw_numeric_value,
+        unit=checked.unit,
+        currency=checked.currency,
+    )
+    return classify_input_state(state) == "value"
 
 
 def classify_restatement(
     prior: AnalyticsLandingRow,
     current: AnalyticsLandingRow,
 ) -> RestatementKind | None:
-    """Classify how `current` restates the strictly earlier `prior` for one `fact_key`.
+    """Classify how `current` restates `prior` for one `fact_key`.
+
+    `current` must beat `prior` under the ADR-0001 section 6.2 winner order,
+    the same precedence `select_winner` applies: later `collected_at_utc`, then
+    a tombstone over a non-tombstone, then the greater
+    `semantic_observation_digest`. A `current` that loses to `prior`, or is the
+    same candidate (equal precedence), rejects. A winner chosen by rule 2 or
+    rule 3 at an equal instant is therefore classified, not rejected.
 
     `tombstone`: the current row is a retraction and the prior row was not.
     `state_flip`: the pair crosses valued <-> unknown (observed or computed vs
@@ -339,9 +362,10 @@ def classify_restatement(
     later = _require_landing_row(current, label="current")
     if earlier.fact_key != later.fact_key:
         raise ClosedValidationError("restatement: prior and current must share one fact_key")
-    if not earlier.collected_at_utc < later.collected_at_utc:
+    if not _winner_precedence(later) > _winner_precedence(earlier):
         raise ClosedValidationError(
-            "restatement: current.collected_at_utc must be strictly later than prior's"
+            "restatement: current must beat prior under the ADR-0001 section 6.2 "
+            "winner order (later collected_at_utc, then tombstone, then greater digest)"
         )
     if _state_and_value(earlier) == _state_and_value(later):
         return None
@@ -350,7 +374,7 @@ def classify_restatement(
         and earlier.presence_status != _TOMBSTONE_PRESENCE
     ):
         return "tombstone"
-    prior_known, current_known = _carries_value(earlier), _carries_value(later)
+    prior_known, current_known = carries_value(earlier), carries_value(later)
     if prior_known != current_known:
         return "state_flip"
     if prior_known:
@@ -500,7 +524,7 @@ class FixtureSemanticRefs:
 def _require_pinned_members(fixture: RegressionFixtureV1) -> None:
     for name, expected in _PINNED_MEMBERS:
         value = getattr(fixture, name)
-        if not isinstance(value, str) or value != expected:
+        if type(value) is not str or value != expected:
             raise ClosedValidationError(
                 f"regression_fixture.{name}: expected {expected!r}, got {value!r}"
             )
@@ -659,6 +683,7 @@ __all__ = [
     "TruthVector",
     "build_derived_row",
     "candidate_sort_key",
+    "carries_value",
     "classify_input_state",
     "classify_restatement",
     "derive_effective_state",

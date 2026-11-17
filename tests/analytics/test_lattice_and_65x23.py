@@ -26,6 +26,7 @@ from smart_ads.analytics.lattice import (
     TruthVector,
     build_derived_row,
     candidate_sort_key,
+    carries_value,
     classify_input_state,
     classify_restatement,
     derive_effective_state,
@@ -456,6 +457,25 @@ def test_build_derived_row_matches_the_derived_matrix_rows(row_id: str) -> None:
     assert isinstance(row, NumericStateRow)
 
 
+class StrSubclass(str):
+    """Equal and hash-equal to the str it wraps, but not exactly `str`."""
+
+
+@pytest.mark.parametrize(
+    "triple",
+    [
+        (StrSubclass("not_applicable"), "computed", None),
+        ("not_applicable", StrSubclass("computed"), None),
+        ("not_applicable", "input_missing", StrSubclass("input_missing")),
+        (StrSubclass("retracted_tombstone"), "not_applicable", "source_retracted"),
+    ],
+    ids=["presence", "calculation", "reason", "tombstone-presence"],
+)
+def test_derived_state_outcome_rejects_str_subclasses(triple: tuple[object, ...]) -> None:
+    with pytest.raises(ClosedValidationError, match="expected str"):
+        DerivedStateOutcome(*triple)  # type: ignore[arg-type]
+
+
 def test_build_derived_row_never_coerces_a_non_computed_state_to_a_value() -> None:
     for row_id in ROW_IDS:
         outcome = derive_effective_state([ALL_ROWS[row_id]])
@@ -574,6 +594,13 @@ def make_derived_row(
     presence, calc, reason = {
         "computed": ("not_applicable", "computed", None),
         "input_missing": ("not_applicable", "input_missing", "input_missing"),
+        "input_unproven": ("not_applicable", "input_unproven", "input_unproven"),
+        "division_by_zero": ("not_applicable", "division_by_zero", "division_by_zero"),
+        "not_applicable_at_level": (
+            "not_applicable_at_level",
+            "not_applicable",
+            "metric_not_applicable_at_level",
+        ),
         "tombstone": ("retracted_tombstone", "not_applicable", "source_retracted"),
     }[state]
     valued = state == "computed"
@@ -592,6 +619,86 @@ def make_derived_row(
         adapter_version="adapter-1",
         semantic_version="semantic-1",
     )
+
+
+# Every one of the 12 matrix rows as a complete landing row, keyed like MATRIX.
+LANDING_ROWS: dict[str, AnalyticsLandingRow] = {
+    **{
+        f"provider:{presence}": make_row(presence=presence)
+        for presence in PROVIDER_REASON
+    },
+    "derived:computed": make_derived_row(state="computed"),
+    "derived:input_missing": make_derived_row(state="input_missing"),
+    "derived:input_unproven": make_derived_row(state="input_unproven"),
+    "derived:division_by_zero": make_derived_row(state="division_by_zero"),
+    "derived:not_applicable_at_level": make_derived_row(state="not_applicable_at_level"),
+    "derived:retracted_tombstone": make_derived_row(state="tombstone"),
+}
+VALUE_ROW_IDS = frozenset({"provider:observed", "derived:computed"})
+
+
+def test_landing_rows_cover_the_twelve_matrix_rows() -> None:
+    assert set(LANDING_ROWS) == set(ROW_IDS)
+
+
+@pytest.mark.parametrize("row_id", ROW_IDS)
+def test_carries_value_is_true_only_for_observed_and_computed_rows(row_id: str) -> None:
+    result = carries_value(LANDING_ROWS[row_id])
+    assert result is (row_id in VALUE_ROW_IDS)
+    # One definition of "carries a value": it agrees with the lattice tier.
+    assert result is (classify_input_state(ALL_ROWS[row_id]) == "value")
+
+
+def test_carries_value_is_true_for_zero_and_money_values() -> None:
+    zero = make_row(raw="0")
+    assert zero.raw_numeric_value == "0"
+    assert carries_value(zero) is True  # an observed zero is a value
+    money = AnalyticsLandingRow(
+        fact_key=make_fact_key(
+            metric="metric:spend_v1", source="source-metric:provider:pipeboard.spend:v1"
+        ),
+        value_type="int64_minor_currency",
+        raw_numeric_value="250",
+        unit="minor_currency",
+        currency="BRL",
+        metric_origin="provider_observation",
+        presence_status="observed",
+        unknown_reason=None,
+        calculation_status="not_applicable",
+        collected_at_utc=T_EARLY,
+        source_observation_ref="observation:o1",
+        adapter_version="adapter-1",
+        semantic_version="semantic-1",
+    )
+    assert carries_value(money) is True
+
+
+def test_carries_value_rejects_non_rows_and_tampered_rows() -> None:
+    for bad in (None, "observed", LANDING_ROWS["provider:observed"].to_dict(), ALL_ROWS["provider:observed"]):
+        with pytest.raises(ClosedValidationError):
+            carries_value(bad)  # type: ignore[arg-type]
+
+    forged_value = make_row(presence="missing")
+    object.__setattr__(forged_value, "raw_numeric_value", "5")
+    with pytest.raises(ClosedValidationError):
+        carries_value(forged_value)  # a missing row never carries a value
+
+    stripped_value = make_row(presence="observed")
+    object.__setattr__(stripped_value, "raw_numeric_value", None)
+    with pytest.raises(ClosedValidationError):
+        carries_value(stripped_value)
+
+    unlisted = make_row(presence="observed")
+    object.__setattr__(unlisted, "presence_status", "not_applicable")
+    with pytest.raises(ClosedValidationError):
+        carries_value(unlisted)
+
+
+def test_classify_restatement_rejects_tampered_rows() -> None:
+    forged = make_row(presence="missing", at=T_LATE, obs="observation:o2")
+    object.__setattr__(forged, "raw_numeric_value", "5")
+    with pytest.raises(ClosedValidationError):
+        classify_restatement(make_row(at=T_EARLY), forged)
 
 
 def is_tombstone(row: AnalyticsLandingRow) -> bool:
@@ -930,23 +1037,106 @@ def test_classify_restatement_works_for_derived_rows() -> None:
     assert classify_restatement(computed_5, make_derived_row(state="tombstone", at=T_LATE)) == "tombstone"
 
 
-def test_classify_restatement_requires_same_key_strict_order_and_rows() -> None:
+def test_classify_restatement_requires_one_fact_key_and_landing_rows() -> None:
     row = make_row(at=T_EARLY)
     later = make_row(at=T_LATE, raw="101", obs="observation:o2")
     other_key = make_row(key=make_fact_key(resource=RESOURCE_B), at=T_LATE, raw="101")
-    with pytest.raises(ClosedValidationError):
+    with pytest.raises(ClosedValidationError, match="fact_key"):
         classify_restatement(row, other_key)
-    with pytest.raises(ClosedValidationError):
-        classify_restatement(later, row)  # current older than prior
-    with pytest.raises(ClosedValidationError):
-        classify_restatement(row, make_row(at=T_EARLY, raw="101", obs="observation:o2"))  # same instant
-    with pytest.raises(ClosedValidationError):
-        classify_restatement(row, row)
     for bad in (None, row.to_dict(), "row"):
         with pytest.raises(ClosedValidationError):
             classify_restatement(bad, later)  # type: ignore[arg-type]
         with pytest.raises(ClosedValidationError):
             classify_restatement(row, bad)  # type: ignore[arg-type]
+
+
+def test_classify_restatement_rejects_a_current_that_loses_by_time() -> None:
+    older = make_row(at=T_EARLY, raw="100", obs="observation:o1")
+    newer = make_row(at=T_LATE, raw="101", obs="observation:o2")
+    assert classify_restatement(older, newer) == "value_change"
+    with pytest.raises(ClosedValidationError, match="section 6.2"):
+        classify_restatement(newer, older)
+    # Rule 1 outranks rule 2: an older tombstone never beats a newer observation.
+    older_tomb = make_row(presence="retracted_tombstone", at=T_EARLY, obs="observation:t1")
+    newer_obs = make_row(at=T_LATE, raw="100", obs="observation:o3")
+    assert classify_restatement(older_tomb, newer_obs) == "state_flip"
+    with pytest.raises(ClosedValidationError, match="section 6.2"):
+        classify_restatement(newer_obs, older_tomb)
+
+
+@pytest.mark.parametrize("tombstone_has_greater_digest", [True, False])
+def test_classify_restatement_accepts_a_same_instant_tombstone_winner(
+    tombstone_has_greater_digest: bool,
+) -> None:
+    # ADR 6.2 rule 2: at equal time a tombstone beats a non-tombstone, so the
+    # tombstone is a legal winner (current) whatever the digests say.
+    tomb, obs = _same_time_pair(tombstone_has_greater_digest=tombstone_has_greater_digest)
+    assert tomb.collected_at_utc == obs.collected_at_utc
+    assert select_winner([obs, tomb]) is tomb
+    assert classify_restatement(obs, tomb) == "tombstone"
+    # The observation lost that tie, so it cannot be the restating row.
+    with pytest.raises(ClosedValidationError, match="section 6.2"):
+        classify_restatement(tomb, obs)
+
+
+def test_classify_restatement_accepts_a_same_instant_digest_winner() -> None:
+    # ADR 6.2 rule 3: equal time, neither a tombstone, greater digest wins.
+    first = make_row(raw="100", obs="observation:a1")
+    second = make_row(raw="101", obs="observation:b1")
+    assert first.collected_at_utc == second.collected_at_utc
+    assert first.semantic_observation_digest != second.semantic_observation_digest
+    lesser, greater = sorted((first, second), key=lambda r: r.semantic_observation_digest)
+    assert select_winner([lesser, greater]) is greater
+    assert classify_restatement(lesser, greater) == "value_change"
+    with pytest.raises(ClosedValidationError, match="section 6.2"):
+        classify_restatement(greater, lesser)
+
+
+def test_classify_restatement_rejects_the_same_candidate() -> None:
+    row = make_row(at=T_EARLY)
+    twin = AnalyticsLandingRow.from_dict(row.to_dict())
+    assert twin == row and twin is not row
+    for same in (row, twin):
+        with pytest.raises(ClosedValidationError, match="section 6.2"):
+            classify_restatement(row, same)
+    tomb = make_row(presence="retracted_tombstone", obs="observation:t1")
+    with pytest.raises(ClosedValidationError, match="section 6.2"):
+        classify_restatement(tomb, tomb)
+
+
+def test_classify_restatement_accepts_exactly_the_pairs_select_winner_prefers() -> None:
+    # classify_restatement and select_winner share one precedence order.
+    pool = _exhaustive_candidate_pool()
+    for prior, current in itertools.permutations(pool, 2):
+        current_wins = select_winner([prior, current]) is current
+        assert current_wins == beats(current, prior)
+        if current_wins:
+            assert classify_restatement(prior, current) == expected_restatement(
+                prior.presence_status, current.presence_status, same_value=True
+            )
+        else:
+            with pytest.raises(ClosedValidationError, match="section 6.2"):
+                classify_restatement(prior, current)
+
+
+@pytest.mark.parametrize("prior_state", STATES)
+@pytest.mark.parametrize("current_state", STATES)
+@pytest.mark.parametrize("same_value", [True, False])
+def test_classify_restatement_for_every_same_instant_state_pair(
+    prior_state: str, current_state: str, same_value: bool
+) -> None:
+    prior = make_row(presence=prior_state, raw="100", obs="observation:o1")
+    current = make_row(
+        presence=current_state, raw="100" if same_value else "101", obs="observation:o2"
+    )
+    assert prior.collected_at_utc == current.collected_at_utc
+    if beats(current, prior):
+        assert classify_restatement(prior, current) == expected_restatement(
+            prior_state, current_state, same_value=same_value
+        )
+    else:
+        with pytest.raises(ClosedValidationError, match="section 6.2"):
+            classify_restatement(prior, current)
 
 
 # ---------------------------------------------------------------------------
@@ -1284,6 +1474,34 @@ def test_constructor_rejects_the_same_violations_without_going_through_json() ->
     for override in bad_overrides:
         with pytest.raises(ClosedValidationError):
             RegressionFixtureV1(**{**kwargs, **override})
+
+
+@pytest.mark.parametrize(
+    ("member", "pinned"),
+    [
+        ("fixture_id", FIXTURE_ID_65X23),
+        ("fixture_role", "regression_only"),
+        ("provider_provenance", "synthetic"),
+        ("registry_transition", "none"),
+        ("capability_promotion", "none"),
+    ],
+)
+def test_pinned_members_reject_str_subclasses(member: str, pinned: str) -> None:
+    kwargs = {
+        "fixture_id": FIXTURE_ID_65X23,
+        "fixture_role": "regression_only",
+        "provider_provenance": "synthetic",
+        "registry_transition": "none",
+        "capability_promotion": "none",
+        "before_registry_snapshot_digest": SNAPSHOT_DIGEST,
+        "after_registry_snapshot_digest": SNAPSHOT_DIGEST,
+        "truth_vectors": EXPECTED_TRUTH_VECTORS,
+        "semantic_refs": FixtureSemanticRefs(AGGREGATE_CONVERSIONS_REF, CANONICAL_LEADS_REF),
+    }
+    wrapped = StrSubclass(pinned)
+    assert wrapped == pinned and type(wrapped) is not str
+    with pytest.raises(ClosedValidationError, match=member):
+        RegressionFixtureV1(**{**kwargs, member: wrapped})
 
 
 def test_truth_vector_and_semantic_refs_validate_on_their_own() -> None:
