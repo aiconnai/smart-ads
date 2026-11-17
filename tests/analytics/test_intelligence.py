@@ -29,7 +29,7 @@ from smart_ads.analytics.intelligence import (
     evaluate_findings,
 )
 from smart_ads.analytics.lattice import classify_restatement, select_winner
-from smart_ads.analytics.policy import SaturationRule, WasteRule
+from smart_ads.analytics.policy import RestatementRule, SaturationRule, WasteRule
 from smart_ads.analytics.policy import (
     AnalysisPolicy,
     EvaluationScope,
@@ -632,15 +632,28 @@ def test_inapplicable_policy_raises_the_policy_code(
 
 
 @pytest.mark.parametrize(
-    ("instant", "end", "verdict"),
+    ("instant", "end", "start"),
     [
-        ("2026-01-01T00:00:00.000000Z", "2026-01-01", "inconclusive"),  # rows are for END
-        ("2027-01-01T00:00:00.000000Z", END, "detected"),
+        ("2026-01-01T00:00:00.000000Z", "2026-01-01", "2025-12-30"),  # lower bound, early window
+        ("2027-01-01T00:00:00.000000Z", END, _day(2)),
     ],
 )
-def test_policy_validity_bounds_are_inclusive(instant: str, end: str, verdict: str) -> None:
-    findings = _run((_waste_rule(),), _waste_rows("1000", "0"), instant=instant, end=end)
-    assert _verdicts(findings) == [("waste", verdict)]
+def test_policy_validity_bounds_are_inclusive(instant: str, end: str, start: str) -> None:
+    rows = _metric(R0, (start, end), SPEND, "1000") + _metric(R0, (start, end), CLICKS, "0")
+    findings = _run((_waste_rule(),), rows, instant=instant, end=end)
+    assert _verdicts(findings) == [("waste", "detected")]
+
+
+def test_curation_window_check_iterates_the_effective_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Restatement "always on" must stay local to _effective_rules: a synthesized rule whose
+    # window sticks out of the curation window has to be rejected like a listed one.
+    synthesized = RestatementRule(
+        rule_id="rule:always_on", lookback_days=31, restatement_kinds=("tombstone",)
+    )
+    monkeypatch.setattr(
+        intelligence, "_effective_rules", lambda context: (*context.policy.rules, synthesized)
+    )
+    _raises("lookback_exceeds_curation", _run, (_waste_rule(),), _waste_rows("1000", "0"), curation=30)
 
 
 # ------------------------------------------------------------------ saturation

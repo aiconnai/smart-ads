@@ -293,11 +293,7 @@ def order_by_winner(
         raise ClosedValidationError(
             "candidates: a winner is defined for one fact_key; found several"
         )
-    by_precedence = tuple(sorted(ordered, key=_winner_precedence))
-    keys = [_winner_precedence(row) for row in by_precedence]
-    if any(left == right for left, right in zip(keys, keys[1:])):
-        raise ClosedValidationError("candidates: two candidates share one winner precedence")
-    return by_precedence
+    return tuple(sorted(ordered, key=_winner_precedence))
 
 
 def select_winner(candidates: Iterable[AnalyticsLandingRow]) -> AnalyticsLandingRow:

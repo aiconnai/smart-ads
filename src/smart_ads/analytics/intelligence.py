@@ -109,7 +109,7 @@ _MetricKey = tuple[str, str, str, str]
 _Window = tuple[str, str]
 # (finding_status, window_start_date, window_end_date, evidence_locators)
 _Outcome = tuple[str, str, str, tuple[ArtifactLocator, ...]]
-_Chains =Mapping[str, tuple[tuple[AnalyticsLandingRow, ...], ...]]
+_Chains = Mapping[str, tuple[tuple[AnalyticsLandingRow, ...], ...]]
 
 
 class IntelligenceError(ClosedValidationError):
@@ -435,10 +435,11 @@ class AnalysisEvidence:
 class EvaluationContext:
     """Policy, scope, explicit instant/window end and the inputs restatement needs.
 
-    `window_end_date` may not follow the UTC date of `evaluation_instant_utc`. The curation
-    window `[curation_anchor_date - (N - 1), curation_anchor_date]`, N being
-    `curation_restatement_lookback_days`, is the section 6.2 window the history was curated over;
-    every RestatementRule window must lie inside it.
+    `window_end_date` may not follow the instant's UTC date (not checked against the inventory
+    date range). Every RestatementRule window must lie inside the section 6.2 curation window
+    `[anchor - (N - 1), anchor]`, N = `curation_restatement_lookback_days`. Anchor and N are caller
+    assertions the wheel cannot verify (no `curation_execution/v1` is modelled), like
+    `independently_validated`; the anchor is not checked against the instant.
     """
 
     policy: AnalysisPolicy
@@ -629,7 +630,8 @@ def _restatement(rule: RestatementRule, resource: str, inputs: _RuleInputs) -> _
     """Successive winners of one fact_key, metric_date in the lookback, restated by a listed kind.
 
     Evidence is the containing artifacts only (metric result and dataset snapshot); the
-    finding_key already names the resource and window.
+    finding_key names resource and window. The history rows are caller-supplied: nothing
+    verifies that they belong to the cited snapshot.
     """
     start, end = _window(inputs.end, rule.lookback_days)
     for chain in inputs.history.get(resource, ()):
@@ -653,10 +655,9 @@ _RULE_EVALUATORS: Final[Mapping[type, Callable[[Any, str, _RuleInputs], _Outcome
 def _effective_rules(context: EvaluationContext) -> tuple[AnalysisRule, ...]:
     """The rules evaluated: exactly the policy's rules.
 
-    Restatement is opt-in: a policy without a RestatementRule yields no restatement finding.
-    Switching restatement to "always on" is local to this function: when no RestatementRule is
-    listed, append a synthesized `RestatementRule(lookback_days=
-    context.curation_restatement_lookback_days, restatement_kinds=RESTATEMENT_KINDS)`.
+    Restatement findings only for the kinds a listed RestatementRule names is a choice the ADR
+    does not fix (open decision). Making it "always on" is local to this function: append a
+    synthesized `RestatementRule(lookback_days=N, restatement_kinds=RESTATEMENT_KINDS)`.
     """
     return context.policy.rules
 
@@ -683,7 +684,7 @@ def _check_curation_window(context: EvaluationContext) -> None:
     drop the mutation block. This raises for now; whether it should instead yield an
     `inconclusive` restatement finding is an open decision for the user.
     """
-    rules = [rule for rule in context.policy.rules if isinstance(rule, RestatementRule)]
+    rules = [rule for rule in _effective_rules(context) if isinstance(rule, RestatementRule)]
     if not rules:
         return
     anchor = parse_iso_date(context.curation_anchor_date, field_name="curation_anchor_date")
