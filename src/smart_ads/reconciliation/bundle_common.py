@@ -157,7 +157,9 @@ def guard_any(code: str, label: str, build: Callable[[], T]) -> T:
     Frozen objects validate once, in ``__post_init__``; a tampered one (a field set
     behind its back with ``object.__setattr__``) can fail in ``to_dict`` or in a
     validator with any exception. At the seam that is a malformed object, not a bug
-    to leak: ``code`` it, keeping the cause.
+    to leak: ``code`` it, keeping the cause. ``MemoryError`` is the process failing,
+    not the object: it propagates. ``RecursionError`` (a deeply nested or cyclic
+    object) is coded.
     """
     try:
         return build()
@@ -165,6 +167,8 @@ def guard_any(code: str, label: str, build: Callable[[], T]) -> T:
         raise
     except ClosedValidationError as exc:
         raise Bundle7BDefectError(code, f"{label}: {exc}") from exc
+    except MemoryError:
+        raise
     except Exception as exc:  # noqa: BLE001 - a tampered object can fail in any way
         raise Bundle7BDefectError(code, f"{label}: {type(exc).__name__}: {exc}") from exc
 

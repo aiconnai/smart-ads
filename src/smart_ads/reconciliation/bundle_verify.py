@@ -1,4 +1,17 @@
-"""``verify_certification_7b_record``: recompute a 7B record from resolved evidence (ADR 5.4)."""
+"""``verify_certification_7b_record``: recompute a 7B record from resolved evidence (ADR 5.4).
+
+Trust limits of the verifier (what is not verified):
+
+* ``wheel_digest`` and the three reference digests are checked for grammar only;
+* the ``gate3_certification_fingerprint`` argument is trusted as the selection's
+  ``certification_fingerprint``: only five of its members are compared with
+  ``ResolvedGate3SelectionState``; the other six (selected_meta_api_version,
+  reference_client_identity_digest, official_source_locators_digest,
+  parser_code_digest, adapter_code_digest, mapping_rules_digest) and
+  ``certification_fingerprint_digest`` are not, since the ADR gives no formula for
+  that digest;
+* ``effect_proof/v1`` contents are not modelled.
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -367,14 +380,7 @@ def verify_certification_7b_record(
     The record and every value object passed in are re-parsed from their wire forms
     first and only the copies are used: a tampered frozen object is rejected as its
     wire form would be (``malformed_member`` for a bare error), never accepted.
-    Not verified: wheel_digest and the three reference digests (grammar only);
-    the gate3_certification_fingerprint argument is trusted as the selection's
-    certification_fingerprint: only five of its members are compared with
-    ResolvedGate3SelectionState; the other six (selected_meta_api_version,
-    reference_client_identity_digest, official_source_locators_digest,
-    parser_code_digest, adapter_code_digest, mapping_rules_digest) and
-    certification_fingerprint_digest are not, since the ADR gives no formula for
-    that digest; effect_proof/v1 contents are not modelled.
+    What is not verified (the trust limits) is listed in the module docstring.
     """
     arguments: dict[str, Any] = {
         "migration_run_context_locator": migration_run_context_locator,

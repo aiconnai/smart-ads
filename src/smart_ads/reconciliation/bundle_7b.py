@@ -19,11 +19,16 @@ No float, clock, I/O or signature verification is involved.
 Frozen objects validate once, in ``__post_init__``, and ``object.__setattr__``
 bypasses that, so every public function that consumes a value object (the verifier,
 ``reconcile_7b_fact_sets``, ``check_native_request``, ``require_same_fingerprint``,
-``select_fact_evidence``, ``resolve_fact_evidence`` and the ``compute_*`` /
-``expected_pair_universe`` digest helpers) re-parses it from its wire form first,
+``select_fact_evidence``, ``resolve_fact_evidence``, ``compute_canonical_fact_key_digest``,
+``compute_logical_fact_reconciliation_digest`` and the universe functions
+``compute_row_universe``, ``compute_row_universe_digest``, ``compute_pair_universe``
+and ``expected_pair_universe``) re-parses it from its wire form first,
 ``from_dict(to_dict())``, and uses only the copy. A tampered object is rejected exactly
 as its wire form would be; a bare error from ``to_dict`` or ``from_dict`` is
-``malformed_member``. Foreign objects are re-parsed through their own ``from_dict``;
+``malformed_member``, except ``MemoryError``, which propagates. The copy's own wire form
+must also canonicalize (RFC 8785), so a value that is no JSON value is
+``malformed_member`` too (a ``collection_result/v1`` is canonicalized once, for its
+locator). Foreign objects are re-parsed through their own ``from_dict``;
 ``ResolvedGate3SelectionState`` has none and is rebuilt with its own constructor.
 ``artifact_locator_for`` and ``collection_result_locator`` only address a
 serialization (coded errors, no re-parse). Constructors and methods of an already
@@ -41,7 +46,19 @@ Not verified, because no resolved evidence for them is supplied:
   mapping_rules_digest) and ``certification_fingerprint_digest`` are not, since
   the ADR gives no formula for that digest;
 * ``effect_proof/v1`` contents are not modelled; only the two proof locators,
-  their distinctness and their result locators are checked.
+  their distinctness and their result locators are checked;
+* the re-parse carries values by reference, it does not rebuild them from bytes. A
+  ``str`` subclass whose ``__eq__`` and ``__ne__`` claim equality with everything while
+  its content differs therefore survives it, and every check that compares such a value
+  with ``==`` or ``!=`` accepts it: the verifier accepts a record tampered that way in
+  the sha256 members it only compares (and in ``gate3_selection.schema_bundle_digest``).
+  No JSON input can produce such an object (a parser yields exact ``str``), and the
+  constructors accept it too (``ReconciliationRowKey(resource_level=...)`` and the others
+  validate by regex and ``!=``). Closing it means re-parsing from canonical bytes,
+  ``from_dict(loads(canonicalize_jcs(to_dict())))``, which changes the codes of some
+  tampered cases and would accept an ``int`` subclass for ``row_count``: an open
+  decision, left as implemented. A non-str always-equal object is a different case
+  and is rejected (``malformed_member``).
 
 Choices the ADR does not fix (open decisions, kept as implemented):
 

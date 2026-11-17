@@ -10,9 +10,12 @@ The oracle of every sweep is that wire form, not the implementation under test.
 """
 from __future__ import annotations
 
+import collections.abc
 import contextlib
 import dataclasses
 import hashlib
+import inspect
+import typing
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -147,7 +150,8 @@ def run(call: Callable[[], object]) -> Outcome:
     try:
         call()
     except Bundle7BDefectError as exc:
-        assert exc.code in b7.DEFECT_CODES
+        if exc.code not in b7.DEFECT_CODES:  # explicit: an assert is stripped under python -O
+            raise AssertionError(f"not a closed defect code: {exc.code!r}") from exc
         return ("coded", exc.code)
     except Exception as exc:  # noqa: BLE001 - classifying a leak is the point
         return ("leak", type(exc).__name__)
@@ -166,13 +170,9 @@ def rebuild(obj: Any) -> Any:
 def wire_outcome(
     root: Any, entry: Callable[[Any], object], clean: Any, valid: Outcome, *, lying: bool = False
 ) -> Outcome:
-    """What the entry point must do with ``root``: what it does with its wire form.
-
-    A wire form equal to the clean object's behaves as the valid object (``valid``);
-    any other parse is run through the entry point, which then sees a clean object.
-    ``lying``: a tampered value claims equality with everything (``AlwaysEq``), so equality
-    proves nothing and the wire form must canonicalize, or it is no wire form at all.
-    """
+    """What the entry point must do with ``root``: what it does with its wire form. One equal
+    to the clean object's behaves as the valid object, any other is run through the entry
+    point. ``lying`` (``AlwaysEq``): equality proves nothing, the wire form must canonicalize."""
     try:
         fresh = rebuild(root)
     except Bundle7BDefectError as exc:
@@ -505,8 +505,72 @@ def test_public_function_sweep(parts: dict[str, Any], name: str) -> None:
     assert_no_misses(sweep(root, entry))
 
 
+def _mentions_value_object(annotation: object) -> bool:
+    """A frozen dataclass anywhere in the annotation (a callable's own parameters excluded)."""
+    if isinstance(annotation, type):
+        return dataclasses.is_dataclass(annotation)
+    if typing.get_origin(annotation) is collections.abc.Callable:
+        return False
+    return any(_mentions_value_object(arg) for arg in typing.get_args(annotation))
+
+
+def public_functions_taking_value_objects() -> set[str]:
+    """Functions of the facade's ``__all__`` with a parameter annotated by a value object."""
+    found = set()
+    for name in b7.__all__:
+        function = getattr(b7, name)
+        if inspect.isfunction(function):
+            hints = typing.get_type_hints(function)
+            hints.pop("return", None)
+            if any(_mentions_value_object(hint) for hint in hints.values()):
+                found.add(name)
+    return found
+
+
+# Swept by name above, plus the verifier and reconcile (own sweeps) and the locator
+# primitives (``test_locator_primitives_never_leak_a_bare_error``).
+SWEPT_FUNCTIONS = {name.split("(")[0] for name in CASE_NAMES} | {
+    "verify_certification_7b_record",
+    "reconcile_7b_fact_sets",
+    "collection_result_locator",
+}
+
+
 def test_every_public_function_taking_value_objects_is_swept(parts: dict[str, Any]) -> None:
+    """Derived from the facade: a new public function with a value-object parameter and no
+    sweep fails here, and so does a sweep for a function that is no longer public."""
     assert tuple(_cases(parts)) == CASE_NAMES
+    assert public_functions_taking_value_objects() == SWEPT_FUNCTIONS
+    assert SWEPT_FUNCTIONS | {"artifact_locator_for"} <= set(b7.__all__)
+
+
+def _raising_key(exc_type: type[BaseException]) -> ReconciliationRowKey:
+    """A key whose ``to_dict`` raises ``exc_type``: a stand-in for a tampered object."""
+
+    class Raising(ReconciliationRowKey):
+        def to_dict(self) -> dict[str, Any]:
+            raise exc_type()
+
+    return Raising(**row_key(REF_A).to_dict())
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        b7.compute_canonical_fact_key_digest,
+        lambda key: b7.compute_row_universe([key]),
+        lambda key: b7.artifact_locator_for("smart_ads/tolerance_profile/v1", key),
+    ],
+    ids=["key_digest", "row_universe", "artifact_locator_for"],
+)
+def test_a_recursion_error_is_coded_and_a_memory_error_is_not_swallowed(
+    call: Callable[[Any], object],
+) -> None:
+    assert run(lambda: call(_raising_key(RecursionError))) in {
+        ("coded", "malformed_member"), ("coded", "malformed_argument"),
+    }
+    with pytest.raises(MemoryError):
+        call(_raising_key(MemoryError))
 
 
 WRONG_CLASS_CALLS: tuple[Callable[[dict[str, Any]], object], ...] = (
@@ -514,7 +578,7 @@ WRONG_CLASS_CALLS: tuple[Callable[[dict[str, Any]], object], ...] = (
     lambda p: b7.select_fact_evidence(p["result"], "x"),  # type: ignore[arg-type]
     lambda p: b7.resolve_fact_evidence("x", p["result"]),  # type: ignore[arg-type]
     lambda p: b7.resolve_fact_evidence(p["selector"], "x"),  # type: ignore[arg-type]
-    lambda p: b7.require_same_fingerprint("x", p["fingerprint"], label="t"),  # type: ignore[arg-type]
+    lambda p: b7.require_same_fingerprint("x", p["fingerprint"], label="t"),  # type: ignore
     lambda p: b7.compute_canonical_fact_key_digest("x"),  # type: ignore[arg-type]
     lambda p: b7.compute_row_universe_digest(("x",)),  # type: ignore[arg-type]
     lambda p: b7.expected_pair_universe(("x",)),  # type: ignore[arg-type]
@@ -555,7 +619,8 @@ def _always_eq_cases(
         "check_native_request(query.resource_level)": (
             query, "resource_level", lambda: _check_native(parts["projection"], query, parts)),
         "check_native_request(projection.attribution_omission_state)": (
-            projection, "attribution_omission_state", lambda: _check_native(projection, canonical_query(), parts)),
+            projection, "attribution_omission_state",
+            lambda: _check_native(projection, canonical_query(), parts)),
         "compute_canonical_fact_key_digest": (
             key, "resource_level", lambda: b7.compute_canonical_fact_key_digest(key)),
         "compute_row_universe": (
@@ -595,9 +660,8 @@ ALWAYS_EQ_NAMES = (
 def test_an_always_equal_object_is_a_malformed_member_not_a_bare_error(
     parts: dict[str, Any], world: World, record: b7.Certification7BRecord, name: str
 ) -> None:
-    """Not a str, ``!=`` always False: it passes ``from_dict(to_dict())``, is carried by
-    reference and is no JSON value, so a later canonicalization used to raise a plain
-    ``ClosedValidationError`` (or, for the record, nothing at all)."""
+    """It passes ``from_dict(to_dict())`` and is no JSON value: a later canonicalization used
+    to raise a plain ``ClosedValidationError`` (for the record, nothing at all)."""
     owner, field, call = _always_eq_cases(parts, world, record)[name]
     assert run(call) == ("ok", None)
     with hostile_set(owner, field, AlwaysEq()):
@@ -612,11 +676,8 @@ def test_every_always_equal_case_is_named(
 
 
 def test_locator_primitives_never_leak_a_bare_error(parts: dict[str, Any]) -> None:
-    """``artifact_locator_for`` and ``collection_result_locator`` only address a serialization.
-
-    They do not re-validate (a round trip costs several times the digest they wrap); a
-    tampered object that cannot be serialized comes out coded, never as a bare error.
-    """
+    """They only address a serialization and do not re-validate (a round trip costs several
+    times the digest they wrap): one that cannot be serialized is coded, never a bare error."""
     rec = copy_of(parts["reconciliations"][0])
     result = copy_of(parts["result"])
     leaks: list[str] = []
