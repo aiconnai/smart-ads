@@ -435,6 +435,8 @@ def test_verifier_binds_each_evidence_member_of_the_record(
         # A date outside the query window must hold on both sides for a consistent record.
         ({"metric_date": "2026-11-01"}, {"metric_date": "2026-11-01"},
          "fact_outside_query_window"),
+        ({"metric_date": "2026-11-09"}, {"metric_date": "2026-11-09"},
+         "fact_outside_query_window"),
         ({"binding_ref": "binding:other"}, {}, "fact_binding_mismatch"),
         ({}, {"binding_ref": "binding:other"}, "fact_binding_mismatch"),
         ({"account_ref": "account:someone-else"}, {}, "fact_account_mismatch"),
@@ -448,6 +450,26 @@ def test_verifier_requires_every_fact_inside_the_admitted_query(
         cand_facts=facts_for(CANDIDATE_VALUES, **cand_extra),
         ref_facts=facts_for(BASE_VALUES, side="reference", **ref_extra),
         query_checked=False,
+    )
+    assert verify_defect(outside) == code
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ({"metric_date": "2026-11-09"}, "fact_outside_query_window"),
+        ({"account_ref": "account:someone-else"}, "fact_account_mismatch"),
+    ],
+)
+def test_verifier_checks_facts_of_non_required_metrics_too(
+    overrides: dict[str, str], code: str
+) -> None:
+    # The extra reach fact is outside U7 x required_metrics; the record covers the six
+    # required pairs, so only the per-fact query check can reject it.
+    outside = build_world(
+        cand_facts=facts_for(CANDIDATE_VALUES) + [fact(REF_A, "metric:reach_v1", "9", **overrides)],
+        query_checked=False,
+        require_verified=False,
     )
     assert verify_defect(outside) == code
 

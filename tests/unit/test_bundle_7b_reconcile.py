@@ -240,24 +240,37 @@ def test_reconcile_rejects_malformed_binding_arguments() -> None:
         assert code_of(excinfo) == "malformed_argument"
 
 
+REACH = "metric:reach_v1"
+# (overrides, applied only to one extra non-required-metric fact?, expected code)
 OUT_OF_QUERY_CASES = [
-    ({"metric_date": "2026-11-01"}, "fact_outside_query_window"),
-    ({"metric_date": "2026-11-11"}, "fact_outside_query_window"),
-    ({"binding_ref": "binding:other"}, "fact_binding_mismatch"),
-    ({"account_ref": "account:someone-else"}, "fact_account_mismatch"),
+    ({"metric_date": "2026-11-01"}, False, "fact_outside_query_window"),
+    ({"metric_date": "2026-11-09"}, False, "fact_outside_query_window"),
+    ({"metric_date": "2026-11-11"}, False, "fact_outside_query_window"),
+    ({"binding_ref": "binding:other"}, False, "fact_binding_mismatch"),
+    ({"account_ref": "account:someone-else"}, False, "fact_account_mismatch"),
+    ({"metric_date": "2026-11-09"}, True, "fact_outside_query_window"),
+    ({"account_ref": "account:someone-else"}, True, "fact_account_mismatch"),
 ]
 
 
-@pytest.mark.parametrize(("overrides", "code"), OUT_OF_QUERY_CASES)
+def side_facts_with(
+    values: dict[tuple[str, str], str], side: str, overrides: dict[str, str], extra_only: bool
+) -> list[Any]:
+    if not extra_only:
+        return facts_for(values, side=side, **overrides)
+    return facts_for(values, side=side) + [fact(REF_A, REACH, "9", side=side, **overrides)]
+
+
+@pytest.mark.parametrize(("overrides", "extra_only", "code"), OUT_OF_QUERY_CASES)
 @pytest.mark.parametrize("side", ["candidate", "reference"])
 def test_reconcile_requires_every_fact_inside_the_admitted_query(
-    side: str, overrides: dict[str, str], code: str
+    side: str, overrides: dict[str, str], extra_only: bool, code: str
 ) -> None:
     cand_extra = overrides if side == "candidate" else {}
     ref_extra = overrides if side == "reference" else {}
     cand, ref = results(
-        cand_facts=facts_for(CANDIDATE_VALUES, **cand_extra),
-        ref_facts=facts_for(BASE_VALUES, side="reference", **ref_extra),
+        cand_facts=side_facts_with(CANDIDATE_VALUES, "candidate", cand_extra, extra_only),
+        ref_facts=side_facts_with(BASE_VALUES, "reference", ref_extra, extra_only),
     )
     with pytest.raises(Bundle7BDefectError) as excinfo:
         reconcile(cand, ref)

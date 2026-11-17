@@ -147,6 +147,12 @@ OPAQUE_REF = "opaque-driver-contract:" + sha("3")
         # The standalone opaque identity is exactly a sha256 digest.
         ("/mcp/tools/get_insights", "opaque-driver-contract:pipeboard-v1", "malformed_member"),
         ("/mcp/tools/get_insights", "opaque-driver-contract:sha256:ABC", "malformed_member"),
+        ("/mcp/tools/get_insights", "opaque-driver-contract:sha256:" + "A" * 64,
+         "malformed_member"),
+        ("/mcp/tools/get_insights", "opaque-driver-contract:sha256:" + "a" * 63,
+         "malformed_member"),
+        ("/mcp/tools/get_insights", "opaque-driver-contract:sha256:" + "a" * 65,
+         "malformed_member"),
     ],
 )
 def test_native_endpoint_version_must_match_its_version_identity(
