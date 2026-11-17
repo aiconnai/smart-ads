@@ -167,6 +167,14 @@ EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
         "smart_ads.analytics.results",
         "smart_ads.reconciliation",
         "smart_ads.reconciliation.bundle_7b",
+        "smart_ads.reconciliation.bundle_common",
+        "smart_ads.reconciliation.bundle_evidence",
+        "smart_ads.reconciliation.bundle_executions",
+        "smart_ads.reconciliation.bundle_native",
+        "smart_ads.reconciliation.bundle_reconcile",
+        "smart_ads.reconciliation.bundle_record",
+        "smart_ads.reconciliation.bundle_universe",
+        "smart_ads.reconciliation.bundle_verify",
         "smart_ads.reconciliation.tolerance",
         "smart_ads.transports",
         "smart_ads.transports.mcp",
@@ -2329,7 +2337,7 @@ def _read_and_validate_wheel_archive(
 
     if derived_modules != EXPECTED_PACKAGED_MODULES:
         raise ValueError(
-            "wheel archive: packaged module set does not match expected 35 modules: "
+            "wheel archive: packaged module set does not match expected 43 modules: "
             f"{sorted(derived_modules)!r}"
         )
 
@@ -2878,7 +2886,7 @@ def _validate_inspection_dict(inspection: dict[str, Any]) -> dict[str, Any]:
         or mods != expected_mods
     ):
         raise ValueError(
-            "inspection.packaged_modules: expected exact sorted 35 packaged modules"
+            "inspection.packaged_modules: expected exact sorted 43 packaged modules"
         )
     return {
         "wheel_digest": whl_digest,
