@@ -147,6 +147,20 @@ METRIC_FIELD_CASES = (
     ("waste", "spend_metric_ref"),
     ("waste", "outcome_metric_ref"),
 )
+# The value type each metric slot requires of a Phase-1 base metric.
+SLOT_VALUE_TYPES = {
+    "spend_metric_ref": "int64_minor_currency",
+    "outcome_metric_ref": "int64_count",
+}
+
+
+def _phase1_refs(value_type: str, *, same: bool) -> tuple[str, ...]:
+    """Phase-1 base metric refs whose value type is (or is not) `value_type`."""
+    return tuple(
+        ref
+        for ref, definition in PHASE1_BASE_METRICS.items()
+        if (definition.value_type == value_type) is same
+    )
 
 CLASS_BY_TYPE = {
     "saturation": pol.SaturationRule,
@@ -706,12 +720,47 @@ def test_metric_ref_parameters_accept_phase1_and_derived_metric_refs(
 ) -> None:
     cls = CLASS_BY_TYPE[rule_type]
     for good in (
-        *PHASE1_BASE_METRICS,
+        *_phase1_refs(SLOT_VALUE_TYPES[field], same=True),
         "metric:aggregate_conversions_v1",
         "metric:canonical_leads_v1",
         "metric:cost_per_click_v12",
     ):
         assert cls.from_dict(_wire(rule_type, **{field: good})).to_dict()[field] == good
+
+
+@pytest.mark.parametrize(("rule_type", "field"), METRIC_FIELD_CASES)
+def test_phase1_base_metric_of_the_wrong_value_type_rejects_up_front(
+    rule_type: str, field: str
+) -> None:
+    # Spend must be int64_minor_currency and outcome int64_count: a Phase-1 base metric of the
+    # other type is malformed policy evidence whatever data exists, in wire and constructor form.
+    cls = CLASS_BY_TYPE[rule_type]
+    wrong = _phase1_refs(SLOT_VALUE_TYPES[field], same=False)
+    assert wrong
+    for ref in wrong:
+        wire = _wire(rule_type, **{field: ref})
+        with rejects("unsupported_value"):
+            cls.from_dict(wire)
+        with rejects("unsupported_value"):
+            cls(**_kwargs(rule_type, **{field: ref}))
+        with rejects("unsupported_value"):
+            pol.rule_from_dict(wire)
+        rules = [wire if kind == rule_type else _wire(kind) for kind in SORTED_RULE_TYPES]
+        with rejects("unsupported_value"):
+            pol.AnalysisPolicy.from_dict(_policy_wire(rules=rules))
+
+
+def test_only_saturation_and_waste_carry_metric_refs() -> None:
+    # Stalled delivery is fixed to the impressions base metric; restatement names no metric.
+    carrying = {
+        rule_type
+        for rule_type, cls in CLASS_BY_TYPE.items()
+        if any(f.name.endswith("_metric_ref") for f in dataclasses.fields(cls))
+    }
+    assert carrying == {"saturation", "waste"}
+    assert {(rule_type, field) for rule_type, field in METRIC_FIELD_CASES} == {
+        (rule_type, field) for rule_type in carrying for field in SLOT_VALUE_TYPES
+    }
 
 
 def test_metric_ref_grammar_is_pinned_to_the_base_metric_definition_regex() -> None:
@@ -1314,7 +1363,7 @@ THRESHOLD_MUTATIONS = (
     ("saturation", "min_spend_growth", "0.200001"),
     ("saturation", "max_outcome_growth", "0.050001"),
     ("saturation", "min_baseline_spend_minor", "10001"),
-    ("saturation", "spend_metric_ref", "metric:clicks_v1"),
+    ("saturation", "spend_metric_ref", "metric:media_spend_v1"),
     ("saturation", "outcome_metric_ref", "metric:impressions_v1"),
     ("waste", "window_days", 15),
     ("waste", "min_spend_minor", "50001"),

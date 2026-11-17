@@ -5,7 +5,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields
 import re
 from types import MappingProxyType
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Final, Self, TypeVar
 
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES,
@@ -16,7 +16,7 @@ from smart_ads.contracts.jcs import (
     p1_content_digest as _p1_content_digest,
     p1_preimage as _p1_preimage,
 )
-from smart_ads.contracts.numerics import MAX_INT64
+from smart_ads.contracts.numerics import MAX_INT64, PHASE1_BASE_METRICS
 from smart_ads.contracts.scalars import (
     ClosedValidationError,
     parse_timestamp_utc_micros,
@@ -63,7 +63,8 @@ POLICY_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "duplicate_rule_id",  # two rules share a rule_id
         "duplicate_restatement_kind",  # a restatement kind is repeated
         "unsorted",  # rules or restatement_kinds not in raw UTF-8 byte order
-        "unsupported_value",  # well-formed value outside a closed set (Phase-1 scope, kinds)
+        # well-formed value outside a closed set (Phase-1 scope, kinds, base-metric value type)
+        "unsupported_value",
         "invalid_validity_window",  # valid_from_utc is not strictly before valid_until_utc
         "invalid_integrity",  # integrity block malformed, partial or in the wrong state
         "content_digest_mismatch",  # signed integrity.content_digest != recomputed P1 digest
@@ -79,6 +80,9 @@ _DECIMAL6_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]*)\.[0-9]{6}\
 # int64-valued thresholds and the integer part of decimal6 ratios are bounded explicitly (digit
 # count first, then value) so validity never depends on the interpreter's int/str digit limit.
 _MAX_INT64_DIGITS: Final[int] = len(str(MAX_INT64))
+# Value types a Phase-1 base metric must carry in the spend and outcome slots of a rule.
+_MONEY_VALUE_TYPE: Final[str] = "int64_minor_currency"
+_COUNT_VALUE_TYPE: Final[str] = "int64_count"
 # Phase-1 closed scope values, identical to the ones `canonical_query_contract/v1` enforces.
 _PHASE1_SCOPE_VALUES: Final[tuple[tuple[str, str], ...]] = (
     ("resource_level", "campaign"),
@@ -86,6 +90,7 @@ _PHASE1_SCOPE_VALUES: Final[tuple[tuple[str, str], ...]] = (
     ("currency", "BRL"),
 )
 _Check = Callable[..., Any]
+_T = TypeVar("_T")
 
 
 class _CodedError(ClosedValidationError):
@@ -121,6 +126,34 @@ class PolicyNotApplicableError(_CodedError):
 
 def _fail(code: str, detail: str) -> PolicyValidationError:
     return PolicyValidationError(code, detail)
+
+
+# Raised by a shared parser, or by `to_dict()`, on an object whose frozen fields were rebound after
+# construction (object.__setattr__); ClosedValidationError is a ValueError, so it is matched first.
+_RAW_ERRORS: Final[tuple[type[Exception], ...]] = (
+    AttributeError, IndexError, KeyError, TypeError, ValueError,
+)
+_Error = Callable[[str, str], ClosedValidationError]
+
+
+def _recheck(error: _Error, code: str, fn: Callable[..., _T], *args: Any) -> _T:
+    """Run `fn(*args)` at the evaluator seam without letting a bare exception out.
+
+    A typed rejection propagates; a plain ClosedValidationError or a raw error becomes `error(code)`.
+    """
+    try:
+        return fn(*args)
+    except ClosedValidationError as exc:
+        if type(exc) is not ClosedValidationError:
+            raise
+        raise error(code, str(exc)) from exc
+    except _RAW_ERRORS as exc:
+        raise error(code, f"{type(exc).__name__}: {exc}") from exc
+
+
+def _reparsed(error: _Error, code: str, cls: Any, value: Any) -> Any:
+    """`cls.from_dict(value.to_dict())` under `_recheck`; the integrity block is kept."""
+    return _recheck(error, code, lambda: cls.from_dict(value.to_dict()))
 
 
 def _require_str(value: object, field_name: str) -> str:
@@ -204,6 +237,29 @@ def _metric_ref(value: object, *, field_name: str) -> str:
     return text
 
 
+def _typed_metric_ref(value_type: str) -> _Check:
+    """A metric ref check that also requires a Phase-1 base metric to carry `value_type`.
+
+    A ref outside PHASE1_BASE_METRICS cannot be typed here; the evaluator types it by its rows.
+    """
+
+    def check(value: object, *, field_name: str) -> str:
+        text = _metric_ref(value, field_name=field_name)
+        base = PHASE1_BASE_METRICS.get(text)
+        if base is not None and base.value_type != value_type:
+            raise _fail(
+                "unsupported_value",
+                f"{field_name}: {text!r} is {base.value_type}, expected {value_type}",
+            )
+        return text
+
+    return check
+
+
+_spend_metric_ref: Final[_Check] = _typed_metric_ref(_MONEY_VALUE_TYPE)
+_outcome_metric_ref: Final[_Check] = _typed_metric_ref(_COUNT_VALUE_TYPE)
+
+
 def _restatement_kinds(values: object, *, field_name: str) -> tuple[str, ...]:
     if not isinstance(values, (list, tuple)):
         raise _fail("invalid_type", f"{field_name}: expected array, got {type(values).__name__}")
@@ -275,8 +331,8 @@ class SaturationRule(_Rule):
     RULE_TYPE: ClassVar[str] = RULE_TYPE_SATURATION
     CHECKS: ClassVar[tuple[tuple[str, _Check], ...]] = (
         ("window_days", _day_count),
-        ("spend_metric_ref", _metric_ref),
-        ("outcome_metric_ref", _metric_ref),
+        ("spend_metric_ref", _spend_metric_ref),
+        ("outcome_metric_ref", _outcome_metric_ref),
         ("min_spend_growth", _decimal6),
         ("max_outcome_growth", _decimal6),
         ("min_baseline_spend_minor", _uint64),
@@ -303,8 +359,8 @@ class WasteRule(_Rule):
     RULE_TYPE: ClassVar[str] = RULE_TYPE_WASTE
     CHECKS: ClassVar[tuple[tuple[str, _Check], ...]] = (
         ("window_days", _day_count),
-        ("spend_metric_ref", _metric_ref),
-        ("outcome_metric_ref", _metric_ref),
+        ("spend_metric_ref", _spend_metric_ref),
+        ("outcome_metric_ref", _outcome_metric_ref),
         ("min_spend_minor", _uint64),
         ("max_outcome_count", _uint64),
     )

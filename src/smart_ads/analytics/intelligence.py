@@ -14,16 +14,14 @@ not carry is absent, never zero.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import datetime
 from itertools import pairwise
 import re
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, TypeVar
 
-from smart_ads.analytics.cells import (
-    ANALYSIS_EXECUTION_TYPE, ANALYSIS_RESULT_TYPE, DATASET_SNAPSHOT_TYPE,
-)
+from smart_ads.analytics.cells import ANALYSIS_EXECUTION_TYPE, ANALYSIS_RESULT_TYPE, DATASET_SNAPSHOT_TYPE
 from smart_ads.analytics.formulas import divide_count_by_count, divide_money_by_money
 from smart_ads.analytics.lattice import (
     classify_input_state, classify_restatement, order_by_winner, order_candidates,
@@ -31,19 +29,17 @@ from smart_ads.analytics.lattice import (
 from smart_ads.analytics.policy import (
     RULE_TYPE_RESTATEMENT, RULE_TYPES, AnalysisPolicy, AnalysisRule, EvaluationScope,
     RestatementRule, SaturationRule, StalledDeliveryRule, WasteRule, decimal6_to_micros,
-    require_policy_applicable,
+    PolicyValidationError, require_policy_applicable, _recheck, _reparsed,
 )
 from smart_ads.analytics.results import (
     AnalysisExecution, AnalysisResult, AnalysisResultSchema, ResultProjection,
-    verify_analysis_execution,
+    ResultSetMismatchError, verify_analysis_execution,
 )
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs, jcs_sha256,
     p1_content_digest as _p1_content_digest, p1_preimage as _p1_preimage, self_digest_jcs_sha256,
 )
-from smart_ads.contracts.numerics import (
-    PHASE1_METRIC_NAME_TO_REF, NumericStateRow, validate_numeric_state,
-)
+from smart_ads.contracts.numerics import PHASE1_METRIC_NAME_TO_REF, NumericStateRow, validate_numeric_state
 from smart_ads.contracts.scalars import (
     ClosedValidationError, parse_iso_date, validate_non_empty_str, validate_sha256_prefixed,
     validate_timestamp_utc6,
@@ -65,7 +61,7 @@ INTELLIGENCE_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "schema_mismatch invalid_locator invalid_integrity content_digest_mismatch "
         "finding_digest_mismatch empty duplicate unsorted mutation_blocked_mismatch "
         # bindings between policy, bundle, inventory, scope, instant and signatures
-        "unsigned_artifact policy_locator_mismatch inventory_scope_mismatch "
+        "unsigned_artifact policy_locator_mismatch inventory_scope_mismatch invalid_inventory "
         "lookback_exceeds_curation window_after_instant "
         # the metric-window relation and the restatement history
         "result_columns_mismatch invalid_metric_row duplicate_metric_row metric_type_mismatch "
@@ -127,13 +123,8 @@ def _fail(code: str, detail: str) -> IntelligenceError:
 
 
 def _guard(code: str, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
-    """Run a shared validator; a plain ClosedValidationError becomes `code`, typed ones propagate."""
-    try:
-        return fn(*args, **kwargs)
-    except ClosedValidationError as exc:
-        if type(exc) is not ClosedValidationError:
-            raise
-        raise _fail(code, str(exc)) from exc
+    """Run a shared validator; a plain ClosedValidationError (or raw error) becomes `code`."""
+    return _recheck(_fail, code, lambda: fn(*args, **kwargs))
 
 
 # ---------------------------------------------------------------- closed-value helpers
@@ -167,10 +158,11 @@ def _typed_tuple(values: object, cls: type[_T], label: str) -> tuple[_T, ...]:
 
 
 def _locator(value: object, artifact_type: str | tuple[str, ...], label: str) -> ArtifactLocator:
+    """A copy re-parsed from the locator's wire form, so a rebound member is checked again."""
     allowed = (artifact_type,) if isinstance(artifact_type, str) else artifact_type
     if not isinstance(value, ArtifactLocator) or value.artifact_type not in allowed:
         raise _fail("invalid_locator", f"{label}: expected ArtifactLocator for {allowed!r}")
-    return value
+    return _reparsed(_fail, "invalid_locator", ArtifactLocator, value)
 
 
 def _parse_locator(raw: object, artifact_type: str | None) -> ArtifactLocator:
@@ -244,10 +236,8 @@ def _split_envelope(
         raise _fail("schema_mismatch", f"{label}.$schema: expected {schema!r}")
     if not with_integrity:
         return mapping, None
-    integrity = _guard(
-        "invalid_integrity", P1Integrity.from_dict, mapping["integrity"], require_signed=require_signed
-    )
-    return mapping, integrity
+    raw = mapping["integrity"]
+    return mapping, _guard("invalid_integrity", P1Integrity.from_dict, raw, require_signed=require_signed)
 
 
 def _integrity_type(integrity: object, label: str) -> None:
@@ -422,12 +412,15 @@ class AnalysisEvidence:
     def __post_init__(self) -> None:
         label = "evidence"
         _require(self.execution, AnalysisExecution, f"{label}.execution")
-        results = _typed_tuple(self.resolved_results, AnalysisResult, f"{label}.resolved_results")
-        schemas = _typed_tuple(self.resolved_schemas, AnalysisResultSchema, f"{label}.resolved_schemas")
-        object.__setattr__(self, "resolved_results", results)
-        object.__setattr__(self, "resolved_schemas", schemas)
-        _locator(self.bundle_dataset_snapshot_locator, DATASET_SNAPSHOT_TYPE, f"{label}.snapshot")
-        _locator(self.bundle_analysis_policy_locator, AnalysisPolicy.SCHEMA, f"{label}.policy")
+        snapshot, policy = self.bundle_dataset_snapshot_locator, self.bundle_analysis_policy_locator
+        members = {  # tuples, and locators re-parsed from their wire form
+            "resolved_results": _typed_tuple(self.resolved_results, AnalysisResult, f"{label}.results"),
+            "resolved_schemas": _typed_tuple(self.resolved_schemas, AnalysisResultSchema, f"{label}.schemas"),
+            "bundle_dataset_snapshot_locator": _locator(snapshot, DATASET_SNAPSHOT_TYPE, f"{label}.snapshot"),
+            "bundle_analysis_policy_locator": _locator(policy, AnalysisPolicy.SCHEMA, f"{label}.policy"),
+        }
+        for name, value in members.items():
+            object.__setattr__(self, name, value)
         _strict(self.require_signed, bool, f"{label}.require_signed")
 
 
@@ -644,11 +637,9 @@ def _restatement(rule: RestatementRule, resource: str, inputs: _RuleInputs) -> _
     return None
 
 
-_RULE_EVALUATORS: Final[Mapping[type, Callable[[Any, str, _RuleInputs], _Outcome | None]]] = (
-    MappingProxyType(
-        {WasteRule: _waste, SaturationRule: _saturation, StalledDeliveryRule: _stalled_delivery,
-         RestatementRule: _restatement}
-    )
+_RULE_EVALUATORS: Final[Mapping[type, Callable[[Any, str, _RuleInputs], _Outcome | None]]] = MappingProxyType(
+    {WasteRule: _waste, SaturationRule: _saturation, StalledDeliveryRule: _stalled_delivery,
+     RestatementRule: _restatement}
 )
 
 
@@ -687,9 +678,9 @@ def _check_curation_window(context: EvaluationContext) -> None:
     rules = [rule for rule in _effective_rules(context) if isinstance(rule, RestatementRule)]
     if not rules:
         return
-    anchor = parse_iso_date(context.curation_anchor_date, field_name="curation_anchor_date")
+    anchor = _date(context.curation_anchor_date, "context.curation_anchor_date")
     curation_start, curation_end = _window(anchor, context.curation_restatement_lookback_days)
-    end = parse_iso_date(context.window_end_date, field_name="window_end_date")
+    end = _date(context.window_end_date, "context.window_end_date")
     for rule in rules:
         start, stop = _window(end, rule.lookback_days)
         if start < curation_start or stop > curation_end:
@@ -719,14 +710,9 @@ class _Binding:
 
 def _finding_key(binding: _Binding, rule: AnalysisRule, resource: str, start: str, end: str) -> str:
     identity = {
-        "policy_id": binding.policy.policy_id,
-        "policy_version": binding.policy.policy_version,
-        "rule_id": rule.rule_id,
-        "finding_type": rule.RULE_TYPE,
-        "result_key": binding.result_key,
-        "resource_ref": resource,
-        "window_start_date": start,
-        "window_end_date": end,
+        "policy_id": binding.policy.policy_id, "policy_version": binding.policy.policy_version,
+        "rule_id": rule.rule_id, "finding_type": rule.RULE_TYPE, "result_key": binding.result_key,
+        "resource_ref": resource, "window_start_date": start, "window_end_date": end,
     }
     return "finding:" + jcs_sha256(identity)
 
@@ -746,41 +732,54 @@ def _finding(binding: _Binding, rule: AnalysisRule, resource: str, outcome: _Out
     )
 
 
-def _evaluate(
-    context: EvaluationContext, evidence: AnalysisEvidence
-) -> tuple[AnalysisExecution, tuple[Finding, ...]]:
-    _require(context, EvaluationContext, "context")
-    _require(evidence, AnalysisEvidence, "evidence")
+def _fresh_context(context: object) -> EvaluationContext:
+    """The context rebuilt, its policy, inventory and history rows re-parsed, its scope rebuilt.
+
+    __post_init__ validates once and object.__setattr__ can rebind a field later (lattice.py re-runs
+    the 12-row matrix for the same reason), so the entry points re-check every input they consume;
+    rebuilding the evidence re-parses its locators, and its artifacts are re-parsed to be verified.
+    """
+    shell = _recheck(_fail, "invalid_type", replace, _require(context, EvaluationContext, "context"))
+    policy = _reparsed(PolicyValidationError, "invalid_type", AnalysisPolicy, shell.policy)
+    if any(type(rule) not in _RULE_EVALUATORS for rule in shell.policy.rules):
+        raise _fail("invalid_type", "context.policy.rules: a rule outside the closed rule classes")
+    rows = shell.restatement_history
+    return replace(
+        shell, policy=policy, scope=_recheck(PolicyValidationError, "invalid_type", replace, shell.scope),
+        inventory=_reparsed(_fail, "invalid_inventory", ExpectedResourceInventory, shell.inventory),
+        restatement_history=tuple(_reparsed(_fail, "invalid_history", AnalyticsLandingRow, r) for r in rows),
+    )
+
+
+def _evaluate(context: object, evidence: object) -> tuple[AnalysisExecution, tuple[Finding, ...]]:
+    context = _fresh_context(context)
+    evidence = _recheck(_fail, "invalid_type", replace, _require(evidence, AnalysisEvidence, "evidence"))
     require_policy_applicable(context.policy, context.scope, context.evaluation_instant_utc)
     _check_bindings(context, evidence)
-    execution = verify_analysis_execution(
-        evidence.execution,
-        evidence.resolved_results,
-        evidence.resolved_schemas,
+    execution = _recheck(ResultSetMismatchError, "field_invalid", lambda: verify_analysis_execution(
+        AnalysisExecution.from_dict(evidence.execution.to_dict()),
+        [AnalysisResult.from_dict(result.to_dict()) for result in evidence.resolved_results],
+        [AnalysisResultSchema.from_dict(schema.to_dict()) for schema in evidence.resolved_schemas],
         evidence.bundle_dataset_snapshot_locator,
         require_signed=evidence.require_signed,
-    )
+    ))
     entry = execution.canonical_result_set.entry(context.metrics_result_key)
     resources = tuple(sorted({u.resource_ref for u in context.inventory.expected_resources}))
     _check_history(context, frozenset(resources))
     inputs = _RuleInputs(
         table=_metric_table(entry.result_projection, frozenset(resources), context.scope.currency),
-        end=parse_iso_date(context.window_end_date, field_name="window_end_date"),
+        end=_date(context.window_end_date, "context.window_end_date"),
         currency=context.scope.currency,
         result_locator=entry.result_locator,
         snapshot_locator=evidence.bundle_dataset_snapshot_locator,
         history=_history_chains(context.restatement_history),
     )
-    binding = _Binding(
-        execution.locator(), entry.result_locator, entry.result_key, context.policy, context.policy.locator()
-    )
+    policy = context.policy
+    binding = _Binding(execution.locator(), entry.result_locator, entry.result_key, policy, policy.locator())
     findings = []
     for rule in _effective_rules(context):
-        evaluator = _RULE_EVALUATORS.get(type(rule))
-        if evaluator is None:
-            raise _fail("invalid_type", f"rule {rule.rule_id!r}: {type(rule).__name__} is not closed")
         for resource in resources:
-            outcome = evaluator(rule, resource, inputs)
+            outcome = _RULE_EVALUATORS[type(rule)](rule, resource, inputs)
             if outcome is not None:
                 findings.append(_finding(binding, rule, resource, outcome))
     return execution, tuple(sorted(findings, key=lambda f: f.finding_key.encode("utf-8")))

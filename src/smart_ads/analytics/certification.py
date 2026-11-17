@@ -5,7 +5,7 @@ This module imports from `smart_ads.analytics.intelligence`; never the reverse.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, ClassVar, Final
 
 from smart_ads.analytics.formulas import (
@@ -17,6 +17,7 @@ from smart_ads.analytics.intelligence import (
     _P1Artifact, _parse_locator, _require, _sorted_unique_locators, _split_envelope, _strict,
     _typed_tuple, _with_integrity,
 )
+from smart_ads.analytics.policy import _recheck, _reparsed
 from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs
 
 CERTIFICATION_RECORD_SCHEMA: Final[str] = "smart_ads/certification_record/v1"
@@ -127,6 +128,27 @@ def _without_integrity(envelope: dict[str, Any]) -> bytes:
     return canonicalize_jcs({key: value for key, value in envelope.items() if key != "integrity"})
 
 
+def _identical(given: object, fresh: object) -> bool:
+    """Exact types and equal values at every depth (dataclass members and tuple elements)."""
+    if type(given) is not type(fresh):
+        return False
+    if isinstance(given, tuple):
+        return len(given) == len(fresh) and all(map(_identical, given, fresh))  # type: ignore[arg-type]
+    if is_dataclass(given):
+        return all(_identical(getattr(given, f.name), getattr(fresh, f.name)) for f in fields(given))
+    return given == fresh
+
+
+def _fresh_inputs(inputs: _CertificationInputs) -> tuple[AttestedCertificationInput, ...]:
+    """Each attested input, and its CertificationInput, re-constructed so rebound fields are checked."""
+    def fresh(item: AttestedCertificationInput) -> AttestedCertificationInput:
+        status = replace(item.certification_input)  # CertificationInput raises FormulaGraphError
+        return AttestedCertificationInput(status, item.independently_validated)
+
+    items = _typed_tuple(inputs, AttestedCertificationInput, "certification_inputs")
+    return tuple(_recheck(_fail, "invalid_type", fresh, item) for item in items)
+
+
 def build_certification_record(
     context: EvaluationContext,
     evidence: AnalysisEvidence,
@@ -140,22 +162,31 @@ def build_certification_record(
     `findings` may carry integrity blocks (finalized when `evidence.require_signed`); everything
     but integrity must equal the recomputation byte for byte, in `finding_key` order. The record
     binds the supplied envelopes' locators and, as `output_digest`, the verified execution's
-    `canonical_result_digest`.
+    `canonical_result_digest`. Every argument is checked again first (see `_fresh_context`):
+    supplied findings and `integrity` are re-parsed from their wire form, attested inputs
+    re-constructed.
     """
     execution, expected = _evaluate(context, evidence)
-    supplied = _typed_tuple(findings, Finding, "findings")
+    supplied = tuple(
+        _reparsed(_fail, "invalid_type", Finding, finding)
+        for finding in _typed_tuple(findings, Finding, "findings")
+    )
     if evidence.require_signed and not all(_is_signed(finding.integrity) for finding in supplied):
         raise _fail("unsigned_artifact", "findings must carry finalized P1 signatures")
     if [_without_integrity(f.to_dict()) for f in supplied] != [
         _without_integrity(f.to_dict()) for f in expected
     ]:
         raise _fail("findings_mismatch", "supplied findings differ from the recomputed findings")
+    _integrity_type(integrity, "integrity")
+    checked = None if integrity is None else _reparsed(_fail, "invalid_integrity", P1Integrity, integrity)
+    if not _identical(integrity, checked):  # to_dict() drops a partial signature state
+        raise _fail("invalid_integrity", "integrity is not the block its wire form parses to")
     return AnalyticalCertificationRecord(
         finding_locators=_sorted_unique_locators(finding.locator() for finding in supplied),
-        derived_certification_status=_derive_certification_status(certification_inputs),
+        derived_certification_status=_derive_certification_status(_fresh_inputs(certification_inputs)),
         mutation_recommendations_blocked=any(f.mutation_recommendation_blocked for f in supplied),
         output_digest=execution.canonical_result_set.canonical_result_digest,
-        integrity=integrity,
+        integrity=checked,
     )
 
 
@@ -171,14 +202,19 @@ def verify_certification_record(
     Everything but `integrity` must match: finding locators, derived status, the blocking flag
     (a record that certifies a blocking finding with `mutation_recommendations_blocked: false`
     is rejected) and `output_digest`. The record's own signed digest was already checked when it
-    was constructed. With `evidence.require_signed` the record must be signed too.
+    was constructed. With `evidence.require_signed` the record must be signed too. The object
+    returned is the one supplied, so it must be exactly what its wire form re-parses to: same
+    types and values at every depth.
     """
     _require(record, AnalyticalCertificationRecord, "record")
-    _require(evidence, AnalysisEvidence, "evidence")
-    if evidence.require_signed and not _is_signed(record.integrity):
+    evidence = _recheck(_fail, "invalid_type", replace, _require(evidence, AnalysisEvidence, "evidence"))
+    fresh = _reparsed(_fail, "invalid_type", AnalyticalCertificationRecord, record)
+    if not _identical(record, fresh):
+        raise _fail("invalid_type", "certification_record is not the object its wire form parses to")
+    if evidence.require_signed and not _is_signed(fresh.integrity):
         raise _fail("unsigned_artifact", "certification_record must carry a finalized P1 signature")
     expected = build_certification_record(context, evidence, findings, certification_inputs)
-    if _without_integrity(record.to_dict()) != _without_integrity(expected.to_dict()):
+    if _without_integrity(fresh.to_dict()) != _without_integrity(expected.to_dict()):
         raise _fail("record_mismatch", "certification_record differs from the recomputed record")
     return record
 
