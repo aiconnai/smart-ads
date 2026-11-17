@@ -1801,6 +1801,69 @@ def test_applicability_does_not_depend_on_rule_parameters() -> None:
     )
 
 
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+def test_applicability_revalidates_tampered_policy_and_scope() -> None:
+    bad_ts = _policy()
+    object.__setattr__(bad_ts.validity, "valid_from_utc", "bad")
+    with rejects("invalid_grammar"):
+        pol.policy_applicability_code(bad_ts, _eval_scope(), INSIDE_WINDOW)
+    with rejects("invalid_grammar"):
+        pol.require_policy_applicable(bad_ts, _eval_scope(), INSIDE_WINDOW)
+
+    null_validity = _policy()
+    object.__setattr__(null_validity, "validity", None)
+    with rejects("invalid_type"):
+        pol.policy_applicability_code(null_validity, _eval_scope(), INSIDE_WINDOW)
+
+    inverted_validity = _policy()
+    object.__setattr__(
+        inverted_validity.validity, "valid_from_utc", inverted_validity.validity.valid_until_utc
+    )
+    with rejects("invalid_validity_window"):
+        pol.policy_applicability_code(inverted_validity, _eval_scope(), INSIDE_WINDOW)
+
+    empty_rules = _policy()
+    object.__setattr__(empty_rules, "rules", ())
+    with rejects("empty"):
+        pol.policy_applicability_code(empty_rules, _eval_scope(), INSIDE_WINDOW)
+
+    bad_scope = _eval_scope()
+    object.__setattr__(bad_scope, "currency", "usd")
+    with rejects("invalid_grammar"):
+        pol.policy_applicability_code(_policy(), bad_scope, INSIDE_WINDOW)
+
+    deleted_scope = _eval_scope()
+    object.__delattr__(deleted_scope, "tenant_ref")
+    with rejects("invalid_type"):
+        pol.require_policy_applicable(_policy(), deleted_scope, INSIDE_WINDOW)
+
+
+def test_reparsed_rejects_partial_p1_integrity_and_always_eq_locators() -> None:
+    signed = pol.AnalysisPolicy.from_dict(_signed_wire(_policy_wire()), require_signed=True)
+    assert signed.integrity is not None
+    object.__setattr__(signed.integrity, "signature_base64", None)
+    with rejects("invalid_type"):
+        pol.policy_applicability_code(signed, _eval_scope(), INSIDE_WINDOW)
+
+    bad_reg_loc = ArtifactLocator(
+        "smart_ads/key_authorization_registry/v1",
+        "sha256:" + "c" * 64,
+        store_kind=_AlwaysEq(),  # type: ignore[arg-type]
+        object_ref="cell-object:sha256:" + "c" * 64,
+    )
+    bad_unsigned = P1Integrity(
+        key_id="key:ed25519:" + "a" * 64,
+        key_registry_snapshot_locator=bad_reg_loc,
+    )
+    with_always_eq = dataclasses.replace(_policy(), integrity=bad_unsigned)
+    with rejects("invalid_type"):
+        pol.policy_applicability_code(with_always_eq, _eval_scope(), INSIDE_WINDOW)
+
+
 # --------------------------------------------------------------------------------------
 # Public API surface
 # --------------------------------------------------------------------------------------

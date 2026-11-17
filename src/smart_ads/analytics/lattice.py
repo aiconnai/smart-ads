@@ -228,6 +228,13 @@ def build_derived_row(
 # Section 6.2: deterministic candidate ordering and winner for one fact_key
 # ---------------------------------------------------------------------------
 _TOMBSTONE_PRESENCE: Final[str] = "retracted_tombstone"
+_RAW_ERRORS: Final[tuple[type[Exception], ...]] = (
+    AttributeError,
+    IndexError,
+    KeyError,
+    TypeError,
+    ValueError,
+)
 
 
 def _require_landing_row(value: object, *, label: str) -> AnalyticsLandingRow:
@@ -235,6 +242,15 @@ def _require_landing_row(value: object, *, label: str) -> AnalyticsLandingRow:
         raise ClosedValidationError(
             f"{label}: expected AnalyticsLandingRow, got {type(value).__name__}"
         )
+    try:
+        fresh = AnalyticsLandingRow.from_dict(value.to_dict())
+        canonicalize_jcs(fresh.to_dict())
+    except ClosedValidationError as exc:
+        if type(exc) is ClosedValidationError:
+            raise
+        raise ClosedValidationError(f"{label}: {exc}") from exc
+    except _RAW_ERRORS as exc:
+        raise ClosedValidationError(f"{label}: {type(exc).__name__}: {exc}") from exc
     return value
 
 
@@ -258,7 +274,7 @@ def order_candidates(
         )
     rows = tuple(_require_landing_row(item, label="candidate") for item in candidates)
     ordered = sort_by_jcs_key(rows, _sort_key_array)
-    keys = [candidate_sort_key(row) for row in ordered]
+    keys = [canonicalize_jcs(_sort_key_array(row)) for row in ordered]
     if any(left == right for left, right in zip(keys, keys[1:])):
         raise ClosedValidationError(
             "candidates: the candidate set must be unique (duplicate sort key K)"

@@ -404,8 +404,18 @@ SCOPE = EvaluationScope(
 
 
 def _inventory(
-    resources: tuple[str, ...] = RES[:1], *, tenant: str = "tenant:t1", scope: str = "scope:s1"
+    resources: tuple[str, ...] = RES[:1],
+    *,
+    tenant: str = "tenant:t1",
+    scope: str = "scope:s1",
+    start_date: str | None = None,
+    end_date: str = END,
 ) -> ExpectedResourceInventory:
+    resolved_start = (
+        start_date
+        if start_date is not None
+        else (datetime.date.fromisoformat(end_date) - datetime.timedelta(days=29)).isoformat()
+    )
     return ExpectedResourceInventory(
         inventory_id="inventory:i1",
         registry_snapshot_locator=REGISTRY_SNAPSHOT,
@@ -414,14 +424,14 @@ def _inventory(
         binding_ref="binding:b1",
         account_ref="account:a1",
         resource_scope_ref=scope,
-        date_range=DateRange(start_date=_day(29), end_date=END),
+        date_range=DateRange(start_date=resolved_start, end_date=end_date),
         expected_resources=tuple(
             ExpectedResourceKey(
                 binding_ref="binding:b1",
                 account_ref="account:a1",
                 resource_ref=resource,
                 resource_level="campaign",
-                metric_date=END,
+                metric_date=end_date,
             )
             for resource in resources
         ),
@@ -457,7 +467,7 @@ def _build(
         window_end_date=end,
         curation_restatement_lookback_days=curation,
         curation_anchor_date=anchor,
-        inventory=seal(inventory if inventory is not None else _inventory(resources)),
+        inventory=seal(inventory if inventory is not None else _inventory(resources, end_date=end)),
         metrics_result_key=METRICS_KEY,
         restatement_history=history,
     )
@@ -1402,7 +1412,7 @@ METRIC_ROW_CASES = [
     ("invalid_metric_row", [_patched(SPEND_ROW, 11, _cell("utf8", "USD"))]),  # foreign currency
     ("invalid_metric_row", [_patched(SPEND_ROW, 5, _cell("utf8", "guessed"))]),
     (
-        "metric_type_mismatch",
+        "invalid_metric_row",
         [_patched(_mrow(R0, W3[0], W3[1], CLICKS, "5"), 3, _cell("opaque_ref", SPEND))],
     ),
 ]
@@ -2062,3 +2072,125 @@ def test_module_holds_no_numeric_literal_and_no_float() -> None:
     }
     assert numbers <= {0, 1}
     assert not any(isinstance(node, ast.Name) and node.id == "float" for node in ast.walk(tree))
+
+
+# ------------------------------------------------------------------ PR2 review regression pins
+
+
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+def test_metric_table_redacts_non_canonical_resource_refs_before_inventory_lookup() -> None:
+    for raw_ref, secret in (
+        ("campaign:1234567890", "1234567890"),
+        ("resource:act_1234567890", "act_1234567890"),
+    ):
+        bad_row = _patched(SPEND_ROW, 0, _cell("opaque_ref", raw_ref))
+        exc = _raises("invalid_metric_row", _run, (_waste_rule(),), [bad_row])
+        assert raw_ref not in str(exc)
+        assert secret not in str(exc)
+
+    unknown_canonical = _mrow(RES[1], W3[0], W3[1], SPEND, "1")
+    _raises("resource_not_in_inventory", _run, (_waste_rule(),), [unknown_canonical])
+
+
+def test_metric_table_validates_metric_ref_grammar_and_base_value_type_on_unqueried_rows() -> None:
+    non_metric = _patched(_mrow(R0, _day(10), END, CLICKS, "5"), 3, _cell("opaque_ref", "tenant:t1_raw"))
+    exc = _raises("invalid_metric_row", _run, (_waste_rule(),), _waste_rows("1000", "0") + [non_metric])
+    assert "t1_raw" not in str(exc)
+
+    unqueried_wrong_base = _patched(
+        _mrow(R0, _day(10), END, SPEND, "500"), 3, _cell("opaque_ref", IMPRESSIONS)
+    )
+    _raises(
+        "invalid_metric_row",
+        _run,
+        (_waste_rule(),),
+        _waste_rows("1000", "0") + [unqueried_wrong_base],
+    )
+
+    unqueried_missing_base = _mrow(R0, _day(10), END, IMPRESSIONS, "0", state="provider:missing")
+    assert _verdicts(_run((_waste_rule(),), _waste_rows("1000", "0") + [unqueried_missing_base])) == [
+        ("waste", "detected")
+    ]
+
+
+def test_inventory_date_range_must_cover_all_active_rule_windows() -> None:
+    assert "inventory_window_mismatch" in INTELLIGENCE_ERROR_CODES
+    disjoint = _inventory(start_date="2020-01-01", end_date="2020-01-01")
+    _raises("inventory_window_mismatch", _run, (_waste_rule(),), _waste_rows("1000", "0"), inventory=disjoint)
+
+    sat_partial = _inventory(start_date=_day(2), end_date=END)
+    _raises(
+        "inventory_window_mismatch",
+        _run,
+        (_saturation_rule(window=2),),
+        _sat_rows(("1000", "1500"), ("100", "110")),
+        inventory=sat_partial,
+    )
+    sat_exact = _inventory(start_date=_day(3), end_date=END)
+    assert _verdicts(
+        _run(
+            (_saturation_rule(window=2),),
+            _sat_rows(("1000", "1500"), ("100", "110")),
+            inventory=sat_exact,
+        )
+    ) == SAT_DETECTED
+
+    rest_partial = _inventory(start_date=_day(5), end_date=END)
+    _raises("inventory_window_mismatch", _run, (_restatement_rule(lookback=7),), [], inventory=rest_partial)
+    rest_exact = _inventory(start_date=_day(6), end_date=END)
+    assert _run((_restatement_rule(lookback=7),), [], inventory=rest_exact) == ()
+
+    early_end = _inventory(start_date=_day(29), end_date=_day(1))
+    _raises("inventory_window_mismatch", _run, (_waste_rule(),), _waste_rows("1000", "0"), inventory=early_end)
+
+
+def test_cross_run_results_and_bundle_run_context_binding_in_evaluate_findings() -> None:
+    other_run = _loc("smart_ads/migration_run_context/v1", "9")
+    context, evidence = _build((_waste_rule(),), _waste_rows("1000", "0"))
+    bound = dataclasses.replace(evidence, bundle_migration_run_context_locator=RUN)
+    assert _payload(evaluate_findings(context, bound)) == _payload(evaluate_findings(context, evidence))
+
+    wrong_bound = dataclasses.replace(evidence, bundle_migration_run_context_locator=other_run)
+    with pytest.raises(ResultSetMismatchError) as info:
+        evaluate_findings(context, wrong_bound)
+    assert info.value.code == "cross_run_result"
+
+    _raises("invalid_locator", dataclasses.replace, evidence, bundle_migration_run_context_locator=SNAPSHOT)
+
+    foreign_extra_dict = {**evidence.resolved_results[0].to_dict(), "migration_run_context_locator": other_run.to_dict()}
+    foreign_extra = AnalysisResult.from_dict(foreign_extra_dict)
+    mixed_results = (foreign_extra, evidence.resolved_results[1])
+    mixed_exec = _execution(mixed_results)
+    mixed_evidence = dataclasses.replace(evidence, execution=mixed_exec, resolved_results=mixed_results)
+    with pytest.raises(ResultSetMismatchError) as cross_info:
+        evaluate_findings(context, mixed_evidence)
+    assert cross_info.value.code == "cross_run_result"
+
+
+def test_always_eq_locator_and_partial_p1_integrity_rejected_at_intelligence_seam() -> None:
+    context, evidence = _build((_waste_rule(),), _waste_rows("1000", "0"))
+    always_eq_policy_loc = dataclasses.replace(
+        evidence.bundle_analysis_policy_locator,
+        store_kind=_AlwaysEq(),  # type: ignore[arg-type]
+    )
+    _raises("invalid_locator", dataclasses.replace, evidence, bundle_analysis_policy_locator=always_eq_policy_loc)
+
+    tampered_ev = dataclasses.replace(evidence)
+    _tamper(tampered_ev.bundle_analysis_policy_locator, "store_kind", _AlwaysEq())
+    _raises("invalid_locator", evaluate_findings, context, tampered_ev)
+
+    signed_ctx, signed_ev = _build((_waste_rule(),), _waste_rows("1000", "0"), signed=True)
+    assert signed_ctx.inventory.integrity is not None
+    _tamper(signed_ctx.inventory.integrity, "signature_base64", None)
+    _raises("invalid_inventory", evaluate_findings, signed_ctx, signed_ev)
+
+    signed_ctx2, signed_ev2 = _build((_waste_rule(),), _waste_rows("1000", "0"), signed=True)
+    assert signed_ev2.execution.integrity is not None
+    _tamper(signed_ev2.execution.integrity, "signature_base64", None)
+    with pytest.raises(ResultSetMismatchError) as exec_info:
+        evaluate_findings(signed_ctx2, signed_ev2)
+    assert exec_info.value.code == "invalid_integrity"

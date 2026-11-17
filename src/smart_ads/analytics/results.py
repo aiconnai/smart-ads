@@ -28,8 +28,10 @@ from smart_ads.analytics.cells import (
     _closed,
     _coded,
     _fail,
+    _guard_rs,
     _locator_of,
     _parse_locator,
+    _reparse_p1,
     _require_locator,
     _same_bytes,
     _sequence,
@@ -331,12 +333,27 @@ _P1Artifact = TypeVar("_P1Artifact", AnalysisExecution, AnalysisResult, Analysis
 def _resolve(item: object, cls: type[_P1Artifact], require_signed: bool) -> _P1Artifact:
     """Accept a parsed object or a closed mapping; enforce a finalized signature if asked."""
     if isinstance(item, cls):
-        if require_signed and (item.integrity is None or not item.integrity.is_signed):
+        fresh = _reparse_p1(item, cls)
+        if require_signed and (fresh.integrity is None or not fresh.integrity.is_signed):
             raise _fail("unsigned_artifact", f"{cls.SCHEMA}: finalized P1 signature required")
-        return item
+        return fresh
     if isinstance(item, Mapping):
-        return cls.from_dict(item, require_signed=require_signed)
+        parsed = _guard_rs("field_invalid", lambda: cls.from_dict(item, require_signed=require_signed))
+        _guard_rs("field_invalid", lambda: canonicalize_jcs(parsed.to_dict()))
+        return parsed
     raise _fail("field_invalid", f"expected {cls.__name__} or mapping, got {type(item).__name__}")
+
+
+def _resolve_run_locator(locator: object) -> ArtifactLocator | None:
+    if locator is None:
+        return None
+    if isinstance(locator, ArtifactLocator):
+        return _require_locator(
+            locator, RUN_CONTEXT_TYPE, label="bundle_migration_run_context_locator"
+        )
+    if isinstance(locator, Mapping):
+        return _parse_locator(locator, RUN_CONTEXT_TYPE)
+    raise _fail("invalid_locator", "bundle_migration_run_context_locator: expected locator")
 
 
 def _index_resolved(resolved_results: object, require_signed: bool) -> dict[str, AnalysisResult]:
@@ -380,7 +397,10 @@ def _check_projection_schemas(
 
 
 def _check_resolved_identity(
-    result: AnalysisResult, bundle: ArtifactLocator, snapshot: ArtifactLocator
+    result: AnalysisResult,
+    bundle: ArtifactLocator,
+    snapshot: ArtifactLocator,
+    run_context: ArtifactLocator,
 ) -> None:
     if not _same_bytes(result.replay_input_bundle_locator.to_dict(), bundle.to_dict()):
         raise _fail(
@@ -392,6 +412,11 @@ def _check_resolved_identity(
             "cross_snapshot_result",
             f"result {result.result_key!r}: dataset_snapshot_locator != bundle snapshot",
         )
+    if not _same_bytes(result.migration_run_context_locator.to_dict(), run_context.to_dict()):
+        raise _fail(
+            "cross_run_result",
+            f"result {result.result_key!r}: migration_run_context_locator != run context",
+        )
 
 
 def _check_entry(entry: CanonicalResultEntry, result: AnalysisResult) -> None:
@@ -401,6 +426,33 @@ def _check_entry(entry: CanonicalResultEntry, result: AnalysisResult) -> None:
         raise _fail("projection_mismatch", f"entry {entry.result_key!r}: projection differs")
 
 
+def _parse_execution(execution: object, require_signed: bool) -> AnalysisExecution:
+    if isinstance(execution, AnalysisExecution):
+        return _resolve(execution, AnalysisExecution, require_signed)
+    parsed = _guard_rs(
+        "field_invalid", lambda: AnalysisExecution.from_dict(execution, require_signed=require_signed)
+    )
+    _guard_rs("field_invalid", lambda: canonicalize_jcs(parsed.to_dict()))
+    return parsed
+
+
+def _check_all_identities(
+    resolved: Mapping[str, AnalysisResult],
+    bundle: ArtifactLocator,
+    snapshot: ArtifactLocator,
+    expected_run: ArtifactLocator | None,
+) -> None:
+    if not resolved:
+        return
+    run_loc = (
+        expected_run
+        if expected_run is not None
+        else next(iter(resolved.values())).migration_run_context_locator
+    )
+    for result in resolved.values():
+        _check_resolved_identity(result, bundle, snapshot, run_loc)
+
+
 def verify_analysis_execution(
     execution: AnalysisExecution | Mapping[str, Any],
     resolved_results: tuple[AnalysisResult | Mapping[str, Any], ...] | list,
@@ -408,32 +460,22 @@ def verify_analysis_execution(
     bundle_dataset_snapshot_locator: ArtifactLocator,
     *,
     require_signed: bool = False,
+    bundle_migration_run_context_locator: ArtifactLocator | Mapping[str, Any] | None = None,
 ) -> AnalysisExecution:
-    """Rebuild `P` from the resolved results and require byte equality (ADR section 6.4).
-
-    `resolved_results` / `resolved_schemas` are the in-memory `analysis_result/v1` and
-    `analysis_result_schema/v1` artifacts the caller resolved (objects or mappings);
-    every result projection is checked against its schema and every schema must be
-    referenced. `bundle_dataset_snapshot_locator` is the replay bundle's exact
-    `dataset_snapshot_locator`. With `require_signed`, every artifact must carry a
-    finalized P1 signature. Returns the verified execution; never mutates input.
-    """
+    """Rebuild `P` from resolved results and enforce bundle, snapshot, and run bindings (ADR 6.4)."""
     if type(require_signed) is not bool:
         raise _fail("field_invalid", "require_signed: expected bool")
-    if isinstance(execution, AnalysisExecution):
-        parsed = _resolve(execution, AnalysisExecution, require_signed)
-    else:
-        parsed = AnalysisExecution.from_dict(execution, require_signed=require_signed)
-    _require_locator(
+    parsed = _parse_execution(execution, require_signed)
+    snapshot = _require_locator(
         bundle_dataset_snapshot_locator,
         DATASET_SNAPSHOT_TYPE,
         label="bundle_dataset_snapshot_locator",
     )
+    expected_run = _resolve_run_locator(bundle_migration_run_context_locator)
     resolved = _index_resolved(resolved_results, require_signed)
     schemas = _index_schemas(resolved_schemas, require_signed)
     bundle = parsed.analysis_replay_input_bundle_locator
-    for result in resolved.values():
-        _check_resolved_identity(result, bundle, bundle_dataset_snapshot_locator)
+    _check_all_identities(resolved, bundle, snapshot, expected_run)
     entries = {entry.result_key: entry for entry in parsed.canonical_result_set.results}
     missing = sorted(set(resolved) - set(entries))
     if missing:

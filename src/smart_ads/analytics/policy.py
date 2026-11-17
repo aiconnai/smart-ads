@@ -2,27 +2,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import re
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, Self, TypeVar
 
 from smart_ads.contracts.jcs import (
-    ADR_P1_DOMAIN_PREFIXES,
-    MAX_JCS_SAFE_INT,
-    ArtifactLocator,
-    P1Integrity,
-    canonicalize_jcs,
-    p1_content_digest as _p1_content_digest,
-    p1_preimage as _p1_preimage,
+    ADR_P1_DOMAIN_PREFIXES, MAX_JCS_SAFE_INT, ArtifactLocator, P1Integrity, canonicalize_jcs,
+    p1_content_digest as _p1_content_digest, p1_preimage as _p1_preimage,
 )
 from smart_ads.contracts.numerics import MAX_INT64, PHASE1_BASE_METRICS
 from smart_ads.contracts.scalars import (
-    ClosedValidationError,
-    parse_timestamp_utc_micros,
-    validate_currency_iso4217,
-    validate_non_empty_str,
-    validate_opaque_ref,
+    ClosedValidationError, parse_timestamp_utc_micros, validate_currency_iso4217,
+    validate_non_empty_str, validate_opaque_ref,
 )
 
 RULE_TYPE_SATURATION: Final[str] = "saturation"
@@ -31,24 +23,14 @@ RULE_TYPE_STALLED_DELIVERY: Final[str] = "stalled_delivery"
 RULE_TYPE_RESTATEMENT: Final[str] = "restatement"
 RULE_TYPES: Final[tuple[str, ...]] = tuple(
     sorted(
-        (
-            RULE_TYPE_SATURATION,
-            RULE_TYPE_WASTE,
-            RULE_TYPE_STALLED_DELIVERY,
-            RULE_TYPE_RESTATEMENT,
-        ),
+        (RULE_TYPE_SATURATION, RULE_TYPE_WASTE, RULE_TYPE_STALLED_DELIVERY, RULE_TYPE_RESTATEMENT),
         key=lambda name: name.encode("utf-8"),
     )
 )
 RESTATEMENT_KINDS: Final[tuple[str, ...]] = ("state_flip", "tombstone", "value_change")
 POLICY_NOT_APPLICABLE_CODES: Final[tuple[str, ...]] = (
-    "tenant_mismatch",
-    "resource_scope_mismatch",
-    "resource_level_mismatch",
-    "ad_platform_mismatch",
-    "currency_mismatch",
-    "not_yet_valid",
-    "expired",
+    "tenant_mismatch", "resource_scope_mismatch", "resource_level_mismatch",
+    "ad_platform_mismatch", "currency_mismatch", "not_yet_valid", "expired",
 )
 POLICY_ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
@@ -151,9 +133,30 @@ def _recheck(error: _Error, code: str, fn: Callable[..., _T], *args: Any) -> _T:
         raise error(code, f"{type(exc).__name__}: {exc}") from exc
 
 
+def _check_integrity_pair(error: _Error, code: str, given: Any, fresh: Any) -> None:
+    if given is None and fresh is None:
+        return
+    if not isinstance(given, P1Integrity) or not isinstance(fresh, P1Integrity):
+        raise error(code, "integrity: expected P1Integrity or None")
+    if (given.content_digest, given.signature_base64) != (
+        fresh.content_digest,
+        fresh.signature_base64,
+    ):
+        raise error(code, "integrity: partial signature state dropped by wire form")
+
+
 def _reparsed(error: _Error, code: str, cls: Any, value: Any) -> Any:
-    """`cls.from_dict(value.to_dict())` under `_recheck`; the integrity block is kept."""
-    return _recheck(error, code, lambda: cls.from_dict(value.to_dict()))
+    """`cls.from_dict(value.to_dict())` + JCS + integrity parity under `_recheck`."""
+    def parse() -> Any:
+        fresh = cls.from_dict(value.to_dict())
+        canonicalize_jcs(fresh.to_dict())
+        if isinstance(value, P1Integrity):
+            _check_integrity_pair(error, code, value, fresh)
+        elif hasattr(value, "integrity"):
+            _check_integrity_pair(error, code, value.integrity, fresh.integrity)
+        return fresh
+
+    return _recheck(error, code, parse)
 
 
 def _require_str(value: object, field_name: str) -> str:
@@ -737,15 +740,15 @@ def policy_applicability_code(
     """Return the first closed reason `policy` does not apply, or None when it applies.
 
     Pure: the instant is an argument (6-digit UTC timestamp), never read from a clock. Scope
-    members are checked in the order of POLICY_NOT_APPLICABLE_CODES (tenant, resource scope,
-    resource level, ad platform, currency) before the validity window. The window is a closed
-    interval: an instant equal to `valid_from_utc` or `valid_until_utc` is inside it. A malformed
-    argument raises PolicyValidationError; "does not apply" is a return value, never that error.
+    members are checked in the order of POLICY_NOT_APPLICABLE_CODES before the closed validity
+    window. A malformed argument raises PolicyValidationError; "does not apply" is a return value.
     """
     if not isinstance(policy, AnalysisPolicy):
         raise _fail("invalid_type", f"policy: expected AnalysisPolicy, got {type(policy).__name__}")
     if not isinstance(scope, EvaluationScope):
         raise _fail("invalid_type", f"scope: expected EvaluationScope, got {type(scope).__name__}")
+    policy = _reparsed(_fail, "invalid_type", AnalysisPolicy, policy)
+    scope = _recheck(_fail, "invalid_type", replace, scope)
     instant = _shared(
         parse_timestamp_utc_micros, evaluation_instant_utc, field_name="evaluation_instant_utc"
     )
@@ -768,28 +771,11 @@ def require_policy_applicable(
 
 
 __all__ = [
-    "AnalysisPolicy",
-    "AnalysisRule",
-    "ApplicabilityScope",
-    "EvaluationScope",
-    "METRIC_REF_PATTERN",
-    "POLICY_ERROR_CODES",
-    "POLICY_NOT_APPLICABLE_CODES",
-    "PolicyNotApplicableError",
-    "PolicyValidationError",
-    "PolicyValidity",
-    "RESTATEMENT_KINDS",
-    "RULE_TYPES",
-    "RULE_TYPE_RESTATEMENT",
-    "RULE_TYPE_SATURATION",
-    "RULE_TYPE_STALLED_DELIVERY",
-    "RULE_TYPE_WASTE",
-    "RestatementRule",
-    "SaturationRule",
-    "StalledDeliveryRule",
-    "WasteRule",
-    "decimal6_to_micros",
-    "policy_applicability_code",
-    "require_policy_applicable",
-    "rule_from_dict",
+    "AnalysisPolicy", "AnalysisRule", "ApplicabilityScope", "EvaluationScope",
+    "METRIC_REF_PATTERN", "POLICY_ERROR_CODES", "POLICY_NOT_APPLICABLE_CODES",
+    "PolicyNotApplicableError", "PolicyValidationError", "PolicyValidity",
+    "RESTATEMENT_KINDS", "RULE_TYPES", "RULE_TYPE_RESTATEMENT", "RULE_TYPE_SATURATION",
+    "RULE_TYPE_STALLED_DELIVERY", "RULE_TYPE_WASTE", "RestatementRule", "SaturationRule",
+    "StalledDeliveryRule", "WasteRule", "decimal6_to_micros", "policy_applicability_code",
+    "require_policy_applicable", "rule_from_dict",
 ]

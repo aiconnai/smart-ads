@@ -2,14 +2,8 @@
 
 Analysis is a pure function of a verified `analysis_execution/v1` and a versioned tenant
 `analysis_policy/v1`: no clock, no I/O, no randomness, and no threshold literal in this module.
-The analytical `certification_record/v1` lives in `smart_ads.analytics.certification`.
-
-Input contract (a choice the ADR does not fix; open decision): the result named by
-`EvaluationContext.metrics_result_key` is a `relation` whose columns are exactly the 12
-METRIC_WINDOW_COLUMNS, one row per (resource, inclusive window, metric) carrying the section 4.3
-numeric state of that metric over that window. The evaluator never sums rows (Phase-1 metrics are
-`additive_across_none`); window values come from the bound query, and a window the relation does
-not carry is absent, never zero.
+`EvaluationContext.metrics_result_key` names a `METRIC_WINDOW_COLUMNS` relation (one row per
+resource, inclusive window, and metric); missing windows remain absent, never zero.
 """
 from __future__ import annotations
 
@@ -21,15 +15,17 @@ import re
 from types import MappingProxyType
 from typing import Any, ClassVar, Final, TypeVar
 
-from smart_ads.analytics.cells import ANALYSIS_EXECUTION_TYPE, ANALYSIS_RESULT_TYPE, DATASET_SNAPSHOT_TYPE
+from smart_ads.analytics.cells import (
+    ANALYSIS_EXECUTION_TYPE, ANALYSIS_RESULT_TYPE, DATASET_SNAPSHOT_TYPE, RUN_CONTEXT_TYPE,
+)
 from smart_ads.analytics.formulas import divide_count_by_count, divide_money_by_money
 from smart_ads.analytics.lattice import (
     classify_input_state, classify_restatement, order_by_winner, order_candidates,
 )
 from smart_ads.analytics.policy import (
-    RULE_TYPE_RESTATEMENT, RULE_TYPES, AnalysisPolicy, AnalysisRule, EvaluationScope,
-    RestatementRule, SaturationRule, StalledDeliveryRule, WasteRule, decimal6_to_micros,
-    PolicyValidationError, require_policy_applicable, _recheck, _reparsed,
+    METRIC_REF_PATTERN, RULE_TYPE_RESTATEMENT, RULE_TYPES, AnalysisPolicy, AnalysisRule,
+    EvaluationScope, PolicyValidationError, RestatementRule, SaturationRule, StalledDeliveryRule,
+    WasteRule, _recheck, _reparsed, decimal6_to_micros, require_policy_applicable,
 )
 from smart_ads.analytics.results import (
     AnalysisExecution, AnalysisResult, AnalysisResultSchema, ResultProjection,
@@ -39,10 +35,12 @@ from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs, jcs_sha256,
     p1_content_digest as _p1_content_digest, p1_preimage as _p1_preimage, self_digest_jcs_sha256,
 )
-from smart_ads.contracts.numerics import PHASE1_METRIC_NAME_TO_REF, NumericStateRow, validate_numeric_state
+from smart_ads.contracts.numerics import (
+    PHASE1_BASE_METRICS, PHASE1_METRIC_NAME_TO_REF, NumericStateRow, validate_numeric_state,
+)
 from smart_ads.contracts.scalars import (
-    ClosedValidationError, parse_iso_date, validate_non_empty_str, validate_sha256_prefixed,
-    validate_timestamp_utc6,
+    ClosedValidationError, parse_iso_date, validate_non_empty_str, validate_resource_ref,
+    validate_sha256_prefixed, validate_timestamp_utc6,
 )
 from smart_ads.contracts.schemas import AnalyticsLandingRow
 from smart_ads.domain.registry import ExpectedResourceInventory
@@ -56,34 +54,24 @@ FINDING_INCONCLUSIVE: Final[str] = "inconclusive"
 FINDING_STATUSES: Final[tuple[str, ...]] = (FINDING_DETECTED, FINDING_INCONCLUSIVE)
 INTELLIGENCE_ERROR_CODES: Final[frozenset[str]] = frozenset(
     (
-        # closed parsing of finding/v1, certification_record/v1 and the evaluation arguments
         "invalid_type invalid_grammar out_of_range unknown_value unknown_member missing_member "
         "schema_mismatch invalid_locator invalid_integrity content_digest_mismatch "
         "finding_digest_mismatch empty duplicate unsorted mutation_blocked_mismatch "
-        # bindings between policy, bundle, inventory, scope, instant and signatures
-        "unsigned_artifact policy_locator_mismatch inventory_scope_mismatch invalid_inventory "
-        "lookback_exceeds_curation window_after_instant "
-        # the metric-window relation and the restatement history
+        "unsigned_artifact policy_locator_mismatch inventory_scope_mismatch "
+        "inventory_window_mismatch invalid_inventory lookback_exceeds_curation window_after_instant "
         "result_columns_mismatch invalid_metric_row duplicate_metric_row metric_type_mismatch "
         "resource_not_in_inventory history_scope_mismatch invalid_history window_out_of_range "
-        # certification (raised by smart_ads.analytics.certification)
         "findings_mismatch degraded_not_permitted record_mismatch"
     ).split()
 )
 
 METRIC_WINDOW_COLUMNS: Final[tuple[tuple[str, str, bool], ...]] = (
-    ("resource_ref", "opaque_ref", False),
-    ("window_start_date", "date", False),
-    ("window_end_date", "date", False),
-    ("metric_semantic_ref", "opaque_ref", False),
-    ("metric_origin", "utf8", False),
-    ("presence_status", "utf8", False),
-    ("calculation_status", "utf8", False),
-    ("unknown_reason", "utf8", True),
-    ("value_type", "utf8", True),
-    ("raw_numeric_value", "int64", True),
-    ("unit", "utf8", True),
-    ("currency", "utf8", True),
+    ("resource_ref", "opaque_ref", False), ("window_start_date", "date", False),
+    ("window_end_date", "date", False), ("metric_semantic_ref", "opaque_ref", False),
+    ("metric_origin", "utf8", False), ("presence_status", "utf8", False),
+    ("calculation_status", "utf8", False), ("unknown_reason", "utf8", True),
+    ("value_type", "utf8", True), ("raw_numeric_value", "int64", True),
+    ("unit", "utf8", True), ("currency", "utf8", True),
 )
 _COLUMN_NAMES: Final[tuple[str, ...]] = tuple(name for name, _, _ in METRIC_WINDOW_COLUMNS)
 _KEY_COLUMNS: Final[tuple[str, ...]] = (
@@ -93,12 +81,9 @@ _STATE_COLUMNS: Final[tuple[str, ...]] = tuple(n for n in _COLUMN_NAMES if n not
 _MONEY: Final[str] = "int64_minor_currency"
 _COUNT: Final[str] = "int64_count"
 _FINDING_KEY_RE: Final[re.Pattern[str]] = re.compile(r"\Afinding:sha256:[0-9a-f]{64}\Z")
-# StalledDeliveryRule names no metric: delivery is the Phase-1 base metric `impressions`.
+_METRIC_REF_RE: Final[re.Pattern[str]] = re.compile(METRIC_REF_PATTERN)
 _IMPRESSIONS_REF: Final[str] = PHASE1_METRIC_NAME_TO_REF["impressions"]
-# One, in millionths: a scale factor, not a threshold.
 _ONE_MICROS: Final[int] = decimal6_to_micros("1.000000")
-# A finding cites only containing artifacts the evaluator itself binds (ADR sections 12.2, 12.7):
-# landing rows are embedded value objects without a locator profile, so they are never cited.
 EVIDENCE_ARTIFACT_TYPES: Final[tuple[str, ...]] = (ANALYSIS_RESULT_TYPE, DATASET_SNAPSHOT_TYPE)
 
 _MetricKey = tuple[str, str, str, str]
@@ -293,19 +278,13 @@ class _P1Artifact:
 
 
 def _blocks_mutation(finding_type: str, finding_status: str) -> bool:
-    """Restatement always blocks (ADR section 7).
-
-    That an inconclusive finding also blocks is a choice the ADR does not fix (open decision).
-    """
+    """Restatement and inconclusive findings block mutation recommendations (ADR section 7)."""
     return finding_type == RULE_TYPE_RESTATEMENT or finding_status == FINDING_INCONCLUSIVE
 
 
 @dataclass(frozen=True, slots=True)
 class Finding(_P1Artifact):
-    """Closed P1 `smart_ads/finding/v1`; an empty `finding_digest` is computed on construction.
-
-    `evidence_locators` admits only EVIDENCE_ARTIFACT_TYPES.
-    """
+    """Closed P1 `smart_ads/finding/v1`; an empty `finding_digest` is computed on construction."""
 
     SCHEMA: ClassVar[str] = FINDING_SCHEMA
     P1_DOMAIN_PREFIX: ClassVar[str] = ADR_P1_DOMAIN_PREFIXES[FINDING_SCHEMA]
@@ -400,7 +379,7 @@ class Finding(_P1Artifact):
 
 @dataclass(frozen=True, slots=True)
 class AnalysisEvidence:
-    """Resolved inputs of `verify_analysis_execution` plus the bundle's snapshot and policy locators."""
+    """Resolved inputs of `verify_analysis_execution` plus snapshot, policy, and optional run locators."""
 
     execution: AnalysisExecution
     resolved_results: tuple[AnalysisResult, ...]
@@ -408,16 +387,21 @@ class AnalysisEvidence:
     bundle_dataset_snapshot_locator: ArtifactLocator
     bundle_analysis_policy_locator: ArtifactLocator
     require_signed: bool = False
+    bundle_migration_run_context_locator: ArtifactLocator | None = None
 
     def __post_init__(self) -> None:
         label = "evidence"
         _require(self.execution, AnalysisExecution, f"{label}.execution")
         snapshot, policy = self.bundle_dataset_snapshot_locator, self.bundle_analysis_policy_locator
-        members = {  # tuples, and locators re-parsed from their wire form
+        run_ctx = self.bundle_migration_run_context_locator
+        members = {
             "resolved_results": _typed_tuple(self.resolved_results, AnalysisResult, f"{label}.results"),
             "resolved_schemas": _typed_tuple(self.resolved_schemas, AnalysisResultSchema, f"{label}.schemas"),
             "bundle_dataset_snapshot_locator": _locator(snapshot, DATASET_SNAPSHOT_TYPE, f"{label}.snapshot"),
             "bundle_analysis_policy_locator": _locator(policy, AnalysisPolicy.SCHEMA, f"{label}.policy"),
+            "bundle_migration_run_context_locator": (
+                None if run_ctx is None else _locator(run_ctx, RUN_CONTEXT_TYPE, f"{label}.run_context")
+            ),
         }
         for name, value in members.items():
             object.__setattr__(self, name, value)
@@ -426,13 +410,10 @@ class AnalysisEvidence:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationContext:
-    """Policy, scope, explicit instant/window end and the inputs restatement needs.
+    """Policy, scope, explicit instant/window end, covering inventory, and restatement inputs.
 
-    `window_end_date` may not follow the instant's UTC date (not checked against the inventory
-    date range). Every RestatementRule window must lie inside the section 6.2 curation window
-    `[anchor - (N - 1), anchor]`, N = `curation_restatement_lookback_days`. Anchor and N are caller
-    assertions the wheel cannot verify (no `curation_execution/v1` is modelled), like
-    `independently_validated`; the anchor is not checked against the instant.
+    `window_end_date` may not follow the instant's UTC date, `inventory.date_range` must cover
+    every active rule window, and every RestatementRule window must lie inside `[anchor - (N - 1), anchor]`.
     """
 
     policy: AnalysisPolicy
@@ -487,15 +468,22 @@ def _metric_table(
     for row in projection.rows:
         values = dict(zip(_COLUMN_NAMES, (cell.value for cell in row), strict=True))
         key: _MetricKey = tuple(values[name] for name in _KEY_COLUMNS)  # type: ignore[assignment]
-        resource, start, end, _ = key
+        resource, start, end, metric_ref = key
+        _guard("invalid_metric_row", validate_resource_ref, resource, field_name="metric_row.resource_ref")
         if resource not in resources:
             raise _fail("resource_not_in_inventory", f"metric row for {resource!r}")
+        if _METRIC_REF_RE.fullmatch(metric_ref) is None:
+            raise _fail("invalid_metric_row", "metric_row.metric_semantic_ref: invalid metric ref")
         if start > end:  # fixed-width ISO dates: byte order is calendar order
             raise _fail("invalid_metric_row", f"window {start!r}..{end!r} is reversed")
         if key in table:
             raise _fail("duplicate_metric_row", f"two rows for {key!r}")
-        state = {name: values[name] for name in _STATE_COLUMNS}
-        table[key] = _guard("invalid_metric_row", validate_numeric_state, query_currency=currency, **state)
+        state_vals = {name: values[name] for name in _STATE_COLUMNS}
+        state = _guard("invalid_metric_row", validate_numeric_state, query_currency=currency, **state_vals)
+        base = PHASE1_BASE_METRICS.get(metric_ref)
+        if base is not None and classify_input_state(state) == "value" and state.value_type != base.value_type:
+            raise _fail("invalid_metric_row", f"{metric_ref}: expected {base.value_type}")
+        table[key] = state
     return MappingProxyType(table)
 
 
@@ -551,11 +539,7 @@ def _waste(rule: WasteRule, resource: str, inputs: _RuleInputs) -> _Outcome | No
 
 
 def _growth_micros(ratio: NumericStateRow) -> int | None:
-    """`current / baseline - 1` in millionths, the ratio rounded half-up by the T2 operator.
-
-    Growth as the rounded T2 ratio minus 1.000000 is a choice the ADR does not fix (open
-    decision). A `division_by_zero` ratio (zero baseline) carries no value: None, inconclusive.
-    """
+    """`current / baseline - 1` in millionths (None when `division_by_zero` or non-valued)."""
     if classify_input_state(ratio) != "value":
         return None
     return decimal6_to_micros(ratio.raw_numeric_value) - _ONE_MICROS
@@ -644,16 +628,31 @@ _RULE_EVALUATORS: Final[Mapping[type, Callable[[Any, str, _RuleInputs], _Outcome
 
 
 def _effective_rules(context: EvaluationContext) -> tuple[AnalysisRule, ...]:
-    """The rules evaluated: exactly the policy's rules.
-
-    Restatement findings only for the kinds a listed RestatementRule names is a choice the ADR
-    does not fix (open decision). Making it "always on" is local to this function: append a
-    synthesized `RestatementRule(lookback_days=N, restatement_kinds=RESTATEMENT_KINDS)`.
-    """
+    """The rules evaluated: exactly the policy's rules."""
     return context.policy.rules
 
 
 # ---------------------------------------------------------------- pipeline
+
+
+def _rule_span(rule: AnalysisRule) -> int:
+    if isinstance(rule, SaturationRule):
+        return rule.window_days + rule.window_days
+    if isinstance(rule, WasteRule):
+        return rule.window_days
+    if isinstance(rule, StalledDeliveryRule):
+        return rule.min_consecutive_days
+    return rule.lookback_days
+
+
+def _check_inventory_window(context: EvaluationContext) -> None:
+    """Require `inventory.date_range` to cover every active rule's evaluated date window."""
+    inv_range = context.inventory.date_range
+    end = _date(context.window_end_date, "context.window_end_date")
+    for rule in _effective_rules(context):
+        start, stop = _window(end, _rule_span(rule))
+        if start < inv_range.start_date or stop > inv_range.end_date:
+            raise _fail("inventory_window_mismatch", f"{rule.rule_id}: window outside inventory")
 
 
 def _check_bindings(context: EvaluationContext, evidence: AnalysisEvidence) -> None:
@@ -666,15 +665,11 @@ def _check_bindings(context: EvaluationContext, evidence: AnalysisEvidence) -> N
     if (inventory.tenant_ref, inventory.resource_scope_ref) != (scope.tenant_ref, scope.resource_scope_ref):
         raise _fail("inventory_scope_mismatch", "inventory tenant/resource scope differs from scope")
     _check_curation_window(context)
+    _check_inventory_window(context)
 
 
 def _check_curation_window(context: EvaluationContext) -> None:
-    """Every RestatementRule window must lie inside the curation window (section 6.2).
-
-    A restatement outside the curated dates cannot be observed, so a wider window would silently
-    drop the mutation block. This raises for now; whether it should instead yield an
-    `inconclusive` restatement finding is an open decision for the user.
-    """
+    """Every RestatementRule window must lie inside the curation window (section 6.2)."""
     rules = [rule for rule in _effective_rules(context) if isinstance(rule, RestatementRule)]
     if not rules:
         return
@@ -733,12 +728,7 @@ def _finding(binding: _Binding, rule: AnalysisRule, resource: str, outcome: _Out
 
 
 def _fresh_context(context: object) -> EvaluationContext:
-    """The context rebuilt, its policy, inventory and history rows re-parsed, its scope rebuilt.
-
-    __post_init__ validates once and object.__setattr__ can rebind a field later (lattice.py re-runs
-    the 12-row matrix for the same reason), so the entry points re-check every input they consume;
-    rebuilding the evidence re-parses its locators, and its artifacts are re-parsed to be verified.
-    """
+    """Rebuild `context` and re-parse its policy, scope, inventory, and history rows at the seam."""
     shell = _recheck(_fail, "invalid_type", replace, _require(context, EvaluationContext, "context"))
     policy = _reparsed(PolicyValidationError, "invalid_type", AnalysisPolicy, shell.policy)
     if any(type(rule) not in _RULE_EVALUATORS for rule in shell.policy.rules):
@@ -757,11 +747,12 @@ def _evaluate(context: object, evidence: object) -> tuple[AnalysisExecution, tup
     require_policy_applicable(context.policy, context.scope, context.evaluation_instant_utc)
     _check_bindings(context, evidence)
     execution = _recheck(ResultSetMismatchError, "field_invalid", lambda: verify_analysis_execution(
-        AnalysisExecution.from_dict(evidence.execution.to_dict()),
-        [AnalysisResult.from_dict(result.to_dict()) for result in evidence.resolved_results],
-        [AnalysisResultSchema.from_dict(schema.to_dict()) for schema in evidence.resolved_schemas],
+        evidence.execution,
+        evidence.resolved_results,
+        evidence.resolved_schemas,
         evidence.bundle_dataset_snapshot_locator,
         require_signed=evidence.require_signed,
+        bundle_migration_run_context_locator=evidence.bundle_migration_run_context_locator,
     ))
     entry = execution.canonical_result_set.entry(context.metrics_result_key)
     resources = tuple(sorted({u.resource_ref for u in context.inventory.expected_resources}))
@@ -786,7 +777,7 @@ def _evaluate(context: object, evidence: object) -> tuple[AnalysisExecution, tup
 
 
 def evaluate_findings(context: EvaluationContext, evidence: AnalysisEvidence) -> tuple[Finding, ...]:
-    """Verify the execution, require the policy applicable, and return findings by `finding_key`."""
+    """Verify execution, require applicable policy and covering inventory, and return findings."""
     return _evaluate(context, evidence)[1]
 
 

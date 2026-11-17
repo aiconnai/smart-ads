@@ -1063,3 +1063,111 @@ def test_module_holds_no_numeric_literal_and_no_float() -> None:
     }
     assert numbers <= {0, 1}
     assert not any(isinstance(node, ast.Name) and node.id == "float" for node in ast.walk(tree))
+
+
+# ------------------------------------------------------------------ PR2 review regression pins
+
+
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+def test_certification_enforces_cross_run_and_inventory_window_invariants() -> None:
+    context, evidence, findings = _scenario()
+    record = _record()
+    bound = dataclasses.replace(evidence, bundle_migration_run_context_locator=RUN)
+    assert verify_certification_record(record, context, bound, findings, VERIFIED_INPUTS) is record
+
+    other_run = _loc("smart_ads/migration_run_context/v1", "9")
+    wrong_bound = dataclasses.replace(evidence, bundle_migration_run_context_locator=other_run)
+    for call in (
+        lambda: build_certification_record(context, wrong_bound, findings, VERIFIED_INPUTS),
+        lambda: verify_certification_record(record, context, wrong_bound, findings, VERIFIED_INPUTS),
+    ):
+        with pytest.raises(ResultSetMismatchError) as info:
+            call()
+        assert info.value.code == "cross_run_result"
+
+    narrow_key = ExpectedResourceKey(
+        binding_ref="binding:b1",
+        account_ref="account:a1",
+        resource_ref=R0,
+        resource_level="campaign",
+        metric_date=END,
+    )
+    narrow_inv = dataclasses.replace(
+        context.inventory,
+        date_range=DateRange(start_date=END, end_date=END),
+        expected_resources=(narrow_key,),
+    )
+    narrow_ctx = dataclasses.replace(context, inventory=narrow_inv)
+    _raises("inventory_window_mismatch", build_certification_record, narrow_ctx, evidence, findings, VERIFIED_INPUTS)
+    _raises(
+        "inventory_window_mismatch",
+        verify_certification_record,
+        record,
+        narrow_ctx,
+        evidence,
+        findings,
+        VERIFIED_INPUTS,
+    )
+
+
+def test_certification_rejects_always_eq_in_unsigned_integrity_and_partial_p1() -> None:
+    none_ctx, none_ev, none_findings = _set_scenario("none")
+    assert none_findings == ()
+    bad_reg_loc = dataclasses.replace(
+        KEY_REGISTRY,
+        store_kind=_AlwaysEq(),  # type: ignore[arg-type]
+    )
+    bad_unsigned = P1Integrity(
+        key_id="key:ed25519:" + "b" * 64,
+        key_registry_snapshot_locator=bad_reg_loc,
+    )
+    _raises(
+        "invalid_integrity",
+        build_certification_record,
+        none_ctx,
+        none_ev,
+        none_findings,
+        VERIFIED_INPUTS,
+        integrity=bad_unsigned,
+    )
+    clean_record = build_certification_record(none_ctx, none_ev, none_findings, VERIFIED_INPUTS)
+    forged_record = dataclasses.replace(clean_record, integrity=bad_unsigned)
+    _raises(
+        "invalid_type",
+        verify_certification_record,
+        forged_record,
+        none_ctx,
+        none_ev,
+        none_findings,
+        VERIFIED_INPUTS,
+    )
+
+    context, evidence, findings = _scenario()
+    partial_finding = _sign(findings[0])
+    assert partial_finding.integrity is not None
+    _tamper(partial_finding.integrity, "signature_base64", None)
+    _raises(
+        "invalid_type",
+        build_certification_record,
+        context,
+        evidence,
+        (partial_finding, *findings[1:]),
+        VERIFIED_INPUTS,
+    )
+
+    partial_record = _sign(_record())
+    assert partial_record.integrity is not None
+    _tamper(partial_record.integrity, "signature_base64", None)
+    _raises(
+        "invalid_type",
+        verify_certification_record,
+        partial_record,
+        context,
+        evidence,
+        findings,
+        VERIFIED_INPUTS,
+    )

@@ -601,3 +601,98 @@ def test_projection_column_index() -> None:
     assert [projection.column_index(n) for n in ("resource_ref", "day", "spend")] == [0, 1, 2]
     _raises("unknown_column", projection.column_index, "cost")
     _raises("unknown_column", projection.column_index, 0)
+
+
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+class _DuckCell:
+    cell_type = "int64"
+    value = "42"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"_type": self.cell_type, "value": self.value}
+
+
+def test_result_column_check_cell_rejects_non_cells_and_tampered_cells() -> None:
+    col = ResultColumn("total", "int64", False)
+    nullable_col = ResultColumn("total", "int64", True)
+    col.check_cell(_cell("int64", "42"))
+    nullable_col.check_cell(_cell("null", None))
+    _raises("null_not_allowed", col.check_cell, _cell("null", None))
+    _raises("cell_type_mismatch", col.check_cell, _cell("utf8", "42"))
+
+    for bad in (None, {"_type": "int64", "value": "42"}, 42, "42", _DuckCell()):
+        _raises("cell_invalid", col.check_cell, bad)  # type: ignore[arg-type]
+
+    tampered_val = _cell("int64", "42")
+    object.__setattr__(tampered_val, "value", "not-an-int")
+    _raises("cell_invalid", col.check_cell, tampered_val)
+
+    tampered_prim = _cell("int64", "42")
+    object.__setattr__(tampered_prim, "value", 42)
+    _raises("cell_invalid", col.check_cell, tampered_prim)
+
+    tampered_tag = _cell("int64", "42")
+    object.__setattr__(tampered_tag, "cell_type", "float")
+    _raises("cell_invalid", col.check_cell, tampered_tag)
+
+    deleted_slot = _cell("int64", "42")
+    object.__delattr__(deleted_slot, "value")
+    _raises("cell_invalid", col.check_cell, deleted_slot)
+
+
+def test_verify_result_projection_reparses_tampered_projection_and_schema() -> None:
+    bad_count = ResultProjection.from_dict(_projection_dict(REL_SCHEMA))
+    object.__setattr__(bad_count, "row_count", 99)
+    _raises("row_count_mismatch", verify_result_projection, bad_count, REL_SCHEMA)
+
+    bad_cell_proj = ResultProjection.from_dict(_projection_dict(REL_SCHEMA))
+    object.__setattr__(bad_cell_proj.rows[0][1], "value", "not-a-date")
+    _raises("cell_invalid", verify_result_projection, bad_cell_proj, REL_SCHEMA)
+
+    duck_proj = ResultProjection.from_dict(_projection_dict(SCALAR_SCHEMA, SCALAR_ROWS))
+    object.__setattr__(duck_proj, "rows", ((_DuckCell(),),))
+    _raises("cell_invalid", verify_result_projection, duck_proj, SCALAR_SCHEMA)
+
+    always_eq_loc = ArtifactLocator(
+        SCHEMA_TYPE,
+        "sha256:" + "d" * 64,
+        store_kind=_AlwaysEq(),  # type: ignore[arg-type]
+        object_ref="cell-object:sha256:" + "d" * 64,
+    )
+    loc_proj = ResultProjection.from_dict(_projection_dict(REL_SCHEMA))
+    object.__setattr__(loc_proj, "analysis_result_schema_locator", always_eq_loc)
+    _raises("invalid_locator", verify_result_projection, loc_proj, REL_SCHEMA)
+
+    bad_uk_schema = AnalysisResultSchema.from_dict(_schema_dict(unique_key=["day", "resource_ref"]))
+    object.__setattr__(bad_uk_schema, "unique_key", ("undeclared",))
+    _raises(
+        "schema_invalid",
+        verify_result_projection,
+        ResultProjection.from_dict(_projection_dict(REL_SCHEMA)),
+        bad_uk_schema,
+    )
+
+    signed_schema = AnalysisResultSchema.from_dict(_signed(REL_SCHEMA.to_dict()), require_signed=True)
+    forged_schema = AnalysisResultSchema.from_dict(_signed(REL_SCHEMA.to_dict()), require_signed=True)
+    assert forged_schema.integrity is not None
+    object.__setattr__(forged_schema.integrity, "content_digest", "sha256:" + "0" * 64)
+    _raises(
+        "integrity_mismatch",
+        verify_result_projection,
+        ResultProjection.from_dict(_projection_dict(signed_schema)),
+        forged_schema,
+    )
+
+    partial_schema = AnalysisResultSchema.from_dict(_signed(REL_SCHEMA.to_dict()), require_signed=True)
+    assert partial_schema.integrity is not None
+    object.__setattr__(partial_schema.integrity, "signature_base64", None)
+    _raises(
+        "invalid_integrity",
+        verify_result_projection,
+        ResultProjection.from_dict(_projection_dict(signed_schema)),
+        partial_schema,
+    )

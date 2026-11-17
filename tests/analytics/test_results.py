@@ -786,3 +786,119 @@ def test_result_set_entry_lookup() -> None:
     assert result_set.entry("metric:a").result_key == "metric:a"
     _raises("unknown_result_key", result_set.entry, "metric:z")
     _raises("unknown_result_key", result_set.entry, 1)
+
+
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+OTHER_RUN = _loc("smart_ads/migration_run_context/v1", "6")
+
+
+def test_verifier_rejects_cross_run_results_and_binds_run_context_locator() -> None:
+    from smart_ads.analytics.cells import RESULT_SET_ERROR_CODES
+
+    assert "cross_run_result" in RESULT_SET_ERROR_CODES
+    other_run_dict = {**_result_dict("metric:b", scalar=True), "migration_run_context_locator": OTHER_RUN.to_dict()}
+    foreign_run = AnalysisResult.from_dict(other_run_dict)
+    cross_exec = _execution_dict(_set_dict([_entry(RESULT_A), _entry(foreign_run)]))
+    _raises("cross_run_result", verify_analysis_execution, cross_exec, [RESULT_A, foreign_run], SCHEMAS, SNAPSHOT)
+
+    verified = verify_analysis_execution(
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        SCHEMAS,
+        SNAPSHOT,
+        bundle_migration_run_context_locator=RUN,
+    )
+    assert verified == verify_analysis_execution(
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        SCHEMAS,
+        SNAPSHOT,
+        bundle_migration_run_context_locator=RUN.to_dict(),
+    )
+
+    for wrong_run in (OTHER_RUN, OTHER_RUN.to_dict()):
+        _raises(
+            "cross_run_result",
+            verify_analysis_execution,
+            _execution_dict(),
+            [RESULT_A, RESULT_B],
+            SCHEMAS,
+            SNAPSHOT,
+            bundle_migration_run_context_locator=wrong_run,
+        )
+
+    always_eq_run = ArtifactLocator(
+        "smart_ads/migration_run_context/v1",
+        "sha256:" + "3" * 64,
+        store_kind=_AlwaysEq(),  # type: ignore[arg-type]
+        object_ref="cell-object:sha256:" + "3" * 64,
+    )
+    for malformed in (SNAPSHOT, SNAPSHOT.to_dict(), RUN.content_digest, 123, always_eq_run):
+        _raises(
+            "invalid_locator",
+            verify_analysis_execution,
+            _execution_dict(),
+            [RESULT_A, RESULT_B],
+            SCHEMAS,
+            SNAPSHOT,
+            bundle_migration_run_context_locator=malformed,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("require_signed", [False, True])
+@pytest.mark.parametrize("target", ["execution", "result", "schema"])
+def test_verifier_rejects_forged_digest_and_partial_integrity_on_dataclass_inputs(
+    target: str, require_signed: bool
+) -> None:
+    for mode, expected_code in (("forged_digest", "integrity_mismatch"), ("partial_sig", "invalid_integrity")):
+        raw_exec, results, schemas = _signed_world()
+        exec_obj = AnalysisExecution.from_dict(raw_exec, require_signed=True)
+        victim: Any = (
+            exec_obj if target == "execution" else results[0] if target == "result" else schemas[0]
+        )
+        assert victim.integrity is not None
+        if mode == "forged_digest":
+            object.__setattr__(victim.integrity, "content_digest", "sha256:" + "0" * 64)
+        else:
+            object.__setattr__(victim.integrity, "signature_base64", None)
+        _raises(
+            expected_code,
+            verify_analysis_execution,
+            exec_obj,
+            results,
+            schemas,
+            SNAPSHOT,
+            require_signed=require_signed,
+        )
+
+
+def test_verifier_reparses_tampered_snapshot_locator_and_deleted_slots() -> None:
+    tampered_snap = ArtifactLocator.from_dict(SNAPSHOT.to_dict())
+    object.__setattr__(tampered_snap, "store_kind", _AlwaysEq())
+    _raises(
+        "invalid_locator",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        SCHEMAS,
+        tampered_snap,
+    )
+
+    bad_digest_snap = ArtifactLocator.from_dict(SNAPSHOT.to_dict())
+    object.__setattr__(bad_digest_snap, "content_digest", 5)
+    _raises(
+        "invalid_locator",
+        verify_analysis_execution,
+        _execution_dict(),
+        [RESULT_A, RESULT_B],
+        SCHEMAS,
+        bad_digest_snap,
+    )
+
+    deleted_exec = AnalysisExecution.from_dict(_execution_dict())
+    object.__delattr__(deleted_exec, "canonical_result_set")
+    _raises("field_invalid", verify_analysis_execution, deleted_exec, [RESULT_A, RESULT_B], SCHEMAS, SNAPSHOT)

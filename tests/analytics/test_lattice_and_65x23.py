@@ -702,6 +702,51 @@ def test_classify_restatement_rejects_tampered_rows() -> None:
         classify_restatement(make_row(at=T_EARLY), forged)
 
 
+class _AlwaysEq:
+    def __eq__(self, other: object) -> bool:
+        return True
+
+
+def test_landing_row_seam_rejects_tombstone_and_timestamp_tampering() -> None:
+    tomb_forged = make_row(presence="retracted_tombstone", at=T_LATE, obs="observation:o2")
+    object.__setattr__(tomb_forged, "raw_numeric_value", "5")
+    with pytest.raises(ClosedValidationError):
+        classify_restatement(make_row(at=T_EARLY), tomb_forged)
+
+    dup_early = make_row(presence="missing", at=T_EARLY, obs="observation:o1")
+    dup_late = make_row(presence="missing", at=T_LATE, obs="observation:o2")
+    object.__setattr__(dup_early, "raw_numeric_value", "5")
+    object.__setattr__(dup_late, "raw_numeric_value", "5")
+    with pytest.raises(ClosedValidationError):
+        classify_restatement(dup_early, dup_late)
+
+    for bad_field in ("collected_at_utc", "semantic_observation_digest"):
+        bad_row = make_row(at=T_LATE, obs="observation:o9")
+        object.__setattr__(bad_row, bad_field, None)
+        for call in (
+            lambda r=bad_row: candidate_sort_key(r),
+            lambda r=bad_row: order_candidates([r]),
+            lambda r=bad_row: order_by_winner([make_row(at=T_EARLY), r]),
+            lambda r=bad_row: select_winner([make_row(at=T_EARLY), r]),
+            lambda r=bad_row: classify_restatement(make_row(at=T_EARLY), r),
+        ):
+            with pytest.raises(ClosedValidationError) as exc_info:
+                call()
+            assert type(exc_info.value) is ClosedValidationError
+
+    deleted_row = make_row(at=T_LATE, obs="observation:o8")
+    object.__delattr__(deleted_row, "collected_at_utc")
+    with pytest.raises(ClosedValidationError) as exc_info:
+        select_winner([deleted_row])
+    assert type(exc_info.value) is ClosedValidationError
+
+    always_eq_row = make_row(at=T_LATE, obs="observation:o7")
+    object.__setattr__(always_eq_row, "adapter_version", _AlwaysEq())
+    with pytest.raises(ClosedValidationError) as exc_info:
+        order_candidates([always_eq_row])
+    assert type(exc_info.value) is ClosedValidationError
+
+
 def is_tombstone(row: AnalyticsLandingRow) -> bool:
     return row.presence_status == "retracted_tombstone"
 

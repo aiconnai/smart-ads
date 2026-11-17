@@ -27,7 +27,7 @@ _T = TypeVar("_T")
 RESULT_SET_ERROR_CODES: Final[frozenset[str]] = frozenset(
     (
         "alternate_wrapper bundle_locator_mismatch cell_invalid cell_type_mismatch "
-        "cross_snapshot_result digest_mismatch duplicate_result duplicate_row "
+        "cross_run_result cross_snapshot_result digest_mismatch duplicate_result duplicate_row "
         "duplicate_schema empty_result_set extra_result field_invalid integrity_mismatch "
         "invalid_integrity invalid_locator missing_result null_not_allowed "
         "projection_mismatch result_locator_mismatch results_unordered "
@@ -50,6 +50,27 @@ class ResultSetMismatchError(ClosedValidationError):
 
 def _fail(code: str, message: str) -> ResultSetMismatchError:
     return ResultSetMismatchError(code, message)
+
+
+_RAW_ERRORS: Final[tuple[type[Exception], ...]] = (
+    AttributeError,
+    IndexError,
+    KeyError,
+    TypeError,
+    ValueError,
+)
+
+
+def _guard_rs(code: str, fn: Callable[[], _T]) -> _T:
+    """Run `fn()` at a public seam, converting bare or uncoded errors into `code`."""
+    try:
+        return fn()
+    except ResultSetMismatchError:
+        raise
+    except ClosedValidationError as exc:
+        raise _fail(code, str(exc)) from exc
+    except _RAW_ERRORS as exc:
+        raise _fail(code, f"{type(exc).__name__}: {exc}") from exc
 
 
 def _coded(code: str, fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -205,17 +226,21 @@ def _check_integrity(integrity: object, envelope: Mapping[str, Any], *, label: s
         return
     if not isinstance(integrity, P1Integrity):
         raise _fail("invalid_integrity", f"{label}.integrity: expected P1Integrity or None")
+    _guard_rs("invalid_integrity", lambda: canonicalize_jcs(integrity.to_dict()))
     if integrity.is_signed and integrity.content_digest != p1_content_digest(envelope):
         raise _fail("integrity_mismatch", f"{label}.integrity.content_digest: recomputation differs")
 
 
-def _require_locator(value: object, expected_type: str, *, label: str) -> None:
-    if not isinstance(value, ArtifactLocator) or value.artifact_type != expected_type:
-        raise _fail("invalid_locator", f"{label}: expected ArtifactLocator for {expected_type!r}")
-
-
 def _parse_locator(value: object, expected_type: str) -> ArtifactLocator:
-    return _coded("invalid_locator", ArtifactLocator.from_dict, value, expected_type=expected_type)
+    loc = _coded("invalid_locator", ArtifactLocator.from_dict, value, expected_type=expected_type)
+    _coded("invalid_locator", canonicalize_jcs, loc.to_dict())
+    return loc
+
+
+def _require_locator(value: object, expected_type: str, *, label: str) -> ArtifactLocator:
+    if not isinstance(value, ArtifactLocator):
+        raise _fail("invalid_locator", f"{label}: expected ArtifactLocator for {expected_type!r}")
+    return _guard_rs("invalid_locator", lambda: _parse_locator(value.to_dict(), expected_type))
 
 
 def _sequence(value: object, *, label: str, code: str = "field_invalid") -> tuple[Any, ...]:
@@ -263,6 +288,9 @@ class ResultColumn:
 
     def check_cell(self, cell: TaggedScalarCell) -> None:
         """Raise unless `cell` satisfies this column's type and nullability."""
+        if not isinstance(cell, TaggedScalarCell):
+            raise _fail("cell_invalid", "cell: expected TaggedScalarCell")
+        _guard_rs("cell_invalid", lambda: _validate_cell(cell.cell_type, cell.value))
         if cell.cell_type == "null":
             if not self.nullable:
                 raise _fail("null_not_allowed", f"column {self.name!r} is not nullable")
@@ -446,6 +474,37 @@ class ResultProjection:
         raise _fail("unknown_column", f"result_projection: undeclared column {name!r}")
 
 
+def _reparse_projection(projection: ResultProjection) -> ResultProjection:
+    raw_rows = _guard_rs("field_invalid", lambda: _sequence(projection.rows, label="rows"))
+    for raw_row in raw_rows:
+        for cell in _sequence(raw_row, label="rows[]"):
+            if not isinstance(cell, TaggedScalarCell):
+                raise _fail("cell_invalid", "rows: every cell must be TaggedScalarCell")
+    fresh = _guard_rs("field_invalid", lambda: ResultProjection.from_dict(projection.to_dict()))
+    _guard_rs("field_invalid", lambda: canonicalize_jcs(fresh.to_dict()))
+    return fresh
+
+
+def _reparse_p1(item: _T, cls: Any, *, code: str = "field_invalid") -> _T:
+    """Re-parse a P1 dataclass from wire form, verifying JCS and partial-integrity parity."""
+    maybe_proj = _guard_rs(code, lambda: getattr(item, "result_projection", None))
+    if isinstance(maybe_proj, ResultProjection):
+        _reparse_projection(maybe_proj)
+    fresh = _guard_rs(code, lambda: cls.from_dict(item.to_dict()))  # type: ignore[attr-defined]
+    _guard_rs(code, lambda: canonicalize_jcs(fresh.to_dict()))
+    given_int = _guard_rs("invalid_integrity", lambda: item.integrity)  # type: ignore[attr-defined]
+    if given_int is not None:
+        if not isinstance(given_int, P1Integrity) or fresh.integrity is None:
+            raise _fail("invalid_integrity", f"{cls.SCHEMA}: malformed P1 integrity")
+        pair = _guard_rs(
+            "invalid_integrity",
+            lambda: (given_int.content_digest, given_int.signature_base64),
+        )
+        if pair != (fresh.integrity.content_digest, fresh.integrity.signature_base64):
+            raise _fail("invalid_integrity", f"{cls.SCHEMA}: partial P1 integrity state")
+    return fresh  # type: ignore[return-value]
+
+
 def verify_result_projection(
     projection: ResultProjection, resolved_schema: AnalysisResultSchema
 ) -> None:
@@ -454,23 +513,25 @@ def verify_result_projection(
         raise _fail("field_invalid", "projection: expected ResultProjection")
     if not isinstance(resolved_schema, AnalysisResultSchema):
         raise _fail("field_invalid", "resolved_schema: expected AnalysisResultSchema")
+    fresh_proj = _reparse_projection(projection)
+    fresh_schema = _reparse_p1(resolved_schema, AnalysisResultSchema, code="schema_invalid")
     if not _same_bytes(
-        projection.analysis_result_schema_locator.to_dict(), resolved_schema.locator().to_dict()
+        fresh_proj.analysis_result_schema_locator.to_dict(), fresh_schema.locator().to_dict()
     ):
         raise _fail("schema_locator_mismatch", "projection schema locator != resolved schema")
-    schema_dict = resolved_schema.to_dict()
-    inline = projection.to_dict()
+    schema_dict = fresh_schema.to_dict()
+    inline = fresh_proj.to_dict()
     if not _same_bytes(
         [inline["result_kind"], inline["columns"]],
         [schema_dict["result_kind"], schema_dict["columns"]],
     ):
         raise _fail("schema_mismatch", "inline result_kind/columns differ from resolved schema")
-    if resolved_schema.unique_key is None:
+    if fresh_schema.unique_key is None:
         return
-    names = [col.name for col in resolved_schema.columns]
-    indexes = [names.index(name) for name in resolved_schema.unique_key]
+    names = [col.name for col in fresh_schema.columns]
+    indexes = [names.index(name) for name in fresh_schema.unique_key]
     seen: set[bytes] = set()
-    for row in projection.rows:
+    for row in fresh_proj.rows:
         key = canonicalize_jcs([row[i].to_dict() for i in indexes])
         if key in seen:
             raise _fail("duplicate_row", "duplicate row under the declared unique_key")
