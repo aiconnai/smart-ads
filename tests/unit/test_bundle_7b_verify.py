@@ -209,6 +209,28 @@ def test_verifier_binds_the_retrieval_time_and_fact_set_of_each_result(world: Wo
     )
 
 
+def test_verifier_binds_the_candidate_result_registry_snapshot(world: World) -> None:
+    base = world.kwargs["candidate_result"]
+    moved = collection_result(facts_for(CANDIDATE_VALUES), side="candidate",
+                              retrieved_at=CANDIDATE_AT,
+                              admitted_locator=base.admitted_collection_locator,
+                              registry_locator=loc("smart_ads/private_registry_snapshot/v1", "f"))
+    assert verify_defect(world, candidate_result=moved,
+                         candidate_effect_result_locator=oracle_result_locator(moved)) == (
+        "collection_result_mismatch"
+    )
+
+
+def test_verifier_takes_the_profile_binding_scope_from_the_fingerprint() -> None:
+    other_scope = build_world(scope="scope:other-campaigns")
+    other_scope.verify()
+    # The query's resource_scope_ref is scope:campaigns-active; a profile bound to it fails.
+    query_scoped = default_profiles("scope:campaigns-active")
+    assert verify_defect(other_scope, tolerance_profiles=query_scoped) == (
+        "tolerance_profile_unbound"
+    )
+
+
 @pytest.mark.parametrize("side", ["candidate", "reference"])
 def test_verifier_binds_each_effect_proof_and_its_result_locator(world: World, side: str) -> None:
     other_proof = loc("smart_ads/effect_proof/v1", "e")

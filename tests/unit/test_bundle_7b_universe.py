@@ -115,6 +115,21 @@ def test_row_universe_digest_rejects_unsorted_or_duplicate_or_empty_input() -> N
         assert code_of(excinfo) == code
 
 
+def test_row_universe_digest_requires_k_order_when_object_bytes_disagree() -> None:
+    # Same resource; metric_date decides K order, breakdown_signature decides object bytes.
+    later = row_key(REF_A, metric_date="2026-11-10", breakdown_signature="breakdown:a")
+    earlier = row_key(REF_A, metric_date="2026-11-09", breakdown_signature="breakdown:z")
+    assert canonicalize_jcs(later.to_dict()) < canonicalize_jcs(earlier.to_dict())
+    assert compute_row_universe([later, earlier]) == (earlier, later)
+    expected = oracle_domain_digest(
+        "SMART-ADS:7B-ROW-UNIVERSE:V1\n", [earlier.to_dict(), later.to_dict()]
+    )
+    assert compute_row_universe_digest((earlier, later)) == expected
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        compute_row_universe_digest((later, earlier))
+    assert code_of(excinfo) == "wrong_order"
+
+
 def test_pair_universe_is_sorted_by_kfive_and_keeps_distinct_metrics() -> None:
     pairs = compute_pair_universe(facts_for(BASE_VALUES))
     assert len(pairs) == 6

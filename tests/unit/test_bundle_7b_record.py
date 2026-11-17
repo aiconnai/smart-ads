@@ -368,6 +368,32 @@ def test_record_requires_the_canonical_query_to_request_exactly_the_sealed_metri
     assert record_defect(record) == "canonical_query_mismatch"
 
 
+def test_record_query_metrics_are_checked_even_when_every_projection_agrees(
+    world: World,
+) -> None:
+    narrower = dataclasses.replace(canonical_query(), metric_semantic_refs=(CLICKS, IMPRESSIONS))
+    record = dict(
+        world.record,
+        canonical_query_contract=narrower.to_dict(),
+        canonical_query_digest=narrower.canonical_query_digest,
+    )
+    for side in ("candidate_execution", "reference_execution"):
+        record = tampered(record, (side, "canonical_query_projection"), narrower.to_dict())
+        record = tampered(
+            record, (side, "canonical_query_projection_digest"), narrower.canonical_query_digest
+        )
+    assert record_defect(record) == "canonical_query_mismatch"
+
+
+def test_record_candidate_only_version_difference_fails_the_fingerprint(world: World) -> None:
+    record = tampered(
+        world.record,
+        ("candidate_execution", "gate3_certification_fingerprint", "selected_meta_api_version"),
+        "v22.0",
+    )
+    assert record_defect(record) == "fingerprint_mismatch"
+
+
 def test_record_side_projection_must_equal_the_record_query(world: World) -> None:
     other = dataclasses.replace(canonical_query(), tzdb_version="2026b")
     record = tampered(world.record, ("reference_execution", "canonical_query_projection"),

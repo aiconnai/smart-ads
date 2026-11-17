@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from smart_ads.contracts.jcs import canonicalize_jcs
 from smart_ads.contracts.schemas import CollectionResult
 from smart_ads.reconciliation import bundle_7b as b7
 from smart_ads.reconciliation.bundle_7b import (
@@ -18,8 +19,12 @@ from smart_ads.reconciliation.bundle_7b import (
 )
 from smart_ads.reconciliation.tolerance import ToleranceComparison
 from tests.unit._bundle_7b_builders import (
+    CANDIDATE_AT,
     CLICKS,
     EXACT_ROW,
+    REFERENCE_AT,
+    collection_result,
+    facts_for,
     IMPRESSIONS,
     REF_A,
     REF_B,
@@ -291,6 +296,29 @@ def test_logical_digest_hashes_the_j_ordered_array(
         "SMART-ADS:7B-FACT-RECONCILIATIONS:V1\n", [rec.to_dict() for rec in recs]
     )
     assert compute_logical_fact_reconciliation_digest(recs) == expected
+
+
+def test_logical_digest_requires_j_order_when_object_bytes_disagree() -> None:
+    values = {(REF_A, IMPRESSIONS): "1", (REF_A, CLICKS): "2", (REF_A, SPEND): "3"}
+    days = ("2026-11-09", "2026-11-10")
+    cand = collection_result(
+        [f for day in days for f in facts_for(values, metric_date=day)],
+        side="candidate", retrieved_at=CANDIDATE_AT,
+    )
+    ref = collection_result(
+        [f for day in days for f in facts_for(values, side="reference", metric_date=day)],
+        side="reference", retrieved_at=REFERENCE_AT,
+    )
+    recs = _all_reconciliations(cand, ref)
+    assert [r.canonical_fact_key.metric_date for r in recs] == [days[0]] * 3 + [days[1]] * 3
+    by_object_bytes = sorted(recs, key=lambda r: canonicalize_jcs(r.to_dict()))
+    assert by_object_bytes != recs
+    assert compute_logical_fact_reconciliation_digest(recs) == oracle_domain_digest(
+        "SMART-ADS:7B-FACT-RECONCILIATIONS:V1\n", [r.to_dict() for r in recs]
+    )
+    with pytest.raises(Bundle7BDefectError) as excinfo:
+        compute_logical_fact_reconciliation_digest(by_object_bytes)
+    assert code_of(excinfo) == "wrong_order"
 
 
 def test_logical_digest_requires_canonical_unique_non_empty_order(
