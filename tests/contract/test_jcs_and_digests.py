@@ -642,7 +642,7 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         ADR_DATA_DOMAIN_PREFIXES,
         SUPPLEMENTAL_DOMAIN_PREFIXES,
     )
-    assert len(ADR_P1_DOMAIN_PREFIXES) == 37
+    assert len(ADR_P1_DOMAIN_PREFIXES) == 39
     assert len(ADR_DATA_DOMAIN_PREFIXES) == 8
     assert len(SUPPLEMENTAL_DOMAIN_PREFIXES) == 2
 
@@ -656,10 +656,12 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
             assert prefix.startswith("SMART-ADS:") and prefix.endswith(":V1\n")
             all_values.append(prefix)
 
-    # All 47 prefix values across the 3 tables are pairwise disjoint
-    assert len(all_values) == 47
-    assert len(set(all_values)) == 47
+    # All 49 prefix values across the 3 tables are pairwise disjoint
+    assert len(all_values) == 49
+    assert len(set(all_values)) == 49
 
+
+def test_domain_prefix_tables_match_adr_proposals() -> None:
     adr_bytes = (
         Path(__file__).resolve().parents[2]
         / "docs"
@@ -670,34 +672,36 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         row["schema"]: row["domain_prefix"]
         for row in decomposition_admission.profile_proposals(adr_bytes)
     }
-    gov1_expected = {
-        "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
-        "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
-        "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
-        "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
-        "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
-    }
-    for schema, expected_prefix in gov1_expected.items():
-        assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
-        assert proposals_by_schema[schema] == expected_prefix
-        assert ADR_P1_DOMAIN_PREFIXES[schema] == proposals_by_schema[schema]
-
-    pr2_expected = {
-        "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
-        "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
-        "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
-        "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
-        "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
-        "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
-        "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
-        "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
-        "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
-        "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
-    }
-    assert len(pr2_expected) == 10
-    for schema, expected_prefix in pr2_expected.items():
-        assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
-        assert proposals_by_schema[schema] == expected_prefix
+    expected_groups = (
+        {
+            "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
+            "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
+            "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
+            "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
+            "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
+        },
+        {
+            "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
+            "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
+            "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
+            "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
+            "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
+            "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
+            "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
+            "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
+            "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
+            "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
+        },
+        {
+            "smart_ads/git_artifact_provenance/v1": "SMART-ADS:GIT-ARTIFACT:V1\n",
+            "smart_ads/negative_security_test_report/v1": "SMART-ADS:NEGATIVE-SECURITY:V1\n",
+            "smart_ads/certification_7a_record/v1": "SMART-ADS:CERTIFICATION-7A:V1\n",
+        },
+    )
+    for expected_map in expected_groups:
+        for schema, expected_prefix in expected_map.items():
+            assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
+            assert proposals_by_schema[schema] == expected_prefix
 
     assert (
         ADR_DATA_DOMAIN_PREFIXES["7b_row_universe"]

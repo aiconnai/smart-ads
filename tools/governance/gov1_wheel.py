@@ -141,7 +141,9 @@ EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
     {
         "smart_ads",
         "smart_ads.contracts",
+        "smart_ads.contracts.git_provenance",
         "smart_ads.contracts.jcs",
+        "smart_ads.contracts.negative_security",
         "smart_ads.contracts.numerics",
         "smart_ads.contracts.scalars",
         "smart_ads.contracts.schemas",
@@ -2170,9 +2172,49 @@ def verify_contiguous_zip_layout(
         raise ValueError("wheel archive: non-contiguous central directory byte span")
 
 
-def _read_and_validate_wheel_archive(
-    wheel_bytes: bytes,
-) -> tuple[dict[str, bytes], list[dict[str, Any]], str, list[str]]:
+def _extract_single_wheel_member(
+    zf: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    members: dict[str, bytes],
+) -> bytes:
+    if info.is_dir() or info.filename.endswith("/"):
+        raise ValueError(
+            f"wheel archive: directory entry forbidden: {info.filename!r}"
+        )
+    unix_type = (info.external_attr >> 16) & 0o170000
+    if unix_type == 0o120000 or (unix_type != 0 and unix_type != 0o100000):
+        raise ValueError(
+            f"wheel archive: symlink or special entry forbidden: {info.filename!r}"
+        )
+    source_path(info.filename)
+    if info.filename in members:
+        raise ValueError(
+            f"wheel archive: duplicate central-directory entry {info.filename!r}"
+        )
+    if _WHEEL_ALLOWLIST_RE.fullmatch(info.filename) is None:
+        raise ValueError(
+            f"wheel archive: member violates strict allowlist: {info.filename!r}"
+        )
+    try:
+        raw = zf.read(info)
+    except (
+        zipfile.BadZipFile,
+        zlib.error,
+        EOFError,
+        RuntimeError,
+        NotImplementedError,
+    ) as exc:
+        raise ValueError(
+            f"wheel archive: failed to decompress member {info.filename!r}: {exc}"
+        ) from exc
+    if len(raw) != info.file_size:
+        raise ValueError(
+            f"wheel archive: declared file_size mismatch on {info.filename!r}"
+        )
+    return raw
+
+
+def _extract_wheel_zip_members(wheel_bytes: bytes) -> dict[str, bytes]:
     try:
         zf_ctx = zipfile.ZipFile(io.BytesIO(wheel_bytes), "r")
     except zipfile.BadZipFile as exc:
@@ -2185,41 +2227,7 @@ def _read_and_validate_wheel_archive(
             raise ValueError("wheel archive: empty ZIP central directory")
         verify_contiguous_zip_layout(wheel_bytes, infos, comment=zf.comment)
         for info in infos:
-            if info.is_dir() or info.filename.endswith("/"):
-                raise ValueError(
-                    f"wheel archive: directory entry forbidden: {info.filename!r}"
-                )
-            unix_type = (info.external_attr >> 16) & 0o170000
-            if unix_type == 0o120000 or (unix_type != 0 and unix_type != 0o100000):
-                raise ValueError(
-                    f"wheel archive: symlink or special entry forbidden: {info.filename!r}"
-                )
-            source_path(info.filename)
-            if info.filename in members:
-                raise ValueError(
-                    f"wheel archive: duplicate central-directory entry {info.filename!r}"
-                )
-            if _WHEEL_ALLOWLIST_RE.fullmatch(info.filename) is None:
-                raise ValueError(
-                    f"wheel archive: member violates strict allowlist: {info.filename!r}"
-                )
-            try:
-                raw = zf.read(info)
-            except (
-                zipfile.BadZipFile,
-                zlib.error,
-                EOFError,
-                RuntimeError,
-                NotImplementedError,
-            ) as exc:
-                raise ValueError(
-                    f"wheel archive: failed to decompress member {info.filename!r}: {exc}"
-                ) from exc
-            if len(raw) != info.file_size:
-                raise ValueError(
-                    f"wheel archive: declared file_size mismatch on {info.filename!r}"
-                )
-            members[info.filename] = raw
+            members[info.filename] = _extract_single_wheel_member(zf, info, members)
 
     for mandatory in (
         "smart_ads/__init__.py",
@@ -2229,83 +2237,78 @@ def _read_and_validate_wheel_archive(
     ):
         if mandatory not in members:
             raise ValueError(f"wheel archive: missing mandatory member {mandatory!r}")
+    return members
 
+
+def _parse_single_record_row(
+    row: list[str],
+    members: dict[str, bytes],
+    seen_record_paths: set[str],
+) -> dict[str, Any]:
+    if len(row) != 3:
+        raise ValueError(f"wheel RECORD: expected 3 CSV columns, got {row!r}")
+    rec_path, rec_hash, rec_size = row
+    source_path(rec_path)
+    if rec_path in seen_record_paths:
+        raise ValueError(f"wheel RECORD: duplicate row for {rec_path!r}")
+    if rec_path not in members:
+        raise ValueError(
+            f"wheel RECORD: row references nonexistent archive member {rec_path!r}"
+        )
+    seen_record_paths.add(rec_path)
+
+    if rec_path == EXPECTED_SELF_RECORD_PATH:
+        if rec_hash != "" or rec_size != "":
+            raise ValueError(
+                "wheel RECORD: self-referential RECORD row must have empty hash and empty size"
+            )
+        return {"path": EXPECTED_SELF_RECORD_PATH, "record_hash": "", "record_size": None}
+
+    raw_member = members[rec_path]
+    expected_hash = _pep427_record_hash(raw_member)
+    if rec_hash == "" or rec_hash != expected_hash:
+        raise ValueError(
+            f"wheel RECORD: hash mismatch for {rec_path!r} "
+            f"(expected {expected_hash!r}, got {rec_hash!r})"
+        )
+    if _NONNEG_INT_STR_RE.fullmatch(rec_size) is None or int(rec_size) != len(raw_member):
+        raise ValueError(
+            f"wheel RECORD: size mismatch for {rec_path!r} "
+            f"(expected {len(raw_member)}, got {rec_size!r})"
+        )
+    return {"path": rec_path, "record_hash": expected_hash, "record_size": len(raw_member)}
+
+
+def _validate_wheel_record(
+    members: dict[str, bytes],
+) -> tuple[list[dict[str, Any]], str]:
     try:
         record_text = members[EXPECTED_SELF_RECORD_PATH].decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("wheel RECORD: invalid UTF-8") from exc
     if "\x00" in record_text or not record_text.strip():
         raise ValueError("wheel RECORD: empty or contains NUL byte")
-
     for raw_line in record_text.splitlines():
         if not raw_line:
             raise ValueError("wheel RECORD: blank lines are forbidden")
-
     try:
         record_rows = list(csv.reader(io.StringIO(record_text, newline="")))
     except csv.Error as exc:
         raise ValueError(f"wheel RECORD: invalid CSV syntax: {exc}") from exc
 
     seen_record_paths: set[str] = set()
-    record_entries: list[dict[str, Any]] = []
-    for row in record_rows:
-        if len(row) != 3:
-            raise ValueError(f"wheel RECORD: expected 3 CSV columns, got {row!r}")
-        rec_path, rec_hash, rec_size = row
-        source_path(rec_path)
-        if rec_path in seen_record_paths:
-            raise ValueError(f"wheel RECORD: duplicate row for {rec_path!r}")
-        if rec_path not in members:
-            raise ValueError(
-                f"wheel RECORD: row references nonexistent archive member {rec_path!r}"
-            )
-        seen_record_paths.add(rec_path)
-
-        if rec_path == EXPECTED_SELF_RECORD_PATH:
-            if rec_hash != "" or rec_size != "":
-                raise ValueError(
-                    "wheel RECORD: self-referential RECORD row must have empty hash and empty size"
-                )
-            record_entries.append(
-                {
-                    "path": EXPECTED_SELF_RECORD_PATH,
-                    "record_hash": "",
-                    "record_size": None,
-                }
-            )
-        else:
-            raw_member = members[rec_path]
-            expected_hash = _pep427_record_hash(raw_member)
-            if rec_hash == "" or rec_hash != expected_hash:
-                raise ValueError(
-                    f"wheel RECORD: hash mismatch for {rec_path!r} "
-                    f"(expected {expected_hash!r}, got {rec_hash!r})"
-                )
-            if (
-                _NONNEG_INT_STR_RE.fullmatch(rec_size) is None
-                or int(rec_size) != len(raw_member)
-            ):
-                raise ValueError(
-                    f"wheel RECORD: size mismatch for {rec_path!r} "
-                    f"(expected {len(raw_member)}, got {rec_size!r})"
-                )
-            record_entries.append(
-                {
-                    "path": rec_path,
-                    "record_hash": expected_hash,
-                    "record_size": len(raw_member),
-                }
-            )
-
+    record_entries = [
+        _parse_single_record_row(row, members, seen_record_paths)
+        for row in record_rows
+    ]
     if seen_record_paths != set(members.keys()):
         missing = sorted(set(members.keys()) - seen_record_paths)
         raise ValueError(f"wheel RECORD: archive members omitted from RECORD: {missing!r}")
+    sorted_entries = sorted(record_entries, key=lambda e: e["path"].encode("utf-8"))
+    return sorted_entries, json_digest(sorted_entries)
 
-    sorted_record_entries = sorted(
-        record_entries, key=lambda e: e["path"].encode("utf-8")
-    )
-    sorted_record_digest = json_digest(sorted_record_entries)
 
+def _derive_and_scan_wheel_modules(members: dict[str, bytes]) -> list[str]:
     derived_modules: set[str] = set()
     for member_path in sorted(members.keys(), key=lambda s: s.encode("utf-8")):
         if not member_path.endswith(".py"):
@@ -2337,11 +2340,18 @@ def _read_and_validate_wheel_archive(
 
     if derived_modules != EXPECTED_PACKAGED_MODULES:
         raise ValueError(
-            "wheel archive: packaged module set does not match expected 43 modules: "
-            f"{sorted(derived_modules)!r}"
+            "wheel archive: packaged module set does not match expected "
+            f"{len(EXPECTED_PACKAGED_MODULES)} modules: {sorted(derived_modules)!r}"
         )
+    return sorted(derived_modules, key=lambda s: s.encode("utf-8"))
 
-    sorted_modules = sorted(derived_modules, key=lambda s: s.encode("utf-8"))
+
+def _read_and_validate_wheel_archive(
+    wheel_bytes: bytes,
+) -> tuple[dict[str, bytes], list[dict[str, Any]], str, list[str]]:
+    members = _extract_wheel_zip_members(wheel_bytes)
+    sorted_record_entries, sorted_record_digest = _validate_wheel_record(members)
+    sorted_modules = _derive_and_scan_wheel_modules(members)
     return members, sorted_record_entries, sorted_record_digest, sorted_modules
 
 
@@ -2843,6 +2853,22 @@ def _validate_sorted_record_entries(entries: object, label: str) -> list[dict[st
     return copy.deepcopy(entries)
 
 
+def _validate_packaged_modules_list(mods: object) -> list[str]:
+    expected_mods = sorted(
+        EXPECTED_PACKAGED_MODULES, key=lambda s: s.encode("utf-8")
+    )
+    if (
+        type(mods) is not list
+        or any(type(m) is not str for m in mods)
+        or mods != expected_mods
+    ):
+        raise ValueError(
+            "inspection.packaged_modules: expected exact sorted "
+            f"{len(EXPECTED_PACKAGED_MODULES)} packaged modules"
+        )
+    return list(mods)
+
+
 def _validate_inspection_dict(inspection: dict[str, Any]) -> dict[str, Any]:
     exact_fields(inspection, _INSPECTION_FIELDS, "inspection")
     whl_digest = _require_sha256_digest(
@@ -2876,18 +2902,7 @@ def _validate_inspection_dict(inspection: dict[str, Any]) -> dict[str, Any]:
         True,
         "inspection.isolated_venv_import_passed",
     )
-    expected_mods = sorted(
-        EXPECTED_PACKAGED_MODULES, key=lambda s: s.encode("utf-8")
-    )
-    mods = inspection["packaged_modules"]
-    if (
-        type(mods) is not list
-        or any(type(m) is not str for m in mods)
-        or mods != expected_mods
-    ):
-        raise ValueError(
-            "inspection.packaged_modules: expected exact sorted 43 packaged modules"
-        )
+    checked_mods = _validate_packaged_modules_list(inspection["packaged_modules"])
     return {
         "wheel_digest": whl_digest,
         "schema_bundle_digest": schema_digest,
@@ -2896,7 +2911,7 @@ def _validate_inspection_dict(inspection: dict[str, Any]) -> dict[str, Any]:
         "archive_allowlist_passed": True,
         "ast_boundary_scan_passed": True,
         "isolated_venv_import_passed": True,
-        "packaged_modules": list(mods),
+        "packaged_modules": checked_mods,
     }
 
 

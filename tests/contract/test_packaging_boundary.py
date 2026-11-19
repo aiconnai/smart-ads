@@ -39,7 +39,9 @@ EXPECTED_PACKAGED_MODULES = frozenset(
     {
         "smart_ads",
         "smart_ads.contracts",
+        "smart_ads.contracts.git_provenance",
         "smart_ads.contracts.jcs",
+        "smart_ads.contracts.negative_security",
         "smart_ads.contracts.numerics",
         "smart_ads.contracts.scalars",
         "smart_ads.contracts.schemas",

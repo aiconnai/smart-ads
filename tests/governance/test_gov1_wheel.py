@@ -196,15 +196,11 @@ def test_constants_immutability_and_zero_ast_assert_in_gov1_wheel() -> None:
     assert len(p1.DOMAIN_PREFIXES) == 7
 
 
-def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
+def _assert_rebuild_and_wheel_locator(
     tmp_path: Path,
-    baseline_build: tuple[Path, gov1_wheel.GitBuildSnapshot, bytes, dict[str, Any]],
-    keypair: tuple[Path, bytes],
+    snapshot: gov1_wheel.GitBuildSnapshot,
+    wheel_bytes: bytes,
 ) -> None:
-    wheel_path, snapshot, wheel_bytes, inspection = baseline_build
-    expected_schema_digest = compute_schema_bundle_digest()
-
-    # Second independent build over REPO_ROOT produces byte-identical wheel & snapshot
     wheel_path_2, snapshot_2 = gov1_wheel.build_reproducible_wheel(
         REPO_ROOT, tmp_path / "rebuild_check"
     )
@@ -215,7 +211,6 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
     assert snapshot_2.build_backend_version == "1.33.0"
     assert snapshot_2.build_backend_digest == snapshot.build_backend_digest
 
-    # Wheel object locator validation
     whl_loc = gov1_wheel.build_wheel_object_locator(wheel_bytes)
     assert whl_loc == {
         "$schema": "smart_ads/wheel_object_locator/v1",
@@ -235,13 +230,19 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
     with pytest.raises(ValueError):
         gov1_wheel.verify_wheel_object_locator(bad_size_loc)
 
-    # Boundary inspection checks
+
+def _assert_boundary_inspection(
+    inspection: dict[str, Any],
+    wheel_bytes: bytes,
+    expected_schema_digest: str,
+) -> None:
+    assert EXPECTED_PACKAGED_MODULES == gov1_wheel.EXPECTED_PACKAGED_MODULES
     assert inspection["wheel_digest"] == digest(wheel_bytes)
     assert inspection["schema_bundle_digest"] == expected_schema_digest
     assert inspection["packaged_modules"] == sorted(
         EXPECTED_PACKAGED_MODULES, key=lambda s: s.encode("utf-8")
     )
-    assert len(inspection["packaged_modules"]) == 43
+    assert len(inspection["packaged_modules"]) == len(gov1_wheel.EXPECTED_PACKAGED_MODULES)
     assert inspection["archive_allowlist_passed"] is True
     assert inspection["ast_boundary_scan_passed"] is True
     assert inspection["isolated_venv_import_passed"] is True
@@ -257,63 +258,54 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
         inspection["sorted_record_entries"]
     )
 
-    # 1) Local Candidate path (non-signable, uses wheel_build_provenance_candidate_ref)
+
+def _assert_local_candidate_roundtrip(
+    wheel_path: Path,
+    snapshot: gov1_wheel.GitBuildSnapshot,
+    wheel_bytes: bytes,
+    inspection: dict[str, Any],
+    expected_schema_digest: str,
+) -> None:
     prov_cand = gov1_wheel.build_wheel_build_provenance_candidate(
-        migration_run_context_locator=RUN_CONTEXT_LOCATOR,
-        build_run_id=BUILD_RUN_ID,
-        built_at_utc=BUILT_AT_UTC,
-        snapshot=snapshot,
-        source_date_epoch=1_700_000_000,
-        schema_bundle_digest=expected_schema_digest,
-        wheel_bytes=wheel_bytes,
+        migration_run_context_locator=RUN_CONTEXT_LOCATOR, build_run_id=BUILD_RUN_ID,
+        built_at_utc=BUILT_AT_UTC, snapshot=snapshot, source_date_epoch=1_700_000_000,
+        schema_bundle_digest=expected_schema_digest, wheel_bytes=wheel_bytes,
     )
     prov_cand_res = gov1_wheel.verify_wheel_build_provenance(
         prov_cand, repo_root=REPO_ROOT, wheel_path=wheel_path
     )
     assert prov_cand_res == {
-        "mode": "candidate",
-        "schema": gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
-        "wheel_digest": digest(wheel_bytes),
-        "source_commit_sha": snapshot.commit_sha,
+        "mode": "candidate", "schema": gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA,
+        "wheel_digest": digest(wheel_bytes), "source_commit_sha": snapshot.commit_sha,
         "build_backend_digest": snapshot.build_backend_digest,
-        "schema_bundle_digest": expected_schema_digest,
-        "payload": prov_cand["payload"],
+        "schema_bundle_digest": expected_schema_digest, "payload": prov_cand["payload"],
     }
-
     prov_cand_ref = gov1_sandbox.build_local_candidate_ref(prov_cand)
     rep_cand = gov1_wheel.build_wheel_boundary_report_candidate(
-        migration_run_context_locator=RUN_CONTEXT_LOCATOR,
-        build_run_id=BUILD_RUN_ID,
-        verified_at_utc=VERIFIED_AT_UTC,
-        source_commit_sha=snapshot.commit_sha,
+        migration_run_context_locator=RUN_CONTEXT_LOCATOR, build_run_id=BUILD_RUN_ID,
+        verified_at_utc=VERIFIED_AT_UTC, source_commit_sha=snapshot.commit_sha,
         build_backend_digest=snapshot.build_backend_digest,
-        wheel_build_provenance_candidate_ref=prov_cand_ref,
-        inspection=inspection,
+        wheel_build_provenance_candidate_ref=prov_cand_ref, inspection=inspection,
     )
-    rep_cand_res = gov1_wheel.verify_wheel_boundary_report(
-        rep_cand, wheel_path=wheel_path
-    )
+    rep_cand_res = gov1_wheel.verify_wheel_boundary_report(rep_cand, wheel_path=wheel_path)
     assert rep_cand_res == {
-        "mode": "candidate",
-        "schema": gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA,
-        "wheel_digest": digest(wheel_bytes),
-        "schema_bundle_digest": expected_schema_digest,
-        "sorted_record_digest": inspection["sorted_record_digest"],
-        "payload": rep_cand["payload"],
+        "mode": "candidate", "schema": gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA,
+        "wheel_digest": digest(wheel_bytes), "schema_bundle_digest": expected_schema_digest,
+        "sorted_record_digest": inspection["sorted_record_digest"], "payload": rep_cand["payload"],
     }
 
-    # 2) P1 Signed Envelope path (uses wheel_build_provenance_locator + Store)
-    priv, raw32 = keypair
+
+def _build_and_store_signed_provenance(
+    store: Store,
+    wheel_path: Path,
+    snapshot: gov1_wheel.GitBuildSnapshot,
+    wheel_bytes: bytes,
+    expected_schema_digest: str,
+    priv: Path,
+    raw32: bytes,
+    prov_prefix: str,
+) -> tuple[str, dict[str, Any]]:
     signer_id = p1.key_id_for(raw32)
-    profiles = {
-        row["schema"]: row
-        for row in decomposition_admission.profile_proposals(ADR_PATH.read_bytes())
-    }
-    prov_prefix = profiles[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA]["domain_prefix"]
-    rep_prefix = profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"]
-    assert prov_prefix == "SMART-ADS:WHEEL-BUILD:V1\n"
-    assert rep_prefix == "SMART-ADS:WHEEL-BOUNDARY:V1\n"
-
     prov_env_unsigned = gov1_wheel.build_wheel_build_provenance_envelope(
         migration_run_context_locator=RUN_CONTEXT_LOCATOR,
         build_run_id=BUILD_RUN_ID,
@@ -331,11 +323,8 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
         )["mode"]
         == "envelope"
     )
-
     prov_env_signed = p1.sign_envelope(prov_env_unsigned, prov_prefix, priv)
     p1.verify_envelope(prov_env_signed, prov_prefix, raw32)
-
-    store = Store(tmp_path / "store")
     prov_locator = store.put(prov_env_signed)
     loaded_prov = store.get(prov_locator, gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA)
     prov_env_res = gov1_wheel.verify_wheel_build_provenance(
@@ -343,7 +332,32 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
     )
     assert prov_env_res["mode"] == "envelope"
     assert prov_env_res["wheel_digest"] == digest(wheel_bytes)
+    return signer_id, prov_locator
 
+
+def _assert_signed_p1_envelope_roundtrip(
+    tmp_path: Path,
+    wheel_path: Path,
+    snapshot: gov1_wheel.GitBuildSnapshot,
+    wheel_bytes: bytes,
+    inspection: dict[str, Any],
+    expected_schema_digest: str,
+    keypair: tuple[Path, bytes],
+) -> None:
+    priv, raw32 = keypair
+    profiles = {
+        row["schema"]: row
+        for row in decomposition_admission.profile_proposals(ADR_PATH.read_bytes())
+    }
+    prov_prefix = profiles[gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA]["domain_prefix"]
+    rep_prefix = profiles[gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA]["domain_prefix"]
+    assert prov_prefix == "SMART-ADS:WHEEL-BUILD:V1\n"
+    assert rep_prefix == "SMART-ADS:WHEEL-BOUNDARY:V1\n"
+
+    store = Store(tmp_path / "store")
+    signer_id, prov_locator = _build_and_store_signed_provenance(
+        store, wheel_path, snapshot, wheel_bytes, expected_schema_digest, priv, raw32, prov_prefix
+    )
     rep_env_unsigned = gov1_wheel.build_wheel_boundary_report_envelope(
         migration_run_context_locator=RUN_CONTEXT_LOCATOR,
         build_run_id=BUILD_RUN_ID,
@@ -364,6 +378,23 @@ def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
     )
     assert rep_env_res["mode"] == "envelope"
     assert rep_env_res["sorted_record_digest"] == inspection["sorted_record_digest"]
+
+
+def test_deterministic_build_and_full_candidate_and_p1_envelope_roundtrip(
+    tmp_path: Path,
+    baseline_build: tuple[Path, gov1_wheel.GitBuildSnapshot, bytes, dict[str, Any]],
+    keypair: tuple[Path, bytes],
+) -> None:
+    wheel_path, snapshot, wheel_bytes, inspection = baseline_build
+    expected_schema_digest = compute_schema_bundle_digest()
+    _assert_rebuild_and_wheel_locator(tmp_path, snapshot, wheel_bytes)
+    _assert_boundary_inspection(inspection, wheel_bytes, expected_schema_digest)
+    _assert_local_candidate_roundtrip(
+        wheel_path, snapshot, wheel_bytes, inspection, expected_schema_digest
+    )
+    _assert_signed_p1_envelope_roundtrip(
+        tmp_path, wheel_path, snapshot, wheel_bytes, inspection, expected_schema_digest, keypair
+    )
 
 
 def test_working_tree_and_git_index_dirtiness_immunity_f03(tmp_path: Path) -> None:
