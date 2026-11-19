@@ -538,8 +538,9 @@ def test_hermetic_execution_blocked_without_oci_and_injects_pinned_reducer_in_oc
 
 def test_replay_helpers_differential_parity_across_wire_outcomes_and_completeness(world_7a: dict[str, Any]) -> None:
     assert wheel_build_insights_request(private_object_id="act_5544332211", admitted_day="2026-09-06") == gov1_7a_replay_helpers.build_pipeboard_insights_request(private_object_id="act_5544332211", admitted_day="2026-09-06")
-    assert wheel_loads_wire_json('{"z":-0,"n":9223372036854775807}') == gov1_7a_replay_helpers.loads_pipeboard_wire_json('{"z":-0,"n":9223372036854775807}')
-    for bad_json in ('{"a":' + ("9" * 65) + "}", '{"a":1e101}', '{"k":1,"k":2}'):
+    for ok_json in ('{"z":-0,"n":9223372036854775807}', '{"s":"quote \\"' + ("[" * 25) + '"}'):
+        assert wheel_loads_wire_json(ok_json) == gov1_7a_replay_helpers.loads_pipeboard_wire_json(ok_json)
+    for bad_json in ('{"a":' + ("9" * 65) + "}", '{"a":1e101}', '{"k":1,"k":2}', '{"k\\\\"":' + ("[" * 25) + ("]" * 25) + "}"):
         with pytest.raises(PipeboardAdapterError):
             wheel_loads_wire_json(bad_json)
         with pytest.raises(ValueError):
@@ -582,7 +583,9 @@ def _assert_gates_1_to_3_differential_parity(world_7a: dict[str, Any]) -> None:
     adm = admit_collection(CollectionRequest.from_dict(c0["collection_request"]), _make_static_cell_ports(clk, TimezoneRuleSnapshot.from_dict(corpus_doc["timezone_snapshot"]), reg_state, prereq), admission_id=c0["admission_id"]).admitted
     rctx = RetrievalContext.from_dict(c0["retrieval_context"])
     scoped = frozenset(u.resource_ref for u in inv_pair[1].expected_resources)
+    esc_quote_brackets_row = canonicalize({"data": [{"campaign_id": "12021000000001", "campaign_name": 'Promo "' + ("[" * 25), "date_start": "2026-09-06", "date_stop": "2026-09-06", "impressions": "10", "clicks": "2", "spend": "1.50"}]}).decode("utf-8")
     gate_payloads = [
+        (esc_quote_brackets_row, None),
         ('{"data":[{"campaign_id":"12021000000001","date_start":"2026-09-05","date_stop":"2026-09-05","adset_id":"bad"}]}', None),
         ('{"data":[{"campaign_id":"12021000000001","date_start":"2026-09-06","date_stop":"2026-09-06","impressions":"10"},{"campaign_id":"12021000000001","date_start":"2026-09-06","date_stop":"2026-09-06","impressions":"20"}]}', None),
         ('{"data":[{"campaign_id":"12021000000001","date_start":"2026-09-06","date_stop":"2026-09-06","impressions":"10"}]}', lambda _x: []),
@@ -592,7 +595,7 @@ def _assert_gates_1_to_3_differential_parity(world_7a: dict[str, Any]) -> None:
         kw_red = {} if custom_red is None else {"reducer": custom_red}
         wb = transform_pipeboard_response_to_batch(admitted=adm, boundary=bnd, retrieval_context=rctx, network_ok=True, http_status=200, headers=[("Content-Type", "application/json")], body_chunks=[outer], **kw_red)
         gb = gov1_7a_replay_helpers.transform_pipeboard_response_to_batch_dict(admitted=adm.to_dict(), private_object_id="act_5544332211", known_campaign_map=cmap, scoped_resource_refs=scoped, transport_limits=DEFAULT_PIPEBOARD_TRANSPORT_LIMITS.to_dict(), retrieval_context=rctx.to_dict(), network_ok=True, http_status=200, headers=[("Content-Type", "application/json")], body_chunks=[outer], **kw_red)
-        assert wb.to_dict() == gb
+        assert canonicalize(wb.to_dict()) == canonicalize(gb) and (inner_txt != esc_quote_brackets_row or len(gb["resource_observations"]) == 1)
         wc = recompute_collection_completeness(admission_succeeded=True, inventory=inv_pair[1], required_metrics=adm.canonical_query_contract.metric_semantic_refs, metric_source_mappings=reg_state.driver_contract.metric_source_mappings, transport_outcome=wb.transport_outcome, candidate_facts=())
         gc = gov1_7a_replay_helpers.recompute_collection_completeness_dict(expected_resources=[u.to_dict() for u in inv_pair[1].expected_resources], required_metrics=adm.canonical_query_contract.metric_semantic_refs, metric_source_mappings=reg_state.driver_contract.metric_source_mappings, batch_dict=gb, admitted_dict=adm.to_dict())
         assert (wc.status, wc.reasons, wc.normalized_fact_set_digest) == (gc["status"], tuple(gc["reasons"]), gc["normalized_fact_set_digest"])

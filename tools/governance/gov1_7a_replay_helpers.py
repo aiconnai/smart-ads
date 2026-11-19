@@ -172,8 +172,11 @@ def _check_json_depth_and_surrogates(raw_utf8: str, max_depth: int) -> None:
         if 0xD800 <= ord(ch) <= 0xDFFF:
             raise ValueError("invalid_wire_json")
         if in_str:
-            esc = (not esc and ch == "\\")
-            if not esc and ch == '"':
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
                 in_str = False
         elif ch == '"':
             in_str = True
