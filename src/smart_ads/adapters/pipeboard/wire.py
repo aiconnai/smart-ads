@@ -15,43 +15,24 @@ from smart_ads.domain.pipeboard_contract import (
     PipeboardTransportLimits,
 )
 
-DEFAULT_PIPEBOARD_TRANSPORT_LIMITS: Final[PipeboardTransportLimits] = (
-    PipeboardTransportLimits()
-)
+DEFAULT_PIPEBOARD_TRANSPORT_LIMITS: Final[PipeboardTransportLimits] = PipeboardTransportLimits()
 
 _MIN_INT64: Final[int] = -(1 << 63)
 _MAX_WIRE_NUM_TOKEN_LEN: Final[int] = 64
 _MAX_WIRE_EXPONENT_ABS: Final[int] = 100
 
-_META_ACCOUNT_ID_RE: Final[re.Pattern[str]] = re.compile(
-    r"\Aact_[1-9][0-9]{5,31}\Z"
-)
-_HEADER_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
-    r"\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z"
-)
-_CONTENT_LENGTH_RE: Final[re.Pattern[str]] = re.compile(
-    r"\A(0|[1-9][0-9]{0,18})\Z"
-)
+_META_ACCOUNT_ID_RE: Final[re.Pattern[str]] = re.compile(r"\Aact_[1-9][0-9]{5,31}\Z")
+_HEADER_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"\A[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+_CONTENT_LENGTH_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,18})\Z")
 _WIRE_NUMBER_RE: Final[re.Pattern[str]] = re.compile(
     r"\A-?(0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE]([+-]?[0-9]+))?\Z"
 )
 _HEX4_RE: Final[re.Pattern[str]] = re.compile(r"\A[0-9A-Fa-f]{4}\Z")
 
 _JSON_WHITESPACE: Final[frozenset[str]] = frozenset({" ", "\t", "\n", "\r"})
-_JSON_NUM_TERMINATORS: Final[frozenset[str]] = frozenset(
-    {" ", "\t", "\n", "\r", ",", "]", "}"}
-)
+_JSON_NUM_TERMINATORS: Final[frozenset[str]] = frozenset({" ", "\t", "\n", "\r", ",", "]", "}"})
 _JSON_ESCAPES: Final[Mapping[str, str]] = MappingProxyType(
-    {
-        '"': '"',
-        "\\": "\\",
-        "/": "/",
-        "b": "\b",
-        "f": "\f",
-        "n": "\n",
-        "r": "\r",
-        "t": "\t",
-    }
+    {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
 )
 _SINGLETON_HTTP_HEADERS: Final[frozenset[str]] = frozenset(
     {"content-type", "content-encoding", "content-length"}
@@ -71,9 +52,7 @@ _CLEAN_TRANSPORT_OUTCOME: Final[TransportOutcome] = TransportOutcome(
     duplicate_provider_observation=False,
 )
 
-_WIRE_REJECTION_SPECS: Final[
-    Mapping[str, tuple[ProviderErrorCategory, str]]
-] = MappingProxyType(
+_WIRE_REJECTION_SPECS: Final[Mapping[str, tuple[ProviderErrorCategory, str]]] = MappingProxyType(
     {
         "network_error": ("network", "provider transport failed before HTTP status"),
         "missing_http_status": ("transport", "provider HTTP status code is missing"),
@@ -148,14 +127,12 @@ class PipeboardAdapterError(ClosedValidationError):
 
     def __init__(self, code: str) -> None:
         if type(code) is not str:
-            raise ClosedValidationError("pipeboard_adapter_error: code must be str")
-        detail = _PRECONDITION_DETAIL_BY_CODE.get(code) or STATIC_DETAIL_BY_CODE.get(
-            code
-        )
+            raise ClosedValidationError("pipeboard_adapter_error: code must be str") from None
+        detail = _PRECONDITION_DETAIL_BY_CODE.get(code) or STATIC_DETAIL_BY_CODE.get(code)
         if detail is None:
             raise ClosedValidationError(
                 "pipeboard_adapter_error: unknown closed error code"
-            )
+            ) from None
         super().__init__(f"pipeboard_adapter[{code}]: {detail}")
         self.code = code
 
@@ -175,16 +152,16 @@ class PipeboardWireRejection(PipeboardAdapterError):
         if type(code) is not str or code not in _WIRE_REJECTION_SPECS:
             raise ClosedValidationError(
                 "pipeboard_wire_rejection: unknown closed wire rejection code"
-            )
+            ) from None
         expected_cat = _WIRE_REJECTION_SPECS[code][0]
         if type(category) is not str or category != expected_cat:
             raise ClosedValidationError(
                 "pipeboard_wire_rejection: category mismatch for wire rejection code"
-            )
+            ) from None
         if not isinstance(outcome, TransportOutcome):
             raise ClosedValidationError(
                 "pipeboard_wire_rejection: outcome must be TransportOutcome"
-            )
+            ) from None
         super().__init__(code)
         self.category = category
         self.outcome = outcome
@@ -227,7 +204,7 @@ class ParsedPipeboardEnvelope:
             or not isinstance(self.rows, tuple)
             or not isinstance(self.transport_outcome, TransportOutcome)
         ):
-            raise PipeboardAdapterError("invalid_envelope_precondition")
+            raise PipeboardAdapterError("invalid_envelope_precondition") from None
 
 
 def clean_transport_outcome() -> TransportOutcome:
@@ -257,14 +234,14 @@ def build_pipeboard_insights_request(
         not isinstance(transport_limits, PipeboardTransportLimits)
         or transport_limits != DEFAULT_PIPEBOARD_TRANSPORT_LIMITS
     ):
-        raise PipeboardAdapterError("invalid_transport_limits")
+        raise PipeboardAdapterError("invalid_transport_limits") from None
     if (
         type(private_object_id) is not str
         or _META_ACCOUNT_ID_RE.fullmatch(private_object_id) is None
     ):
-        raise PipeboardAdapterError("invalid_private_object_id")
+        raise PipeboardAdapterError("invalid_private_object_id") from None
     if type(admitted_day) is not str:
-        raise PipeboardAdapterError("invalid_admitted_day")
+        raise PipeboardAdapterError("invalid_admitted_day") from None
     try:
         checked_day = validate_iso_date(admitted_day, field_name="admitted_day")
     except ClosedValidationError:
@@ -278,15 +255,12 @@ def build_pipeboard_insights_request(
         "compact": transport_limits.compact,
     }
     if set(arguments.keys()).intersection(FORBIDDEN_PIPEBOARD_ARGUMENTS):
-        raise PipeboardAdapterError("invalid_transport_limits")
+        raise PipeboardAdapterError("invalid_transport_limits") from None
     return {
         "jsonrpc": "2.0",
         "id": 1,
         "method": transport_limits.jsonrpc_method,
-        "params": {
-            "name": transport_limits.tool_name,
-            "arguments": arguments,
-        },
+        "params": {"name": transport_limits.tool_name, "arguments": arguments},
     }
 
 
@@ -299,28 +273,28 @@ def _skip_ws(raw: str, pos: int) -> int:
 
 def _parse_json_escape(raw: str, esc_pos: int) -> tuple[str, int]:
     if esc_pos >= len(raw):
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     esc = raw[esc_pos]
     simple = _JSON_ESCAPES.get(esc)
     if simple is not None:
         return simple, esc_pos + 1
     if esc != "u":
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     hex1 = raw[esc_pos + 1 : esc_pos + 5]
     if len(hex1) != 4 or _HEX4_RE.fullmatch(hex1) is None:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     u1 = int(hex1, 16)
     if 0xDC00 <= u1 <= 0xDFFF:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     if 0xD800 <= u1 <= 0xDBFF:
         if raw[esc_pos + 5 : esc_pos + 7] != "\\u":
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
         hex2 = raw[esc_pos + 7 : esc_pos + 11]
         if len(hex2) != 4 or _HEX4_RE.fullmatch(hex2) is None:
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
         u2 = int(hex2, 16)
         if not (0xDC00 <= u2 <= 0xDFFF):
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
         return chr(0x10000 + ((u1 - 0xD800) << 10) + (u2 - 0xDC00)), esc_pos + 11
     return chr(u1), esc_pos + 5
 
@@ -328,7 +302,7 @@ def _parse_json_escape(raw: str, esc_pos: int) -> tuple[str, int]:
 def _parse_json_string(raw: str, pos: int) -> tuple[str, int]:
     n = len(raw)
     if pos >= n or raw[pos] != '"':
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     idx = pos + 1
     chars: list[str] = []
     while idx < n:
@@ -341,10 +315,10 @@ def _parse_json_string(raw: str, pos: int) -> tuple[str, int]:
             continue
         code = ord(ch)
         if code < 0x20 or 0xD800 <= code <= 0xDFFF:
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
         chars.append(ch)
         idx += 1
-    raise PipeboardAdapterError("invalid_wire_json")
+    raise PipeboardAdapterError("invalid_wire_json") from None
 
 
 def _parse_json_number(
@@ -355,14 +329,14 @@ def _parse_json_number(
     while end < n and raw[end] not in _JSON_NUM_TERMINATORS:
         end += 1
         if end - pos > _MAX_WIRE_NUM_TOKEN_LEN:
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
     token = raw[pos:end]
     match = _WIRE_NUMBER_RE.fullmatch(token)
     if match is None:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     exp_str = match.group(2)
     if exp_str is not None and abs(int(exp_str, 10)) > _MAX_WIRE_EXPONENT_ABS:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     if "." in token or exp_str is not None:
         return _WireDecimalToken(raw=token), end
     int_val = int(token, 10)
@@ -383,7 +357,7 @@ def _parse_json_scalar(raw: str, pos: int) -> tuple[Any, int]:
         return None, pos + 4
     if ch == "-" or ("0" <= ch <= "9"):
         return _parse_json_number(raw, pos)
-    raise PipeboardAdapterError("invalid_wire_json")
+    raise PipeboardAdapterError("invalid_wire_json") from None
 
 
 def _read_object_key_and_colon(
@@ -391,10 +365,10 @@ def _read_object_key_and_colon(
 ) -> int:
     key, next_pos = _parse_json_string(raw, pos)
     if key in frame.container:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     colon_pos = _skip_ws(raw, next_pos)
     if colon_pos >= len(raw) or raw[colon_pos] != ":":
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     frame.pending_key = key
     return colon_pos + 1
 
@@ -403,11 +377,11 @@ def _open_container(
     raw: str, pos: int, stack: list[_JsonContainerFrame], max_depth: int
 ) -> tuple[bool, Any, int]:
     if len(stack) + 1 > max_depth:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     opener = raw[pos]
     inner_pos = _skip_ws(raw, pos + 1)
     if inner_pos >= len(raw):
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     if opener == "[":
         if raw[inner_pos] == "]":
             return True, [], inner_pos + 1
@@ -430,13 +404,13 @@ def _attach_and_step_container(
     else:
         key = top.pending_key
         if key is None or key in top.container:
-            raise PipeboardAdapterError("invalid_wire_json")
+            raise PipeboardAdapterError("invalid_wire_json") from None
         top.container[key] = val
         top.pending_key = None
 
     delim_pos = _skip_ws(raw, pos)
     if delim_pos >= len(raw):
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     delim = raw[delim_pos]
     if top.kind == "array":
         if delim == ",":
@@ -444,7 +418,7 @@ def _attach_and_step_container(
         if delim == "]":
             stack.pop()
             return "after_value", top.container, delim_pos + 1
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     if delim == ",":
         key_pos = _skip_ws(raw, delim_pos + 1)
         next_val_pos = _read_object_key_and_colon(raw, key_pos, top)
@@ -452,17 +426,17 @@ def _attach_and_step_container(
     if delim == "}":
         stack.pop()
         return "after_value", top.container, delim_pos + 1
-    raise PipeboardAdapterError("invalid_wire_json")
+    raise PipeboardAdapterError("invalid_wire_json") from None
 
 
 def loads_pipeboard_wire_json(raw_utf8: str, *, max_depth: int = 16) -> Any:
     """Iterative explicit-stack RFC 8259 wire JSON parser with lexical numeric ceilings."""
     if type(raw_utf8) is not str or type(max_depth) is not int or max_depth < 1:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     n = len(raw_utf8)
     pos = _skip_ws(raw_utf8, 0)
     if pos >= n:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
 
     stack: list[_JsonContainerFrame] = []
     mode = "value"
@@ -471,11 +445,9 @@ def loads_pipeboard_wire_json(raw_utf8: str, *, max_depth: int = 16) -> Any:
         if mode == "value":
             pos = _skip_ws(raw_utf8, pos)
             if pos >= n:
-                raise PipeboardAdapterError("invalid_wire_json")
+                raise PipeboardAdapterError("invalid_wire_json") from None
             if raw_utf8[pos] in ("[", "{"):
-                closed, current_val, pos = _open_container(
-                    raw_utf8, pos, stack, max_depth
-                )
+                closed, current_val, pos = _open_container(raw_utf8, pos, stack, max_depth)
                 mode = "after_value" if closed else "value"
             else:
                 current_val, pos = _parse_json_scalar(raw_utf8, pos)
@@ -483,12 +455,10 @@ def loads_pipeboard_wire_json(raw_utf8: str, *, max_depth: int = 16) -> Any:
         else:
             if not stack:
                 break
-            mode, current_val, pos = _attach_and_step_container(
-                raw_utf8, pos, current_val, stack
-            )
+            mode, current_val, pos = _attach_and_step_container(raw_utf8, pos, current_val, stack)
 
     if _skip_ws(raw_utf8, pos) != n:
-        raise PipeboardAdapterError("invalid_wire_json")
+        raise PipeboardAdapterError("invalid_wire_json") from None
     return current_val
 
 
@@ -498,14 +468,12 @@ def _has_surrogate(text: str) -> bool:
 
 def _validate_content_type(raw_ct: str | None) -> None:
     if raw_ct is None:
-        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False)
+        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False) from None
     parts = raw_ct.split(";")
-    if len(parts) > 2:
-        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False)
-    if parts[0].strip(" \t").lower() != "application/json":
-        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False)
+    if len(parts) > 2 or parts[0].strip(" \t").lower() != "application/json":
+        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False) from None
     if len(parts) == 2 and parts[1].strip(" \t").lower() != "charset=utf-8":
-        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False)
+        raise make_wire_rejection("invalid_content_type", media_and_encoding_valid=False) from None
 
 
 def _validate_http_headers(
@@ -516,7 +484,7 @@ def _validate_http_headers(
     normalized: list[tuple[str, str]] = []
     for item in headers:
         if type(item) is not tuple or len(item) != 2:
-            raise make_wire_rejection("malformed_http_headers", media_and_encoding_valid=False)
+            raise make_wire_rejection("malformed_http_headers", media_and_encoding_valid=False) from None
         k, v = item
         if (
             type(k) is not str
@@ -527,30 +495,30 @@ def _validate_http_headers(
             or "\x00" in v
             or _has_surrogate(v)
         ):
-            raise make_wire_rejection("malformed_http_headers", media_and_encoding_valid=False)
+            raise make_wire_rejection("malformed_http_headers", media_and_encoding_valid=False) from None
         normalized.append((k.lower(), v))
 
     singletons: dict[str, str] = {}
     for lk, v in normalized:
         if lk in _SINGLETON_HTTP_HEADERS:
             if lk in singletons:
-                raise make_wire_rejection("duplicate_http_header", media_and_encoding_valid=False)
+                raise make_wire_rejection("duplicate_http_header", media_and_encoding_valid=False) from None
             singletons[lk] = v
 
     _validate_content_type(singletons.get("content-type"))
     raw_ce = singletons.get("content-encoding")
     if raw_ce is not None and raw_ce.strip(" \t").lower() not in ("", "identity"):
-        raise make_wire_rejection("forbidden_content_encoding", media_and_encoding_valid=False)
+        raise make_wire_rejection("forbidden_content_encoding", media_and_encoding_valid=False) from None
 
     raw_cl = singletons.get("content-length")
     if raw_cl is None:
         return None
     stripped_cl = raw_cl.strip(" \t")
     if _CONTENT_LENGTH_RE.fullmatch(stripped_cl) is None:
-        raise make_wire_rejection("invalid_content_length", media_and_encoding_valid=False)
+        raise make_wire_rejection("invalid_content_length", media_and_encoding_valid=False) from None
     declared = int(stripped_cl, 10)
     if declared > max_streamed_bytes:
-        raise make_wire_rejection("declared_length_over_2mib", truncated_2mib=True)
+        raise make_wire_rejection("declared_length_over_2mib", truncated_2mib=True) from None
     return declared
 
 
@@ -564,17 +532,17 @@ def _consume_bounded_body_stream(
     buf = bytearray()
     for chunk in body_chunks:
         if type(chunk) is not bytes:
-            raise PipeboardAdapterError("invalid_chunk_type")
+            raise PipeboardAdapterError("invalid_chunk_type") from None
         offset = 0
         chunk_len = len(chunk)
         while offset < chunk_len:
             piece = chunk[offset : offset + read_chunk_bytes]
             buf.extend(piece)
             if len(buf) > max_streamed_bytes:
-                raise make_wire_rejection("stream_over_2mib", truncated_2mib=True)
+                raise make_wire_rejection("stream_over_2mib", truncated_2mib=True) from None
             offset += read_chunk_bytes
     if declared_length is not None and len(buf) != declared_length:
-        raise make_wire_rejection("content_length_mismatch", media_and_encoding_valid=False)
+        raise make_wire_rejection("content_length_mismatch", media_and_encoding_valid=False) from None
     return bytes(buf)
 
 
@@ -586,7 +554,7 @@ def _validate_outer_jsonrpc_envelope(raw_bytes: bytes) -> dict[str, Any]:
         raise make_wire_rejection("invalid_outer_json", payload_schema_valid=False) from None
 
     if type(outer_obj) is not dict:
-        raise make_wire_rejection("invalid_jsonrpc_envelope", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_jsonrpc_envelope", payload_schema_valid=False) from None
     keys = set(outer_obj.keys())
     if (
         keys not in ({"jsonrpc", "id", "result"}, {"jsonrpc", "id", "error"})
@@ -594,7 +562,7 @@ def _validate_outer_jsonrpc_envelope(raw_bytes: bytes) -> dict[str, Any]:
         or type(outer_obj["id"]) is not int
         or outer_obj["id"] != 1
     ):
-        raise make_wire_rejection("invalid_jsonrpc_envelope", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_jsonrpc_envelope", payload_schema_valid=False) from None
 
     if "error" in outer_obj:
         err = outer_obj["error"]
@@ -604,12 +572,12 @@ def _validate_outer_jsonrpc_envelope(raw_bytes: bytes) -> dict[str, Any]:
             or type(err.get("code")) is not int
             or type(err.get("message")) is not str
         ):
-            raise make_wire_rejection("malformed_jsonrpc_error", payload_schema_valid=False)
-        raise make_wire_rejection("jsonrpc_error_response", jsonrpc_error=True)
+            raise make_wire_rejection("malformed_jsonrpc_error", payload_schema_valid=False) from None
+        raise make_wire_rejection("jsonrpc_error_response", jsonrpc_error=True) from None
 
     result = outer_obj["result"]
     if type(result) is not dict:
-        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False) from None
     return result
 
 
@@ -619,7 +587,7 @@ def _validate_paging_object(paging: Any) -> None:
     if type(paging) is not dict or not set(paging.keys()).issubset(
         {"cursors", "next", "previous"}
     ):
-        raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False) from None
     if "cursors" in paging and paging["cursors"] is not None:
         cursors = paging["cursors"]
         if (
@@ -627,16 +595,16 @@ def _validate_paging_object(paging: Any) -> None:
             or not set(cursors.keys()).issubset({"before", "after"})
             or any(type(v) is not str for v in cursors.values())
         ):
-            raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False) from None
     for field_name in ("next", "previous"):
         if field_name in paging:
             val = paging[field_name]
             if val is not None and type(val) is not str:
-                raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False)
+                raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False) from None
     if paging.get("next") not in (None, ""):
-        raise make_wire_rejection("non_empty_paging_next", non_empty_continuation=True)
+        raise make_wire_rejection("non_empty_paging_next", non_empty_continuation=True) from None
     if paging.get("previous") not in (None, ""):
-        raise make_wire_rejection("non_empty_paging_previous", non_empty_continuation=True)
+        raise make_wire_rejection("non_empty_paging_previous", non_empty_continuation=True) from None
 
 
 def _extract_mcp_result_text(
@@ -646,18 +614,18 @@ def _extract_mcp_result_text(
         {"content"},
         {"content", "isError"},
     ):
-        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False) from None
     has_is_error_false = False
     if "isError" in result:
         if result["isError"] is True:
-            raise make_wire_rejection("mcp_result_is_error", payload_schema_valid=False)
+            raise make_wire_rejection("mcp_result_is_error", payload_schema_valid=False) from None
         if result["isError"] is not False:
-            raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False) from None
         has_is_error_false = True
 
     content = result["content"]
     if type(content) is not list or len(content) != 1:
-        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False) from None
     item = content[0]
     if (
         type(item) is not dict
@@ -665,10 +633,14 @@ def _extract_mcp_result_text(
         or item["type"] != "text"
         or type(item["text"]) is not str
     ):
-        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_mcp_content", payload_schema_valid=False) from None
     raw_inner_text = item["text"]
-    if len(raw_inner_text.encode("utf-8")) > max_decoded_text_bytes:
-        raise make_wire_rejection("decoded_text_over_2mib", truncated_2mib=True)
+    try:
+        encoded_inner = raw_inner_text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        raise make_wire_rejection("invalid_inner_json", payload_schema_valid=False) from None
+    if len(encoded_inner) > max_decoded_text_bytes:
+        raise make_wire_rejection("decoded_text_over_2mib", truncated_2mib=True) from None
     return raw_inner_text, has_is_error_false
 
 
@@ -682,7 +654,7 @@ def parse_pipeboard_mcp_result(
         not isinstance(transport_limits, PipeboardTransportLimits)
         or transport_limits != DEFAULT_PIPEBOARD_TRANSPORT_LIMITS
     ):
-        raise PipeboardAdapterError("invalid_transport_limits")
+        raise PipeboardAdapterError("invalid_transport_limits") from None
     raw_inner_text, has_is_error_false = _extract_mcp_result_text(
         result, max_decoded_text_bytes=transport_limits.max_decoded_text_bytes
     )
@@ -695,14 +667,15 @@ def parse_pipeboard_mcp_result(
         type(payload) is not dict
         or "data" not in payload
         or not set(payload.keys()).issubset({"data", "paging"})
-        or type(payload["data"]) is not list
     ):
-        raise make_wire_rejection("invalid_payload_shape", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_payload_shape", payload_schema_valid=False) from None
     if "paging" in payload:
         _validate_paging_object(payload["paging"])
     rows = payload["data"]
+    if type(rows) is not list:
+        raise make_wire_rejection("invalid_payload_shape", payload_schema_valid=False) from None
     if len(rows) > transport_limits.max_campaign_rows:
-        raise make_wire_rejection("too_many_campaign_rows", payload_schema_valid=False)
+        raise make_wire_rejection("too_many_campaign_rows", payload_schema_valid=False) from None
     return raw_inner_text, has_is_error_false, tuple(rows)
 
 
@@ -718,7 +691,7 @@ def _validate_envelope_preconditions_and_status(
         not isinstance(transport_limits, PipeboardTransportLimits)
         or transport_limits != DEFAULT_PIPEBOARD_TRANSPORT_LIMITS
     ):
-        raise PipeboardAdapterError("invalid_transport_limits")
+        raise PipeboardAdapterError("invalid_transport_limits") from None
     if (
         type(network_ok) is not bool
         or isinstance(headers, (str, bytes, bytearray))
@@ -726,17 +699,17 @@ def _validate_envelope_preconditions_and_status(
         or isinstance(body_chunks, (str, bytes, bytearray))
         or not isinstance(body_chunks, Iterable)
     ):
-        raise PipeboardAdapterError("invalid_envelope_precondition")
+        raise PipeboardAdapterError("invalid_envelope_precondition") from None
     if not network_ok:
-        raise make_wire_rejection("network_error", network_ok=False, http_status=None)
+        raise make_wire_rejection("network_error", network_ok=False, http_status=None) from None
     if http_status is None:
-        raise make_wire_rejection("missing_http_status", http_status=None)
+        raise make_wire_rejection("missing_http_status", http_status=None) from None
     if type(http_status) is not int or not (100 <= http_status <= 999):
-        raise make_wire_rejection("invalid_http_status", http_status=None)
+        raise make_wire_rejection("invalid_http_status", http_status=None) from None
     if http_status in (401, 403):
-        raise make_wire_rejection("http_auth_error", http_status=http_status, auth_ok=False)
+        raise make_wire_rejection("http_auth_error", http_status=http_status, auth_ok=False) from None
     if http_status != 200:
-        raise make_wire_rejection("http_status_not_200", http_status=http_status)
+        raise make_wire_rejection("http_status_not_200", http_status=http_status) from None
 
 
 def parse_pipeboard_http_and_mcp_envelope(

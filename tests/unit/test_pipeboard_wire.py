@@ -5,11 +5,16 @@ import ast
 from collections.abc import Iterator
 import json
 from pathlib import Path
+import traceback
 from typing import Any
 
 import pytest
 
-from smart_ads.adapters.pipeboard import wire as wire_mod
+from smart_ads.adapters.pipeboard import (
+    adapter as adapter_mod,
+    reducer as reducer_mod,
+    wire as wire_mod,
+)
 from smart_ads.adapters.pipeboard.wire import (
     DEFAULT_PIPEBOARD_TRANSPORT_LIMITS,
     STATIC_DETAIL_BY_CODE,
@@ -70,8 +75,11 @@ def _assert_value_silent(exc: BaseException) -> None:
     assert isinstance(exc, ClosedValidationError)
     assert isinstance(exc, PipeboardAdapterError)
     assert exc.__cause__ is None
+    assert exc.__suppress_context__ is True
+    formatted = "".join(traceback.format_exception(exc))
     assert SECRET_SENTINEL not in str(exc)
     assert SECRET_SENTINEL not in repr(exc)
+    assert SECRET_SENTINEL not in formatted
 
 
 BAD_REQUEST_INPUTS: tuple[tuple[Any, Any, Any], ...] = (
@@ -399,6 +407,28 @@ STEPS_8_AND_9_CASES: tuple[tuple[bytes, str, str, TransportOutcome], ...] = (
         _clean_outcome(non_empty_continuation=True),
     ),
     (
+        _mcp_outer_bytes(
+            {"data": None, "paging": {"next": f"https://example/{SECRET_SENTINEL}"}}
+        ),
+        "non_empty_paging_next",
+        "pagination",
+        _clean_outcome(non_empty_continuation=True),
+    ),
+    (
+        _mcp_outer_bytes(
+            {"data": None, "paging": {"previous": f"https://example/{SECRET_SENTINEL}"}}
+        ),
+        "non_empty_paging_previous",
+        "pagination",
+        _clean_outcome(non_empty_continuation=True),
+    ),
+    (
+        _mcp_outer_bytes({"data": None, "paging": {"next": ""}}),
+        "invalid_payload_shape",
+        "schema",
+        _clean_outcome(payload_schema_valid=False),
+    ),
+    (
         _mcp_outer_bytes({"data": [{} for _ in range(101)]}),
         "too_many_campaign_rows",
         "schema",
@@ -691,3 +721,56 @@ def test_parse_pipeboard_envelope_steps_8_and_9_matrix(
     assert expected_code in STATIC_DETAIL_BY_CODE
     assert SECRET_SENTINEL not in STATIC_DETAIL_BY_CODE[expected_code]
     _assert_value_silent(err)
+
+
+def test_adapters_ast_enforces_raise_from_none_everywhere() -> None:
+    for mod in (wire_mod, reducer_mod, adapter_mod):
+        mod_path = Path(mod.__file__).resolve()
+        tree = ast.parse(mod_path.read_text(encoding="utf-8"), filename=str(mod_path))
+        bad_raises = [
+            (mod_path.name, node.lineno)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Raise)
+            and not (
+                node.exc is not None
+                and isinstance(node.cause, ast.Constant)
+                and node.cause.value is None
+            )
+        ]
+        assert bad_raises == []
+
+
+def test_wire_raises_suppress_active_exception_context_and_lone_surrogate() -> None:
+    actions: tuple[tuple[Any, str], ...] = (
+        (
+            lambda: build_pipeboard_insights_request(
+                private_object_id=f"bad_{SECRET_SENTINEL}", admitted_day="2026-11-10"
+            ),
+            "invalid_private_object_id",
+        ),
+        (lambda: loads_pipeboard_wire_json(f"{{bad:{SECRET_SENTINEL}}}"), "invalid_wire_json"),
+        (
+            lambda: parse_pipeboard_http_and_mcp_envelope(
+                network_ok="bad", http_status=200, headers=(), body_chunks=()  # type: ignore[arg-type]
+            ),
+            "invalid_envelope_precondition",
+        ),
+        (
+            lambda: parse_pipeboard_http_and_mcp_envelope(
+                network_ok=True, http_status=401, headers=(), body_chunks=()
+            ),
+            "http_auth_error",
+        ),
+        (
+            lambda: parse_pipeboard_mcp_result({"content": [{"type": "text", "text": "\ud800"}]}),
+            "invalid_inner_json",
+        ),
+    )
+    for fn, expected_code in actions:
+        try:
+            raise ValueError(SECRET_SENTINEL)
+        except ValueError:
+            with pytest.raises(PipeboardAdapterError) as exc_info:
+                fn()
+            assert exc_info.value.code == expected_code
+            _assert_value_silent(exc_info.value)

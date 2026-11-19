@@ -54,15 +54,15 @@ def _init_or_verify_directory(
 ) -> BidirectionalResourceDirectory:
     snap = resolved_registry.snapshot
     if resource_directory is not None and key_handle is not None:
-        raise PipeboardAdapterError("invalid_boundary_config")
+        raise PipeboardAdapterError("invalid_boundary_config") from None
     if resource_directory is None:
         if not isinstance(key_handle, TenantResourceKeyHandle):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         if (
             key_handle.tenant_ref != snap.tenant_ref
             or key_handle.key_identity != snap.key_identity
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         try:
             return BidirectionalResourceDirectory(
                 key_handle=key_handle,
@@ -75,7 +75,7 @@ def _init_or_verify_directory(
             raise PipeboardAdapterError("invalid_boundary_config") from None
 
     if not isinstance(resource_directory, BidirectionalResourceDirectory):
-        raise PipeboardAdapterError("invalid_boundary_config")
+        raise PipeboardAdapterError("invalid_boundary_config") from None
     if (
         resource_directory.tenant_ref != snap.tenant_ref
         or resource_directory.key_identity != snap.key_identity
@@ -84,7 +84,7 @@ def _init_or_verify_directory(
         or resource_directory.ad_platform_ref != "meta"
         or resource_directory.resource_level != "campaign"
     ):
-        raise PipeboardAdapterError("invalid_boundary_config")
+        raise PipeboardAdapterError("invalid_boundary_config") from None
     return resource_directory
 
 
@@ -109,7 +109,7 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             not isinstance(resolved_registry, ResolvedRegistryState)
             or resolved_registry.driver_contract.driver_id != "pipeboard_hosted"
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         self.resolved_registry = resolved_registry
         self.resource_directory = _init_or_verify_directory(
             resolved_registry,
@@ -123,22 +123,20 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
         ] = {}
         if private_account_bindings is not None:
             if not isinstance(private_account_bindings, Mapping):
-                raise PipeboardAdapterError("invalid_boundary_config")
+                raise PipeboardAdapterError("invalid_boundary_config") from None
             for pair, obj_id in private_account_bindings.items():
                 if not isinstance(pair, tuple) or len(pair) != 2:
-                    raise PipeboardAdapterError("invalid_boundary_config")
+                    raise PipeboardAdapterError("invalid_boundary_config") from None
                 self.register_private_binding(
-                    binding_ref=pair[0],
-                    account_ref=pair[1],
-                    private_object_id=obj_id,
+                    binding_ref=pair[0], account_ref=pair[1], private_object_id=obj_id
                 )
         if isinstance(authenticated_inventories, (str, bytes, bytearray)) or not isinstance(
             authenticated_inventories, Iterable
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         for entry in authenticated_inventories:
             if not isinstance(entry, tuple) or len(entry) != 2:
-                raise PipeboardAdapterError("invalid_boundary_config")
+                raise PipeboardAdapterError("invalid_boundary_config") from None
             self.register_authenticated_inventory(entry[0], entry[1])
 
     def __repr__(self) -> str:
@@ -167,7 +165,7 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or type(private_object_id) is not str
             or _META_ACCOUNT_ID_RE.fullmatch(private_object_id) is None
         ):
-            raise PipeboardAdapterError("invalid_private_object_id")
+            raise PipeboardAdapterError("invalid_private_object_id") from None
         try:
             reg_binding = self.resolved_registry.snapshot.get_binding(binding_ref)
         except ClosedValidationError:
@@ -178,11 +176,11 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or reg_binding.ad_platform_ref != "meta"
             or reg_binding.currency != "BRL"
         ):
-            raise PipeboardAdapterError("unregistered_private_binding")
+            raise PipeboardAdapterError("unregistered_private_binding") from None
         key = (binding_ref, account_ref)
         existing = self._private_bindings.get(key)
         if existing is not None and existing != private_object_id:
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         self._private_bindings[key] = private_object_id
 
     def register_verified_campaign_pair(
@@ -194,11 +192,9 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or META_CAMPAIGN_ID_RE.fullmatch(raw_campaign_id) is None
             or type(resource_ref) is not str
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         try:
-            self.resource_directory.register_verified_pair(
-                raw_campaign_id, resource_ref
-            )
+            self.resource_directory.register_verified_pair(raw_campaign_id, resource_ref)
         except ClosedValidationError:
             raise PipeboardAdapterError("invalid_boundary_config") from None
 
@@ -213,15 +209,12 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or locator.artifact_type != ExpectedResourceInventory.SCHEMA
             or not isinstance(inventory, ExpectedResourceInventory)
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         expected_loc = ArtifactLocator.for_canonical_bytes(
-            ExpectedResourceInventory.SCHEMA,
-            canonicalize_jcs(inventory.to_dict()),
+            ExpectedResourceInventory.SCHEMA, canonicalize_jcs(inventory.to_dict())
         )
         snap = self.resolved_registry.snapshot
-        auth_pairs = {
-            (s.binding_ref, s.resource_scope_ref) for s in snap.authorized_scopes
-        }
+        auth_pairs = {(s.binding_ref, s.resource_scope_ref) for s in snap.authorized_scopes}
         try:
             reg_binding = snap.get_binding(inventory.binding_ref)
         except ClosedValidationError:
@@ -229,15 +222,14 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
         if (
             expected_loc != locator
             or inventory.registry_snapshot_locator != self.resolved_registry.locator
-            or inventory.registry_snapshot_digest
-            != self.resolved_registry.locator.content_digest
+            or inventory.registry_snapshot_digest != self.resolved_registry.locator.content_digest
             or inventory.tenant_ref != snap.tenant_ref
             or reg_binding.account_ref != inventory.account_ref
             or reg_binding.driver_id != "pipeboard_hosted"
             or (inventory.binding_ref, inventory.resource_scope_ref) not in auth_pairs
             or inventory.date_range.start_date != inventory.date_range.end_date
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         inv_key = (
             inventory.binding_ref,
             inventory.account_ref,
@@ -246,18 +238,16 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
         )
         existing = self._inventories.get(inv_key)
         if existing is not None and existing != (locator, inventory):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         self._inventories[inv_key] = (locator, inventory)
 
-    def resolve_private_object_id(
-        self, *, binding_ref: str, account_ref: str
-    ) -> str:
+    def resolve_private_object_id(self, *, binding_ref: str, account_ref: str) -> str:
         """Resolve private Meta `act_*` ID for `(binding_ref, account_ref)`, failing closed if absent."""
         if type(binding_ref) is not str or type(account_ref) is not str:
-            raise PipeboardAdapterError("unregistered_private_binding")
+            raise PipeboardAdapterError("unregistered_private_binding") from None
         private_id = self._private_bindings.get((binding_ref, account_ref))
         if private_id is None:
-            raise PipeboardAdapterError("unregistered_private_binding")
+            raise PipeboardAdapterError("unregistered_private_binding") from None
         return private_id
 
     def resolve_authenticated_inventory(
@@ -275,12 +265,10 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or type(resource_scope_ref) is not str
             or not isinstance(date_range, DateRange)
         ):
-            raise PipeboardAdapterError("admission_snapshot_mismatch")
-        pair = self._inventories.get(
-            (binding_ref, account_ref, resource_scope_ref, date_range)
-        )
+            raise PipeboardAdapterError("admission_snapshot_mismatch") from None
+        pair = self._inventories.get((binding_ref, account_ref, resource_scope_ref, date_range))
         if pair is None:
-            raise PipeboardAdapterError("admission_snapshot_mismatch")
+            raise PipeboardAdapterError("admission_snapshot_mismatch") from None
         return pair
 
     def resolve_expected_inventory(
@@ -302,15 +290,13 @@ class PrivatePipeboardBindingBoundary(ExpectedInventoryPort):
             or type(resource_scope_ref) is not str
             or not isinstance(date_range, DateRange)
         ):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         if (
             registry_snapshot_locator != self.resolved_registry.locator
             or tenant_ref != self.resolved_registry.snapshot.tenant_ref
         ):
             return None
-        pair = self._inventories.get(
-            (binding_ref, account_ref, resource_scope_ref, date_range)
-        )
+        pair = self._inventories.get((binding_ref, account_ref, resource_scope_ref, date_range))
         return None if pair is None else pair[1]
 
 
@@ -324,7 +310,7 @@ def _check_phase1_admitted_compatibility(admitted: AdmittedCollection) -> None:
         or cqc.currency != "BRL"
         or admitted.computed_date_range.start_date != admitted.computed_date_range.end_date
     ):
-        raise PipeboardAdapterError("invalid_admitted_collection")
+        raise PipeboardAdapterError("invalid_admitted_collection") from None
 
 
 def _verify_admitted_against_boundary(
@@ -344,7 +330,7 @@ def _verify_admitted_against_boundary(
         or admitted.tenant_ref != snap.tenant_ref
         or (admitted.binding_ref, admitted.resource_scope_ref) not in auth_pairs
     ):
-        raise PipeboardAdapterError("admission_snapshot_mismatch")
+        raise PipeboardAdapterError("admission_snapshot_mismatch") from None
 
     inv_loc, inv = boundary.resolve_authenticated_inventory(
         binding_ref=admitted.binding_ref,
@@ -374,7 +360,7 @@ def _verify_admitted_against_boundary(
         inv.date_range,
     )
     if recomputed_inv_loc != inv_loc or actual_7tuple != expected_7tuple:
-        raise PipeboardAdapterError("admission_snapshot_mismatch")
+        raise PipeboardAdapterError("admission_snapshot_mismatch") from None
     return inv
 
 
@@ -383,21 +369,14 @@ def _gate1_dates_and_row_keys(
 ) -> None:
     for row in rows:
         if not isinstance(row, Mapping):
-            raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False) from None
         ds = row.get("date_start")
         de = row.get("date_stop")
-        if (
-            type(ds) is not str
-            or type(de) is not str
-            or ds != admitted_day
-            or de != admitted_day
-        ):
-            raise make_wire_rejection(
-                "response_date_mismatch", response_date_mismatch=True
-            )
+        if type(ds) is not str or type(de) is not str or ds != admitted_day or de != admitted_day:
+            raise make_wire_rejection("response_date_mismatch", response_date_mismatch=True) from None
     for row in rows:
         if not set(row.keys()).issubset(PINNED_PIPEBOARD_ROW_KEYS):
-            raise make_wire_rejection("invalid_row_keys", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_row_keys", payload_schema_valid=False) from None
 
 
 def _gate2_bind_scoped_resources(
@@ -407,24 +386,20 @@ def _gate2_bind_scoped_resources(
     boundary: PrivatePipeboardBindingBoundary,
     expected_inventory: ExpectedResourceInventory,
 ) -> list[tuple[str, str, int]]:
-    scoped_refs = frozenset(
-        u.resource_ref for u in expected_inventory.expected_resources
-    )
+    scoped_refs = frozenset(u.resource_ref for u in expected_inventory.expected_resources)
     bindings: list[tuple[str, str, int]] = []
     for row_ordinal, row in enumerate(rows):
         raw_cid = row.get("campaign_id")
         if type(raw_cid) is not str or META_CAMPAIGN_ID_RE.fullmatch(raw_cid) is None:
-            raise make_wire_rejection("invalid_campaign_id", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_campaign_id", payload_schema_valid=False) from None
         try:
             resource_ref = boundary.resource_directory.resolve_resource_ref(raw_cid)
         except ClosedValidationError:
-            raise make_wire_rejection(
-                "unknown_campaign_id", payload_schema_valid=False
-            ) from None
+            raise make_wire_rejection("unknown_campaign_id", payload_schema_valid=False) from None
+        if resource_ref is None:
+            raise make_wire_rejection("unknown_campaign_id", payload_schema_valid=False) from None
         if resource_ref not in scoped_refs:
-            raise make_wire_rejection(
-                "unscoped_campaign_resource", payload_schema_valid=False
-            )
+            raise make_wire_rejection("unscoped_campaign_resource", payload_schema_valid=False) from None
         bindings.append((resource_ref, admitted_day, row_ordinal))
     return bindings
 
@@ -433,30 +408,25 @@ def _validate_actual_reducer_records(
     actual_records: object, *, expected_records: list[dict[str, int]]
 ) -> list[dict[str, int]]:
     if type(actual_records) is not list:
-        raise make_wire_rejection(
-            "reducer_output_invalid", reducer_order_or_count_mismatch=True
-        )
+        raise make_wire_rejection("reducer_output_invalid", reducer_order_or_count_mismatch=True) from None
     for rec in actual_records:
         if (
             type(rec) is not dict
             or len(rec) == 0
             or not set(rec.keys()).issubset(_ALLOWED_REDUCER_KEYS)
         ):
-            raise make_wire_rejection(
-                "reducer_output_invalid", reducer_order_or_count_mismatch=True
-            )
+            raise make_wire_rejection("reducer_output_invalid", reducer_order_or_count_mismatch=True) from None
         for val in rec.values():
             if type(val) is not int or not (0 <= val <= MAX_INT64):
                 raise make_wire_rejection(
                     "reducer_output_invalid", reducer_order_or_count_mismatch=True
-                )
+                ) from None
     if len(actual_records) != len(expected_records) or any(
-        actual_records[i] != expected_records[i]
-        for i in range(len(expected_records))
+        actual_records[i] != expected_records[i] for i in range(len(expected_records))
     ):
         raise make_wire_rejection(
             "reducer_order_or_count_mismatch", reducer_order_or_count_mismatch=True
-        )
+        ) from None
     return actual_records
 
 
@@ -493,9 +463,7 @@ def _invoke_detached_reducer(
         raise make_wire_rejection(
             "reducer_output_invalid", reducer_order_or_count_mismatch=True
         ) from None
-    return _validate_actual_reducer_records(
-        raw_actual, expected_records=expected_records
-    )
+    return _validate_actual_reducer_records(raw_actual, expected_records=expected_records)
 
 
 def _gate3_reduce_and_pair_observations(
@@ -518,7 +486,7 @@ def _gate3_reduce_and_pair_observations(
             if triple in seen_triples:
                 raise make_wire_rejection(
                     "duplicate_provider_observation", duplicate_provider_observation=True
-                )
+                ) from None
             seen_triples.add(triple)
             bucket.append(obs)
 
@@ -562,13 +530,13 @@ def _prepare_admitted_private_wire(
     reducer: object,
 ) -> tuple[AdmittedCollection, PrivatePipeboardBindingBoundary, RetrievalContext, ExpectedResourceInventory, str]:
     if not isinstance(admitted, AdmittedCollection):
-        raise PipeboardAdapterError("invalid_admitted_collection")
+        raise PipeboardAdapterError("invalid_admitted_collection") from None
     if not isinstance(boundary, PrivatePipeboardBindingBoundary):
-        raise PipeboardAdapterError("invalid_boundary_config")
+        raise PipeboardAdapterError("invalid_boundary_config") from None
     if not isinstance(retrieval_context, RetrievalContext):
-        raise PipeboardAdapterError("invalid_retrieval_context")
+        raise PipeboardAdapterError("invalid_retrieval_context") from None
     if not callable(reducer):
-        raise PipeboardAdapterError("invalid_reducer_callable")
+        raise PipeboardAdapterError("invalid_reducer_callable") from None
     expected_inventory = _verify_admitted_against_boundary(admitted, boundary)
     admitted_day = admitted.computed_date_range.start_date
     private_object_id = boundary.resolve_private_object_id(
@@ -616,7 +584,7 @@ def transform_pipeboard_response_to_batch(
     except PipeboardWireRejection as rej:
         return _terminal_rejection_batch(rej, rctx)
     return ProviderObservationBatch(
-        observed_capabilities=adm.canonical_query_contract.requested_capabilities,
+        observed_capabilities=(adm.canonical_query_contract.requested_capabilities[0],),
         retrieval_context=rctx,
         transport_outcome=parsed.transport_outcome,
         resource_observations=resource_observations,
@@ -648,9 +616,9 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
         reducer: PipeboardRowReducer = reduce_pipeboard_insights_result,
     ) -> None:
         if not isinstance(boundary, PrivatePipeboardBindingBoundary):
-            raise PipeboardAdapterError("invalid_boundary_config")
+            raise PipeboardAdapterError("invalid_boundary_config") from None
         if not callable(reducer):
-            raise PipeboardAdapterError("invalid_reducer_callable")
+            raise PipeboardAdapterError("invalid_reducer_callable") from None
         self._boundary = boundary
         self._reducer = reducer
         self._cases: dict[ArtifactLocator, RegisteredFixtureCase] = {}
@@ -671,9 +639,9 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
             not isinstance(admitted, AdmittedCollection)
             or admitted.collection_purpose != "fixture_7a"
         ):
-            raise PipeboardAdapterError("invalid_admitted_collection")
+            raise PipeboardAdapterError("invalid_admitted_collection") from None
         if not isinstance(retrieval_context, RetrievalContext):
-            raise PipeboardAdapterError("invalid_retrieval_context")
+            raise PipeboardAdapterError("invalid_retrieval_context") from None
         if (
             type(network_ok) is not bool
             or isinstance(headers, (str, bytes, bytearray))
@@ -681,11 +649,11 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
             or isinstance(body_chunks, (str, bytes, bytearray))
             or not isinstance(body_chunks, Sequence)
         ):
-            raise PipeboardAdapterError("invalid_envelope_precondition")
+            raise PipeboardAdapterError("invalid_envelope_precondition") from None
         checked_chunks: list[bytes] = []
         for chunk in body_chunks:
             if type(chunk) is not bytes:
-                raise PipeboardAdapterError("invalid_chunk_type")
+                raise PipeboardAdapterError("invalid_chunk_type") from None
             checked_chunks.append(chunk)
 
         admitted_loc = ArtifactLocator.for_canonical_bytes(
@@ -702,7 +670,7 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
         )
         existing = self._cases.get(admitted_loc)
         if existing is not None and existing != entry:
-            raise PipeboardAdapterError("duplicate_fixture_case")
+            raise PipeboardAdapterError("duplicate_fixture_case") from None
         self._cases[admitted_loc] = entry
         return admitted_loc
 
@@ -716,11 +684,11 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
             or call.driver_contract_digest
             != self._boundary.resolved_registry.driver_contract_locator.content_digest
         ):
-            raise PipeboardAdapterError("invalid_fixture_call")
+            raise PipeboardAdapterError("invalid_fixture_call") from None
 
         case = self._cases.get(call.admitted_collection_locator)
         if case is None:
-            raise PipeboardAdapterError("fixture_case_not_found")
+            raise PipeboardAdapterError("fixture_case_not_found") from None
 
         admitted = case.admitted
         recomputed_loc = ArtifactLocator.for_canonical_bytes(
@@ -736,7 +704,7 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
             or prereqs is None
             or prereqs.regression_fixture_locator != call.regression_fixture_locator
         ):
-            raise PipeboardAdapterError("admission_snapshot_mismatch")
+            raise PipeboardAdapterError("admission_snapshot_mismatch") from None
 
         batch = transform_pipeboard_response_to_batch(
             admitted=admitted,
@@ -759,10 +727,10 @@ class PipeboardFixtureAdapter(FixtureObservationPort):
             not isinstance(admitted_collection_locator, ArtifactLocator)
             or admitted_collection_locator.artifact_type != AdmittedCollection.SCHEMA
         ):
-            raise PipeboardAdapterError("recorded_batch_not_found")
+            raise PipeboardAdapterError("recorded_batch_not_found") from None
         batch = self._recorded_batches.get(admitted_collection_locator)
         if batch is None:
-            raise PipeboardAdapterError("recorded_batch_not_found")
+            raise PipeboardAdapterError("recorded_batch_not_found") from None
         return batch
 
 

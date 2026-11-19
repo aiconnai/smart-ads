@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+import traceback
 from typing import Any
 
 import pytest
@@ -109,6 +110,7 @@ def _make_registry_state(
     *,
     tenant_ref: str = "tenant:ibvi",
     snapshot_id: str = "registry-snapshot:2026-11-11-001",
+    extra_capability: bool = False,
 ) -> ResolvedRegistryState:
     contract = _make_contract()
     contract_loc = ArtifactLocator.for_canonical_bytes(
@@ -130,6 +132,7 @@ def _make_registry_state(
         state="declared",
         required_metrics=("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1"),
     )
+    caps = (cap, replace(cap, capability_ref="cap:campaign-extra-v1")) if extra_capability else (cap,)
     snapshot = PrivateRegistrySnapshot(
         snapshot_id=snapshot_id,
         tenant_ref=tenant_ref,
@@ -139,7 +142,7 @@ def _make_registry_state(
         key_identity="key:tenant-ibvi-hmac-v1",
         bindings=(binding,),
         authorized_scopes=(scope_active,),
-        capabilities=(cap,),
+        capabilities=caps,
     )
     snap_loc = ArtifactLocator.for_canonical_bytes(
         PrivateRegistrySnapshot.SCHEMA, canonicalize_jcs(snapshot.to_dict())
@@ -686,3 +689,92 @@ def test_row11_reducer_mismatch_completeness_via_evaluate_fixture_collection() -
     assert batch.normalized_errors[0].error_code == "reducer_order_or_count_mismatch"
     assert eval_out.completeness.status == "partial"
     assert eval_out.completeness.reasons == ("reducer_order_or_count_mismatch", "missing_expected_fact_keys")
+
+
+def test_reducer_lone_surrogate_and_active_except_context_suppression() -> None:
+    _, boundary, _, _, _, _ = _build_world()
+    adapter = PipeboardFixtureAdapter(boundary=boundary)
+    actions: tuple[tuple[Any, type[PipeboardAdapterError], str], ...] = (
+        (
+            lambda: reduce_pipeboard_insights_result({"content": [{"type": "text", "text": '"\ud800"'}]}),
+            PipeboardWireRejection,
+            "invalid_inner_json",
+        ),
+        (
+            lambda: reduce_pipeboard_insights_result({"content": [{"type": "text", "text": "\ud800"}]}),
+            PipeboardWireRejection,
+            "invalid_inner_json",
+        ),
+        (lambda: parse_campaign_row_metrics({"impressions": -1}), PipeboardWireRejection, "invalid_metric_value"),
+        (
+            lambda: transform_pipeboard_response_to_batch(
+                admitted="bad", boundary=boundary, retrieval_context=_retrieval_ctx(), **_ok_wire({"data": []})  # type: ignore[arg-type]
+            ),
+            PipeboardAdapterError,
+            "invalid_admitted_collection",
+        ),
+        (
+            lambda: adapter.get_recorded_batch(_loc("smart_ads/admitted_collection/v1", "9")),
+            PipeboardAdapterError,
+            "recorded_batch_not_found",
+        ),
+    )
+    for fn, exc_cls, expected_code in actions:
+        try:
+            raise ValueError(SECRET_MARKER)
+        except ValueError:
+            with pytest.raises(exc_cls) as exc_info:
+                fn()
+            err = exc_info.value
+            assert err.code == expected_code
+            assert err.__cause__ is None and err.__suppress_context__ is True
+            assert SECRET_MARKER not in "".join(traceback.format_exception(err))
+
+
+def test_multi_capability_observed_singleton_and_null_directory_unknown_cid() -> None:
+    reg_state = _make_registry_state(extra_capability=True)
+    boundary = _make_directory_and_boundary(reg_state)
+    helper = _StaticCellPorts(reg_state=reg_state)
+    cell_ports = CellRuntimePorts(helper, helper, helper, helper)
+    req = CollectionRequest(
+        request_id="req-7a-multi-cap",
+        collection_purpose="fixture_7a",
+        tenant_ref="tenant:ibvi",
+        binding_ref="binding:meta-primary",
+        resource_scope_ref="scope:campaigns-active",
+        date_rule="previous_local_day",
+        resource_level="campaign",
+        requested_capabilities=("cap:campaign-basic-v1", "cap:campaign-extra-v1"),
+    )
+    bundle = admit_collection(req, cell_ports, admission_id="admission:7a-multi-cap")
+    assert bundle.admitted.canonical_query_contract.requested_capabilities == (
+        "cap:campaign-basic-v1",
+        "cap:campaign-extra-v1",
+    )
+    batch = transform_pipeboard_response_to_batch(
+        admitted=bundle.admitted,
+        boundary=boundary,
+        retrieval_context=_retrieval_ctx(),
+        **_ok_wire({"data": _valid_two_rows()}),
+    )
+    assert batch.observed_capabilities == ("cap:campaign-basic-v1",)
+
+    class _NullReturningDirectory(BidirectionalResourceDirectory):
+        def resolve_resource_ref(self, raw_provider_id: str) -> Any:
+            return None
+
+    null_dir = _NullReturningDirectory(_key_handle(), "hmac-sha256-b32-v1", "0x00", "meta", "campaign")
+    inv_loc, inv = _make_inventory(reg_state)
+    null_boundary = PrivatePipeboardBindingBoundary(
+        resolved_registry=reg_state,
+        resource_directory=null_dir,
+        private_account_bindings={("binding:meta-primary", "account:ibvi-01"): RAW_ACCOUNT_ID},
+        authenticated_inventories=((inv_loc, inv),),
+    )
+    null_batch = transform_pipeboard_response_to_batch(
+        admitted=bundle.admitted,
+        boundary=null_boundary,
+        retrieval_context=_retrieval_ctx(),
+        **_ok_wire({"data": _valid_two_rows()[:1]}),
+    )
+    assert null_batch.normalized_errors[0].error_code == "unknown_campaign_id"

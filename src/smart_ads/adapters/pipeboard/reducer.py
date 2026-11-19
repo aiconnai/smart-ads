@@ -51,7 +51,7 @@ def _validate_optional_int64_metric(value: object) -> int | None:
         return None
     if type(value) is int and 0 <= value <= MAX_INT64:
         return value
-    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +71,7 @@ class CanonicalCampaignMetrics:
             and self.clicks is None
             and self.spend_minor is None
         ):
-            raise make_wire_rejection("empty_row_metrics", payload_schema_valid=False)
+            raise make_wire_rejection("empty_row_metrics", payload_schema_valid=False) from None
 
     def to_reducer_record(self) -> dict[str, int]:
         """Project present metrics to the exact `0dbdfede` reduced dict representation."""
@@ -89,33 +89,33 @@ def _parse_bounded_count(raw: object) -> int:
     if type(raw) is int:
         if 0 <= raw <= MAX_INT64:
             return raw
-        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
     if type(raw) is str and _COUNT_STR_RE.fullmatch(raw) is not None:
         parsed = int(raw, 10)
         if 0 <= parsed <= MAX_INT64:
             return parsed
-    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
 
 
 def _parse_bounded_spend_minor(raw: object) -> int:
     if type(raw) is not str:
-        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
     match = _SPEND_STR_RE.fullmatch(raw)
     if match is None:
-        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
     whole = int(match.group(1), 10)
     frac_raw = match.group(2)
     frac = 0 if frac_raw is None else int(frac_raw.ljust(2, "0"), 10)
     spend_minor = whole * 100 + frac
     if 0 <= spend_minor <= MAX_INT64:
         return spend_minor
-    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False)
+    raise make_wire_rejection("invalid_metric_value", payload_schema_valid=False) from None
 
 
 def parse_campaign_row_metrics(row: Mapping[str, Any]) -> CanonicalCampaignMetrics:
     """Parse bounded `impressions`, `clicks`, and BRL `spend` from a single campaign row."""
     if not isinstance(row, Mapping):
-        raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False)
+        raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False) from None
     impressions = (
         _parse_bounded_count(row["impressions"]) if "impressions" in row else None
     )
@@ -124,7 +124,7 @@ def parse_campaign_row_metrics(row: Mapping[str, Any]) -> CanonicalCampaignMetri
         _parse_bounded_spend_minor(row["spend"]) if "spend" in row else None
     )
     if impressions is None and clicks is None and spend_minor is None:
-        raise make_wire_rejection("empty_row_metrics", payload_schema_valid=False)
+        raise make_wire_rejection("empty_row_metrics", payload_schema_valid=False) from None
     return CanonicalCampaignMetrics(
         impressions=impressions,
         clicks=clicks,
@@ -140,12 +140,12 @@ def reduce_pipeboard_insights_result(
     records: list[dict[str, int]] = []
     for row in rows:
         if not isinstance(row, Mapping):
-            raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_row_shape", payload_schema_valid=False) from None
         if not set(row.keys()).issubset(_PINNED_ROW_KEYS):
-            raise make_wire_rejection("invalid_row_keys", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_row_keys", payload_schema_valid=False) from None
         raw_cid = row.get("campaign_id")
         if type(raw_cid) is not str or META_CAMPAIGN_ID_RE.fullmatch(raw_cid) is None:
-            raise make_wire_rejection("invalid_campaign_id", payload_schema_valid=False)
+            raise make_wire_rejection("invalid_campaign_id", payload_schema_valid=False) from None
         records.append(parse_campaign_row_metrics(row).to_reducer_record())
     return records
 
