@@ -81,6 +81,7 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.reconciliation.bundle_record",
         "smart_ads.reconciliation.bundle_universe",
         "smart_ads.reconciliation.bundle_verify",
+        "smart_ads.reconciliation.certification_7a",
         "smart_ads.reconciliation.tolerance",
         "smart_ads.transports",
         "smart_ads.transports.mcp",

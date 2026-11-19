@@ -1319,41 +1319,47 @@ def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
         )
 
 
+_EXPECTED_31_CORE_SCHEMA_IDS = {
+    "smart_ads/admitted_collection/v1",
+    "smart_ads/analysis_execution/v1",
+    "smart_ads/analysis_policy/v1",
+    "smart_ads/analysis_result/v1",
+    "smart_ads/analysis_result_schema/v1",
+    "smart_ads/analytics_landing_row/v1",
+    "smart_ads/artifact_locator/v1",
+    "smart_ads/base_metric_definition/v1",
+    "smart_ads/canonical_query_contract/v1",
+    "smart_ads/canonical_result_set/v1",
+    "smart_ads/capability_invalidation_transition/v1",
+    "smart_ads/capability_revalidation_transition/v1",
+    "smart_ads/certification_7a_record/v1",
+    "smart_ads/certification_7b_record/v1",
+    "smart_ads/certification_record/v1",
+    "smart_ads/collection_result/v1",
+    "smart_ads/derived_metric_definition/v1",
+    "smart_ads/expected_resource_inventory/v1",
+    "smart_ads/fact_evidence_selector/v1",
+    "smart_ads/fact_reconciliation/v1",
+    "smart_ads/finding/v1",
+    "smart_ads/formula_bundle/v1",
+    "smart_ads/git_artifact_provenance/v1",
+    "smart_ads/native_request_projection/v1",
+    "smart_ads/negative_security_test_report/v1",
+    "smart_ads/normalized_collection_fact/v1",
+    "smart_ads/pipeboard_phase1_contract/v1",
+    "smart_ads/private_registry_snapshot/v1",
+    "smart_ads/regression_fixture/v1",
+    "smart_ads/semantic_observation_projection/v1",
+    "smart_ads/tolerance_profile/v1",
+}
+
+
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
     assert schema_ids == sorted(schema_ids, key=lambda s: s.encode("utf-8"))
-    assert len(schema_ids) == 28
+    assert len(schema_ids) == 31
     assert len(set(schema_ids)) == len(schema_ids)
-    assert set(schema_ids) == {
-        "smart_ads/admitted_collection/v1",
-        "smart_ads/analysis_execution/v1",
-        "smart_ads/analysis_policy/v1",
-        "smart_ads/analysis_result/v1",
-        "smart_ads/analysis_result_schema/v1",
-        "smart_ads/analytics_landing_row/v1",
-        "smart_ads/artifact_locator/v1",
-        "smart_ads/base_metric_definition/v1",
-        "smart_ads/canonical_query_contract/v1",
-        "smart_ads/canonical_result_set/v1",
-        "smart_ads/capability_invalidation_transition/v1",
-        "smart_ads/capability_revalidation_transition/v1",
-        "smart_ads/certification_7b_record/v1",
-        "smart_ads/certification_record/v1",
-        "smart_ads/collection_result/v1",
-        "smart_ads/derived_metric_definition/v1",
-        "smart_ads/expected_resource_inventory/v1",
-        "smart_ads/fact_evidence_selector/v1",
-        "smart_ads/fact_reconciliation/v1",
-        "smart_ads/finding/v1",
-        "smart_ads/formula_bundle/v1",
-        "smart_ads/native_request_projection/v1",
-        "smart_ads/normalized_collection_fact/v1",
-        "smart_ads/pipeboard_phase1_contract/v1",
-        "smart_ads/private_registry_snapshot/v1",
-        "smart_ads/regression_fixture/v1",
-        "smart_ads/semantic_observation_projection/v1",
-        "smart_ads/tolerance_profile/v1",
-    }
+    assert set(schema_ids) == _EXPECTED_31_CORE_SCHEMA_IDS
 
     by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}
     for sid, desc in by_id.items():
@@ -1361,51 +1367,18 @@ def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
         assert fields == sorted(fields, key=lambda s: s.encode("utf-8"))
         assert desc["p1_domain_prefix"] == ADR_P1_DOMAIN_PREFIXES.get(sid)
 
-    # Verify agreement with actual serialized keys of Task 2 & Task 3 dataclasses
-    key_reg_loc = _loc("smart_ads/key_authorization_registry/v1", "1")
-    sample_p1 = P1Integrity(
-        key_id="key:ed25519:" + ("a" * 64),
-        key_registry_snapshot_locator=key_reg_loc,
+    digest = compute_schema_bundle_digest()
+    assert digest == compute_schema_bundle_digest()
+    assert digest == domain_jcs_sha256(
+        SUPPLEMENTAL_DOMAIN_PREFIXES["schema_bundle"],
+        list(CORE_SCHEMA_DESCRIPTORS),
     )
-    base_defn = PHASE1_BASE_METRICS["metric:clicks_v1"]
-    base_defn_p1 = type(base_defn)(
-        metric_semantic_ref=base_defn.metric_semantic_ref,
-        canonical_name=base_defn.canonical_name,
-        value_type=base_defn.value_type,
-        unit=base_defn.unit,
-        currency_rule=base_defn.currency_rule,
-        dimensions=base_defn.dimensions,
-        aggregation_semantics=base_defn.aggregation_semantics,
-        integrity=sample_p1,
-    )
-    cqc = _make_canonical_query()
-    fk = _make_fact_key()
-    ctx = _make_retrieval_context()
-    fact = NormalizedCollectionFact(
-        fact_key=fk,
-        presence_status="observed",
-        value_type="int64_count",
-        raw_numeric_value="1",
-        unit="count",
-        currency=None,
-    )
-    row = project_collection_fact_to_landing_row(fact, ctx)
-    sem = SemanticObservationProjection(
-        fact_key=fk,
-        value_type="int64_count",
-        raw_numeric_value="1",
-        unit="count",
-        currency=None,
-        metric_origin="provider_observation",
-        presence_status="observed",
-        unknown_reason=None,
-        calculation_status="not_applicable",
-        collected_at_utc=ctx.retrieved_at_utc,
-        source_observation_ref=ctx.source_observation_ref,
-        adapter_version=ctx.adapter_version,
-        semantic_version=ctx.semantic_version,
-    )
-    adm = AdmittedCollection(
+
+
+def _make_sample_admitted_for_descriptor(
+    cqc: CanonicalQueryContract, sample_p1: P1Integrity
+) -> AdmittedCollection:
+    return AdmittedCollection(
         admission_id="admission:adm-x",
         collection_purpose="fixture_7a",
         external_request_digest="sha256:" + ("2" * 64),
@@ -1432,48 +1405,75 @@ def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
         canonical_query_digest=cqc.canonical_query_digest,
         purpose_prerequisite_locators=PurposePrerequisiteLocators(
             purpose="fixture_7a",
-            sealed_sandbox_profile_locator=_loc(
-                "smart_ads/sealed_sandbox_profile/v1", "6"
-            ),
+            sealed_sandbox_profile_locator=_loc("smart_ads/sealed_sandbox_profile/v1", "6"),
             regression_fixture_locator=_loc("smart_ads/regression_fixture/v1", "7"),
         ),
         required_effect_roles=(),
         integrity=sample_p1,
     )
-    res = CollectionResult(
-        admitted_collection_locator=_loc("smart_ads/admitted_collection/v1", "8"),
-        admitted_collection_digest="sha256:" + ("8" * 64),
-        call_side="candidate",
-        registry_snapshot_locator=_loc("smart_ads/private_registry_snapshot/v1", "3"),
-        registry_snapshot_digest="sha256:" + ("3" * 64),
-        requested_capabilities=cqc.requested_capabilities,
-        observed_capabilities=cqc.requested_capabilities,
-        retrieval_context=ctx,
-        transport_outcome=_make_transport_outcome(),
-        candidates=(row,),
-        normalized_fact_set=(fact,),
-        normalized_fact_set_digest=compute_normalized_fact_set_digest([fact])[1],
-        normalized_errors=(),
-        integrity=sample_p1,
+
+
+def _sample_contracts_fact_and_row_dicts() -> tuple[tuple[str, dict[str, object]], ...]:
+    fk = _make_fact_key()
+    ctx = _make_retrieval_context()
+    fact = NormalizedCollectionFact(
+        fact_key=fk,
+        presence_status="observed",
+        value_type="int64_count",
+        raw_numeric_value="1",
+        unit="count",
+        currency=None,
+    )
+    row = project_collection_fact_to_landing_row(fact, ctx)
+    sem = SemanticObservationProjection(
+        fact_key=fk,
+        value_type="int64_count",
+        raw_numeric_value="1",
+        unit="count",
+        currency=None,
+        metric_origin="provider_observation",
+        presence_status="observed",
+        unknown_reason=None,
+        calculation_status="not_applicable",
+        collected_at_utc=ctx.retrieved_at_utc,
+        source_observation_ref=ctx.source_observation_ref,
+        adapter_version=ctx.adapter_version,
+        semantic_version=ctx.semantic_version,
+    )
+    return (
+        ("smart_ads/normalized_collection_fact/v1", fact.to_dict()),
+        ("smart_ads/semantic_observation_projection/v1", sem.to_dict()),
+        ("smart_ads/analytics_landing_row/v1", row.to_dict()),
     )
 
-    for sid, obj_dict in (
+
+def test_core_schema_descriptors_match_contracts_dataclass_keys() -> None:
+    by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}
+    key_reg_loc = _loc("smart_ads/key_authorization_registry/v1", "1")
+    sample_p1 = P1Integrity("key:ed25519:" + ("a" * 64), key_reg_loc)
+    bd = PHASE1_BASE_METRICS["metric:clicks_v1"]
+    base_defn_p1 = type(bd)(
+        bd.metric_semantic_ref, bd.canonical_name, bd.value_type, bd.unit,
+        bd.currency_rule, bd.dimensions, bd.aggregation_semantics, integrity=sample_p1,
+    )
+    cqc = _make_canonical_query()
+    ctx = _make_retrieval_context()
+    fact = NormalizedCollectionFact(_make_fact_key(), "observed", "int64_count", "1", "count", None)
+    row = project_collection_fact_to_landing_row(fact, ctx)
+    adm = _make_sample_admitted_for_descriptor(cqc, sample_p1)
+    res = CollectionResult(
+        _loc("smart_ads/admitted_collection/v1", "8"), "sha256:" + ("8" * 64), "candidate",
+        _loc("smart_ads/private_registry_snapshot/v1", "3"), "sha256:" + ("3" * 64),
+        cqc.requested_capabilities, cqc.requested_capabilities, ctx, _make_transport_outcome(),
+        (row,), (fact,), compute_normalized_fact_set_digest([fact])[1], (), sample_p1,
+    )
+    samples = (
         ("smart_ads/artifact_locator/v1", key_reg_loc.to_dict()),
         ("smart_ads/base_metric_definition/v1", base_defn_p1.to_dict()),
         ("smart_ads/canonical_query_contract/v1", cqc.to_dict()),
         ("smart_ads/admitted_collection/v1", adm.to_dict()),
-        ("smart_ads/normalized_collection_fact/v1", fact.to_dict()),
-        ("smart_ads/semantic_observation_projection/v1", sem.to_dict()),
-        ("smart_ads/analytics_landing_row/v1", row.to_dict()),
         ("smart_ads/collection_result/v1", res.to_dict()),
-    ):
-        assert list(by_id[sid]["fields"]) == sorted(
-            obj_dict.keys(), key=lambda s: s.encode("utf-8")
-        )
-
-    digest = compute_schema_bundle_digest()
-    assert digest == compute_schema_bundle_digest()
-    assert digest == domain_jcs_sha256(
-        SUPPLEMENTAL_DOMAIN_PREFIXES["schema_bundle"],
-        list(CORE_SCHEMA_DESCRIPTORS),
+        *_sample_contracts_fact_and_row_dicts(),
     )
+    for sid, obj_dict in samples:
+        assert list(by_id[sid]["fields"]) == sorted(obj_dict.keys(), key=lambda s: s.encode("utf-8"))

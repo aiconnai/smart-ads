@@ -1,0 +1,241 @@
+{
+  "$schema": "smart_ads/pipeboard_7a_corpus/v1",
+  "corpus_id": "corpus:pipeboard-7a-phase1-v1",
+  "tenant_ref": "tenant:ibvi",
+  "key_identity": "key:7a-fixture-hmac-v1",
+  "tenant_hmac_key_hex": "3031323334353637383961626364656630313233343536373839616263646566",
+  "private_account_bindings": [
+    {
+      "binding_ref": "binding:meta-primary",
+      "account_ref": "account:ibvi-01",
+      "private_object_id": "act_5544332211"
+    }
+  ],
+  "verified_campaign_pairs": [
+    {
+      "raw_campaign_id": "12021000000001",
+      "resource_ref": "resource:phfyzjbg52sfzs6ymkeba4m547ddwlv67z3bmwl7uvqxjxhra64a"
+    },
+    {
+      "raw_campaign_id": "12021000000002",
+      "resource_ref": "resource:q2dpe3lmi6wkyhoptpcddyjppyymq3djxwo5fcibcuefynpmheeq"
+    }
+  ],
+  "timezone_snapshot": {
+    "timezone_name": "America/Sao_Paulo",
+    "tzdb_version": "2026a",
+    "transitions": [
+      {
+        "effective_from_utc_micros": 1577836800000000,
+        "utc_offset_seconds": -10800
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "case_01_complete_two_campaigns",
+      "admission_id": "admission:7a-case-01",
+      "clock_reading": {
+        "attestation": {
+          "$schema": "smart_ads/clock_attestation/v1",
+          "attestation_id": "clock:7a-case-01",
+          "now_utc": "2026-09-07T10:00:06.250000Z",
+          "uncertainty_ms": 100,
+          "issued_at_utc": "2026-09-07T10:00:05Z",
+          "valid_until_utc": "2026-09-07T10:00:25Z",
+          "maximum_age_seconds": 30
+        },
+        "configured_max_uncertainty_ms": 1000
+      },
+      "collection_request": {
+        "request_id": "req-7a-case-01",
+        "collection_purpose": "fixture_7a",
+        "tenant_ref": "tenant:ibvi",
+        "binding_ref": "binding:meta-primary",
+        "resource_scope_ref": "scope:campaigns-active",
+        "date_rule": "previous_local_day",
+        "resource_level": "campaign",
+        "requested_capabilities": [
+          "cap:campaign-basic-v1"
+        ],
+        "breakdowns": []
+      },
+      "retrieval_context": {
+        "retrieved_at_utc": "2026-09-07T10:00:11.500000Z",
+        "source_observation_ref": "observation:7a-case-01",
+        "adapter_version": "pipeboard-phase1/0.1.0",
+        "semantic_version": "1.0.0"
+      },
+      "http_response": {
+        "network_ok": true,
+        "http_status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/json; charset=utf-8"
+          ]
+        ],
+        "body_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"data\\\":[{\\\"campaign_id\\\":\\\"12021000000001\\\",\\\"campaign_name\\\":\\\"Campaign Alpha\\\",\\\"date_start\\\":\\\"2026-09-06\\\",\\\"date_stop\\\":\\\"2026-09-06\\\",\\\"impressions\\\":\\\"150000\\\",\\\"clicks\\\":\\\"4200\\\",\\\"spend\\\":\\\"92233720368547758.07\\\"},{\\\"campaign_id\\\":\\\"12021000000002\\\",\\\"campaign_name\\\":\\\"Campaign Beta\\\",\\\"date_start\\\":\\\"2026-09-06\\\",\\\"date_stop\\\":\\\"2026-09-06\\\",\\\"impressions\\\":\\\"85000\\\",\\\"clicks\\\":\\\"1950\\\",\\\"spend\\\":\\\"1234.56\\\"}],\\\"paging\\\":{\\\"cursors\\\":{\\\"before\\\":\\\"cur_b1\\\",\\\"after\\\":\\\"cur_a1\\\"}}}\"}],\"isError\":false}}"
+      },
+      "expected_completeness_status": "complete",
+      "expected_reasons": [],
+      "expected_error_code": null
+    },
+    {
+      "case_id": "case_02_failed_http_401",
+      "admission_id": "admission:7a-case-02",
+      "clock_reading": {
+        "attestation": {
+          "$schema": "smart_ads/clock_attestation/v1",
+          "attestation_id": "clock:7a-case-02",
+          "now_utc": "2026-09-07T10:00:06.350000Z",
+          "uncertainty_ms": 100,
+          "issued_at_utc": "2026-09-07T10:00:05Z",
+          "valid_until_utc": "2026-09-07T10:00:25Z",
+          "maximum_age_seconds": 30
+        },
+        "configured_max_uncertainty_ms": 1000
+      },
+      "collection_request": {
+        "request_id": "req-7a-case-02",
+        "collection_purpose": "fixture_7a",
+        "tenant_ref": "tenant:ibvi",
+        "binding_ref": "binding:meta-primary",
+        "resource_scope_ref": "scope:campaigns-active",
+        "date_rule": "previous_local_day",
+        "resource_level": "campaign",
+        "requested_capabilities": [
+          "cap:campaign-basic-v1"
+        ],
+        "breakdowns": []
+      },
+      "retrieval_context": {
+        "retrieved_at_utc": "2026-09-07T10:00:12.500000Z",
+        "source_observation_ref": "observation:7a-case-02",
+        "adapter_version": "pipeboard-phase1/0.1.0",
+        "semantic_version": "1.0.0"
+      },
+      "http_response": {
+        "network_ok": true,
+        "http_status": 401,
+        "headers": [
+          [
+            "Content-Type",
+            "application/json"
+          ]
+        ],
+        "body_utf8": "{\"error\":\"unauthorized\"}"
+      },
+      "expected_completeness_status": "failed",
+      "expected_reasons": [
+        "auth_failed",
+        "http_status_401"
+      ],
+      "expected_error_code": "http_auth_error"
+    },
+    {
+      "case_id": "case_03_partial_date_mismatch",
+      "admission_id": "admission:7a-case-03",
+      "clock_reading": {
+        "attestation": {
+          "$schema": "smart_ads/clock_attestation/v1",
+          "attestation_id": "clock:7a-case-03",
+          "now_utc": "2026-09-07T10:00:06.450000Z",
+          "uncertainty_ms": 100,
+          "issued_at_utc": "2026-09-07T10:00:05Z",
+          "valid_until_utc": "2026-09-07T10:00:25Z",
+          "maximum_age_seconds": 30
+        },
+        "configured_max_uncertainty_ms": 1000
+      },
+      "collection_request": {
+        "request_id": "req-7a-case-03",
+        "collection_purpose": "fixture_7a",
+        "tenant_ref": "tenant:ibvi",
+        "binding_ref": "binding:meta-primary",
+        "resource_scope_ref": "scope:campaigns-active",
+        "date_rule": "previous_local_day",
+        "resource_level": "campaign",
+        "requested_capabilities": [
+          "cap:campaign-basic-v1"
+        ],
+        "breakdowns": []
+      },
+      "retrieval_context": {
+        "retrieved_at_utc": "2026-09-07T10:00:13.500000Z",
+        "source_observation_ref": "observation:7a-case-03",
+        "adapter_version": "pipeboard-phase1/0.1.0",
+        "semantic_version": "1.0.0"
+      },
+      "http_response": {
+        "network_ok": true,
+        "http_status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/json"
+          ]
+        ],
+        "body_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"data\\\":[{\\\"campaign_id\\\":\\\"12021000000001\\\",\\\"date_start\\\":\\\"2026-09-05\\\",\\\"date_stop\\\":\\\"2026-09-05\\\",\\\"impressions\\\":\\\"100\\\",\\\"clicks\\\":\\\"5\\\",\\\"spend\\\":\\\"10.00\\\"}]}\"}],\"isError\":false}}"
+      },
+      "expected_completeness_status": "partial",
+      "expected_reasons": [
+        "response_date_mismatch",
+        "missing_expected_fact_keys"
+      ],
+      "expected_error_code": "response_date_mismatch"
+    },
+    {
+      "case_id": "case_04_partial_non_empty_paging_next",
+      "admission_id": "admission:7a-case-04",
+      "clock_reading": {
+        "attestation": {
+          "$schema": "smart_ads/clock_attestation/v1",
+          "attestation_id": "clock:7a-case-04",
+          "now_utc": "2026-09-07T10:00:06.550000Z",
+          "uncertainty_ms": 100,
+          "issued_at_utc": "2026-09-07T10:00:05Z",
+          "valid_until_utc": "2026-09-07T10:00:25Z",
+          "maximum_age_seconds": 30
+        },
+        "configured_max_uncertainty_ms": 1000
+      },
+      "collection_request": {
+        "request_id": "req-7a-case-04",
+        "collection_purpose": "fixture_7a",
+        "tenant_ref": "tenant:ibvi",
+        "binding_ref": "binding:meta-primary",
+        "resource_scope_ref": "scope:campaigns-active",
+        "date_rule": "previous_local_day",
+        "resource_level": "campaign",
+        "requested_capabilities": [
+          "cap:campaign-basic-v1"
+        ],
+        "breakdowns": []
+      },
+      "retrieval_context": {
+        "retrieved_at_utc": "2026-09-07T10:00:14.500000Z",
+        "source_observation_ref": "observation:7a-case-04",
+        "adapter_version": "pipeboard-phase1/0.1.0",
+        "semantic_version": "1.0.0"
+      },
+      "http_response": {
+        "network_ok": true,
+        "http_status": 200,
+        "headers": [
+          [
+            "Content-Type",
+            "application/json"
+          ]
+        ],
+        "body_utf8": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"data\\\":[{\\\"campaign_id\\\":\\\"12021000000001\\\",\\\"date_start\\\":\\\"2026-09-06\\\",\\\"date_stop\\\":\\\"2026-09-06\\\",\\\"impressions\\\":\\\"100\\\",\\\"clicks\\\":\\\"5\\\",\\\"spend\\\":\\\"10.00\\\"}],\\\"paging\\\":{\\\"cursors\\\":{\\\"before\\\":\\\"cur_b1\\\",\\\"after\\\":\\\"cur_a1\\\"},\\\"next\\\":\\\"https://graph.facebook.com/v20.0/act_next_cursor\\\"}}\"}],\"isError\":false}}"
+      },
+      "expected_completeness_status": "partial",
+      "expected_reasons": [
+        "non_empty_continuation",
+        "missing_expected_fact_keys"
+      ],
+      "expected_error_code": "non_empty_paging_next"
+    }
+  ]
+}
