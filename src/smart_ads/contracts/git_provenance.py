@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import hashlib
 from typing import Any, ClassVar, Final
+import unicodedata
 
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES,
@@ -26,16 +27,20 @@ from smart_ads.contracts.scalars import (
 _GIT_ARTIFACT_PROVENANCE_SCHEMA: Final[str] = "smart_ads/git_artifact_provenance/v1"
 
 
+def _has_control_char(value: str) -> bool:
+    return any(
+        unicodedata.category(ch) == "Cc" or ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F
+        for ch in value
+    )
+
+
 def _validate_repository_slug(value: object, *, field_name: str) -> str:
     if type(value) is not str:
         raise ClosedValidationError(
             f"{field_name}: expected str, got {type(value).__name__}"
         )
     checked = validate_non_empty_str(value, field_name=field_name)
-    if any(
-        ch.isspace() or ord(ch) < 32 or ord(ch) == 127 or ch == "\\"
-        for ch in checked
-    ):
+    if _has_control_char(checked) or any(ch.isspace() or ch == "\\" for ch in checked):
         raise ClosedValidationError(
             f"{field_name}: whitespace, backslashes, and control chars are forbidden"
         )
@@ -59,7 +64,7 @@ def _validate_relative_posix_path(value: object, *, field_name: str) -> str:
             f"{field_name}: expected str, got {type(value).__name__}"
         )
     checked = validate_non_empty_str(value, field_name=field_name)
-    if "\\" in checked or any(ord(ch) < 32 or ord(ch) == 127 for ch in checked):
+    if "\\" in checked or _has_control_char(checked):
         raise ClosedValidationError(
             f"{field_name}: backslashes and control characters are forbidden"
         )

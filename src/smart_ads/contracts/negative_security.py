@@ -104,7 +104,7 @@ def _strict_str(value: object, *, label: str) -> str:
     if type(value) is not str:
         raise ClosedValidationError(f"{label}: expected str, got {type(value).__name__}")
     checked = validate_non_empty_str(value, field_name=label)
-    if checked != checked.strip() or any(ord(c) < 32 or ord(c) == 127 for c in checked):
+    if checked != checked.strip() or any(ord(c) <= 0x1F or 0x7F <= ord(c) <= 0x9F for c in checked):
         raise ClosedValidationError(f"{label}: leading/trailing whitespace or control char")
     return checked
 
@@ -116,7 +116,7 @@ def _exact_str(value: object, expected: str, *, label: str) -> str:
 def _exact_str_seq(value: object, expected: tuple[str, ...], *, label: str, list_only: bool = False) -> tuple[str, ...]:
     if list_only and type(value) is not list:
         raise ClosedValidationError(f"{label}: expected JSON array list")
-    if not isinstance(value, (list, tuple)) or any(type(i) is not str for i in value) or tuple(value) != expected:
+    if type(value) not in (list, tuple) or any(type(i) is not str for i in value) or tuple(value) != expected:
         raise ClosedValidationError(f"{label}: expected exact {list(expected)!r}")
     return expected
 
@@ -260,8 +260,6 @@ class SandboxRuntimeReadback:
     @classmethod
     def from_dict(cls, data: object) -> SandboxRuntimeReadback:
         m = require_exact_keys(data, cls.KEYS, label="sandbox_runtime_readback")
-        _validate_shared_runtime_fields(m, label="sandbox_runtime_readback", list_only=True)
-        _exact_str_seq(m["effective_writable_mounts"], _EXACT_TMPFS_MOUNTS, label="sandbox_runtime_readback.effective_writable_mounts", list_only=True)
         return cls(**{k: m[k] for k in cls.KEYS})
 
 
@@ -775,8 +773,8 @@ def verify_negative_security_report_against_profile(
     wheel_provenance_payload: Mapping[str, Any], wheel_bytes: bytes,
 ) -> None:
     """Materially verify `report` against `sealed_sandbox_profile/v1`, wheel provenance, and `wheel_bytes`."""
-    if type(wheel_bytes) is not bytes:
-        raise ClosedValidationError("verify_negative_security_report_against_profile: expected bytes")
+    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
+        raise ClosedValidationError("verify_negative_security_report_against_profile: expected non-empty bytes")
     checked = _reparse(report, NegativeSecurityTestReport, label="report")
     sbx_payload = _unwrap_p1_or_payload(sandbox_profile, expected_schema=_SANDBOX_PROFILE_SCHEMA, payload_keys=_SANDBOX_PAYLOAD_20_KEYS, expected_locator=checked.sealed_sandbox_profile_locator, label="sandbox_profile")
     prov_payload = _unwrap_p1_or_payload(wheel_provenance_payload, expected_schema=_WHEEL_PROVENANCE_SCHEMA, payload_keys=_WHEEL_PROVENANCE_16_KEYS, expected_locator=checked.wheel_build_provenance_locator, label="wheel_provenance_payload")

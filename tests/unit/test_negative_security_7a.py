@@ -143,30 +143,21 @@ def _make_sandbox_payload() -> dict[str, Any]:
     }
 
 
-def _make_wheel_provenance_payload() -> dict[str, Any]:
+def _make_wheel_provenance_payload(wheel_bytes: bytes = _WHEEL_BYTES) -> dict[str, Any]:
+    whl_digest = "sha256:" + hashlib.sha256(wheel_bytes).hexdigest()
     return {
         "migration_run_context_locator": _RUN_CTX_LOC.to_dict(),
-        "build_run_id": "build-run-7a-001",
-        "built_at_utc": "2026-11-12T12:00:00Z",
-        "repository": "aiconnai/smart-ads",
-        "source_commit_sha": _COMMIT_SHA,
-        "source_tree_oid": _TREE_OID,
-        "source_date_epoch": 1_700_000_000,
-        "python_abi_tag": "cp312",
-        "build_backend": "hatchling.build",
-        "build_backend_version": "1.33.0",
-        "build_backend_digest": _BACKEND_DIGEST,
-        "pyproject_sha256": _PYPROJECT_DIGEST,
-        "uv_lock_sha256": _UVLOCK_DIGEST,
-        "schema_bundle_digest": _SCHEMA_DIGEST,
+        "build_run_id": "build-run-7a-001", "built_at_utc": "2026-11-12T12:00:00Z",
+        "repository": "aiconnai/smart-ads", "source_commit_sha": _COMMIT_SHA,
+        "source_tree_oid": _TREE_OID, "source_date_epoch": 1_700_000_000,
+        "python_abi_tag": "cp312", "build_backend": "hatchling.build",
+        "build_backend_version": "1.33.0", "build_backend_digest": _BACKEND_DIGEST,
+        "pyproject_sha256": _PYPROJECT_DIGEST, "uv_lock_sha256": _UVLOCK_DIGEST,
+        "schema_bundle_digest": _SCHEMA_DIGEST, "wheel_digest": whl_digest,
         "wheel": {
-            "$schema": "smart_ads/wheel_object_locator/v1",
-            "store_kind": "cell_immutable_object",
-            "object_ref": f"cell-object:{_WHEEL_DIGEST}",
-            "wheel_digest": _WHEEL_DIGEST,
-            "size_bytes": len(_WHEEL_BYTES),
+            "$schema": "smart_ads/wheel_object_locator/v1", "store_kind": "cell_immutable_object",
+            "object_ref": f"cell-object:{whl_digest}", "wheel_digest": whl_digest, "size_bytes": len(wheel_bytes),
         },
-        "wheel_digest": _WHEEL_DIGEST,
     }
 
 
@@ -242,39 +233,25 @@ def _resource_run_specs(
 
 
 def _build_bound_run(
-    case_id: str,
-    subrun_idx: int,
-    ref: str,
-    *,
-    seccomp_enforced: bool,
-    usage: SandboxUsageCounters,
-    termination: SandboxTermination,
-    observation: dict[str, Any],
-    sbx_digest: str,
+    case_id: str, subrun_idx: int, ref: str, *, seccomp_enforced: bool,
+    usage: SandboxUsageCounters, termination: SandboxTermination,
+    observation: dict[str, Any], sbx_digest: str, whl_digest: str = _WHEEL_DIGEST,
 ) -> NegativeSecurityRun:
     placeholder = NegativeSecurityRun(
-        sandbox_instance_ref=ref,
-        execution_binding_digest="sha256:" + ("0" * 64),
-        started_at_utc="2026-11-12T12:01:00Z",
-        ended_at_utc="2026-11-12T12:06:00Z",
+        sandbox_instance_ref=ref, execution_binding_digest="sha256:" + ("0" * 64),
+        started_at_utc="2026-11-12T12:01:00Z", ended_at_utc="2026-11-12T12:06:00Z",
         runtime_readback=_make_readback(seccomp_enforced=seccomp_enforced),
         effective_resource_limits=SandboxResourceLimits.canonical(),
-        usage=usage,
-        termination=termination,
-        observation=observation,
+        usage=usage, termination=termination, observation=observation,
     )
     binding = compute_negative_run_execution_binding_digest(
-        case_id=case_id,
-        subrun_index=subrun_idx,
-        run=placeholder,
-        wheel_digest=_WHEEL_DIGEST,
-        test_suite_digest=PINNED_7A_NEGATIVE_SUITE_DIGEST,
-        sealed_sandbox_profile_digest=sbx_digest,
+        case_id=case_id, subrun_index=subrun_idx, run=placeholder, wheel_digest=whl_digest,
+        test_suite_digest=PINNED_7A_NEGATIVE_SUITE_DIGEST, sealed_sandbox_profile_digest=sbx_digest,
     )
     return dataclasses.replace(placeholder, execution_binding_digest=binding)
 
 
-def _build_all_17_cases(sbx_digest: str) -> tuple[NegativeSecurityCase, ...]:
+def _build_all_17_cases(sbx_digest: str, whl_digest: str = _WHEEL_DIGEST) -> tuple[NegativeSecurityCase, ...]:
     cases: list[NegativeSecurityCase] = []
     seq = 0
     clean_term = SandboxTermination("clean_exit", False, 0, None, 40, 0, True, False)
@@ -283,9 +260,9 @@ def _build_all_17_cases(sbx_digest: str) -> tuple[NegativeSecurityCase, ...]:
         if cid in _DENIAL_OBSERVATIONS:
             seq += 1
             run = _build_bound_run(
-                cid, 0, f"sandbox:run-{seq:03d}", seccomp_enforced=True,
-                usage=clean_usage, termination=clean_term,
-                observation=_DENIAL_OBSERVATIONS[cid], sbx_digest=sbx_digest,
+                cid, 0, f"sandbox:run-{seq:03d}", seccomp_enforced=True, usage=clean_usage,
+                termination=clean_term, observation=_DENIAL_OBSERVATIONS[cid],
+                sbx_digest=sbx_digest, whl_digest=whl_digest,
             )
             cases.append(NegativeSecurityCase(case_id=cid, outcome="passed", runs=(run,)))
         else:
@@ -293,40 +270,33 @@ def _build_all_17_cases(sbx_digest: str) -> tuple[NegativeSecurityCase, ...]:
             for sub_idx, (seccomp, usage, term, obs) in enumerate(_resource_run_specs(cid)):
                 seq += 1
                 runs.append(_build_bound_run(
-                    cid, sub_idx, f"sandbox:run-{seq:03d}", seccomp_enforced=seccomp,
-                    usage=usage, termination=term, observation=obs, sbx_digest=sbx_digest,
+                    cid, sub_idx, f"sandbox:run-{seq:03d}", seccomp_enforced=seccomp, usage=usage,
+                    termination=term, observation=obs, sbx_digest=sbx_digest, whl_digest=whl_digest,
                 ))
             cases.append(NegativeSecurityCase(case_id=cid, outcome="passed", runs=tuple(runs)))
     return tuple(cases)
 
 
-def _build_valid_world() -> tuple[NegativeSecurityTestReport, dict[str, Any], dict[str, Any]]:
+def _build_valid_world(
+    wheel_bytes: bytes = _WHEEL_BYTES,
+) -> tuple[NegativeSecurityTestReport, dict[str, Any], dict[str, Any]]:
+    whl_digest = "sha256:" + hashlib.sha256(wheel_bytes).hexdigest()
     sbx_payload = _make_sandbox_payload()
     sbx_env = _sign_envelope_dict({"$schema": "smart_ads/sealed_sandbox_profile/v1", **sbx_payload})
-    prov_payload = _make_wheel_provenance_payload()
+    prov_payload = _make_wheel_provenance_payload(wheel_bytes)
     prov_env = _sign_envelope_dict({"$schema": "smart_ads/wheel_build_provenance/v1", **prov_payload})
     sbx_digest = jcs_sha256({k: sbx_payload[k] for k in _SPEC_17_KEYS})
-    sbx_loc = ArtifactLocator.for_canonical_bytes(
-        "smart_ads/sealed_sandbox_profile/v1", canonicalize_jcs(sbx_env)
-    )
-    prov_loc = ArtifactLocator.for_canonical_bytes(
-        "smart_ads/wheel_build_provenance/v1", canonicalize_jcs(prov_env)
-    )
+    sbx_loc = ArtifactLocator.for_canonical_bytes("smart_ads/sealed_sandbox_profile/v1", canonicalize_jcs(sbx_env))
+    prov_loc = ArtifactLocator.for_canonical_bytes("smart_ads/wheel_build_provenance/v1", canonicalize_jcs(prov_env))
     report = NegativeSecurityTestReport(
-        migration_run_context_locator=_RUN_CTX_LOC,
-        sealed_sandbox_profile_locator=sbx_loc,
-        wheel_build_provenance_locator=prov_loc,
-        build_run_id="build-run-7a-001",
-        executed_at_utc="2026-11-12T12:10:00Z",
-        source_commit_sha=_COMMIT_SHA,
-        build_backend_digest=_BACKEND_DIGEST,
-        schema_bundle_digest=_SCHEMA_DIGEST,
-        wheel_digest=_WHEEL_DIGEST,
-        oci_image_digest=_OCI_DIGEST,
-        runner_binary_digest=_RUNNER_DIGEST,
+        migration_run_context_locator=_RUN_CTX_LOC, sealed_sandbox_profile_locator=sbx_loc,
+        wheel_build_provenance_locator=prov_loc, build_run_id="build-run-7a-001",
+        executed_at_utc="2026-11-12T12:10:00Z", source_commit_sha=_COMMIT_SHA,
+        build_backend_digest=_BACKEND_DIGEST, schema_bundle_digest=_SCHEMA_DIGEST,
+        wheel_digest=whl_digest, oci_image_digest=_OCI_DIGEST, runner_binary_digest=_RUNNER_DIGEST,
         test_suite_digest=PINNED_7A_NEGATIVE_SUITE_DIGEST,
         declared_resource_limits=SandboxResourceLimits.canonical(),
-        cases=_build_all_17_cases(sbx_digest),
+        cases=_build_all_17_cases(sbx_digest, whl_digest),
     )
     return report, sbx_env, prov_env
 
@@ -372,6 +342,7 @@ def test_git_blob_oid_and_git_artifact_provenance_roundtrip() -> None:
         ("repository", "aiconnai/smart/ads"),
         ("repository", "aiconnai/smart ads"),
         ("repository", "aiconnai/.."),
+        ("repository", "aiconnai/smart\x80ads"),
         ("commit_sha", "A" * 40),
         ("path", "/abs/path.py"),
         ("path", "trailing/"),
@@ -379,6 +350,8 @@ def test_git_blob_oid_and_git_artifact_provenance_roundtrip() -> None:
         ("path", "a/../b.py"),
         ("path", "a/./b.py"),
         ("path", "a\\b.py"),
+        ("path", "src/smart\x80ads.py"),
+        ("path", "src/smart\x9fads.py"),
         ("git_blob_oid", "0" * 39),
         ("file_content_sha256", "sha256:bad"),
         ("resolved_at_utc", "2026-11-12T12:00:00.000000Z"),
@@ -643,26 +616,40 @@ def test_report_and_verifier_reject_binding_chronology_and_locator_tampering() -
         )
 
 
+def test_runtime_readback_from_dict_accepts_tuple_sequences() -> None:
+    rb = _make_readback(seccomp_enforced=True)
+    rb_tuple_dict = rb.to_dict()
+    for seq_key in (
+        "namespaces", "read_only_mounts", "fresh_tmpfs_mounts",
+        "masked_empty_mounts", "effective_writable_mounts",
+    ):
+        rb_tuple_dict[seq_key] = tuple(rb_tuple_dict[seq_key])
+    parsed = SandboxRuntimeReadback.from_dict(rb_tuple_dict)
+    assert parsed == rb
+    assert type(parsed.namespaces) is tuple
+    assert type(parsed.effective_writable_mounts) is tuple
+
+
+def test_verifier_rejects_zero_length_wheel_bytes() -> None:
+    empty_report, sbx_env, empty_prov_env = _build_valid_world(b"")
+    with pytest.raises(ClosedValidationError):
+        verify_negative_security_report_against_profile(
+            empty_report,
+            sandbox_profile=sbx_env,
+            wheel_provenance_payload=empty_prov_env,
+            wheel_bytes=b"",
+        )
+
+
 def test_contracts_package_reexports_all_task1_symbols() -> None:
     expected = (
-        "GitArtifactProvenance",
-        "MANDATORY_7A_NEGATIVE_CASES",
-        "NegativeSecurityCase",
-        "NegativeSecurityRun",
-        "NegativeSecurityTestReport",
-        "PINNED_7A_NEGATIVE_SUITE_DIGEST",
-        "SANDBOX_PROFILE_ID",
-        "SANDBOX_RESOURCES_VERSION",
-        "SandboxResourceLimits",
-        "SandboxRuntimeReadback",
-        "SandboxTermination",
-        "SandboxUsageCounters",
-        "compute_git_blob_oid",
-        "compute_negative_run_execution_binding_digest",
-        "evaluate_breach_predicates",
-        "sort_git_provenance_locators",
-        "verify_git_provenance_against_bytes",
-        "verify_negative_security_report_against_profile",
+        "GitArtifactProvenance", "MANDATORY_7A_NEGATIVE_CASES", "NegativeSecurityCase",
+        "NegativeSecurityRun", "NegativeSecurityTestReport", "PINNED_7A_NEGATIVE_SUITE_DIGEST",
+        "SANDBOX_PROFILE_ID", "SANDBOX_RESOURCES_VERSION", "SandboxResourceLimits",
+        "SandboxRuntimeReadback", "SandboxTermination", "SandboxUsageCounters",
+        "compute_git_blob_oid", "compute_negative_run_execution_binding_digest",
+        "evaluate_breach_predicates", "sort_git_provenance_locators",
+        "verify_git_provenance_against_bytes", "verify_negative_security_report_against_profile",
     )
     for symbol in expected:
         assert symbol in contracts_pkg.__all__
