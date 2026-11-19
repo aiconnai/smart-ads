@@ -728,7 +728,7 @@ class Gov1D4World:
 # ---------------------------------------------------------------------------
 
 
-def test_constants_adr_cases_domain_prefixes_and_zero_ast_assert_across_all_gov1_modules() -> None:
+def test_constants_adr_cases_and_untouched_p1_domain_prefixes() -> None:
     assert (
         gov1_convergence.GOV1_CONVERGENCE_SCHEMA
         == "smart_ads/gov1_convergence_record/v1"
@@ -763,9 +763,14 @@ def test_constants_adr_cases_domain_prefixes_and_zero_ast_assert_across_all_gov1
     assert "sealed_sandbox_profile/v1" not in p1.DOMAIN_PREFIXES
     assert "gov1_convergence_record/v1" not in p1.DOMAIN_PREFIXES
 
-    # Zero ast.Assert across ALL tools/governance/gov1_*.py modules
+
+def test_zero_ast_assert_across_all_gov1_modules() -> None:
     gov1_files = sorted((REPO_ROOT / "tools" / "governance").glob("gov1_*.py"))
     assert [f.name for f in gov1_files] == [
+        "gov1_7a_certification.py",
+        "gov1_7a_negative.py",
+        "gov1_7a_replay_helpers.py",
+        "gov1_7a_runner.py",
         "gov1_convergence.py",
         "gov1_mcp.py",
         "gov1_sandbox.py",

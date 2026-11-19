@@ -15,7 +15,7 @@ from __future__ import annotations
 import ast
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import copy
 import csv
 from dataclasses import dataclass
@@ -31,7 +31,7 @@ import sysconfig
 import tempfile
 import tomllib
 from types import MappingProxyType
-from typing import Any, Final
+from typing import Any, Final, Protocol, runtime_checkable
 import venv
 import zipfile
 import zlib
@@ -71,6 +71,46 @@ EXPECTED_WHEEL_FILENAME: Final[str] = "smart_ads-0.1.0-py3-none-any.whl"
 EXPECTED_SELF_RECORD_PATH: Final[str] = "smart_ads-0.1.0.dist-info/RECORD"
 
 MAX_JCS_SAFE_INT: Final[int] = (1 << 53) - 1
+
+
+@runtime_checkable
+class IsolatedWheelProbeRunner(Protocol):
+    """OS/OCI-isolated execution runner for untrusted wheel/PEP 517 Stage-7 probes."""
+
+    os_isolated: bool
+
+    def run_wheel_import_probe(
+        self,
+        *,
+        wheel_bytes: bytes,
+        expected_member_paths: frozenset[str],
+        expected_modules: Sequence[str],
+    ) -> dict[str, Any]: ...
+
+    def run_mcp_matrix_probe(
+        self,
+        *,
+        wheel_bytes: bytes,
+        expected_member_paths: frozenset[str],
+        expected_schema_bundle_digest: str,
+    ) -> dict[str, Any]: ...
+
+    def run_pep517_wheel_build(
+        self,
+        *,
+        snapshot_files: Mapping[str, bytes],
+        snapshot_modes: Mapping[str, str],
+        verified_backend_site_dir: Path,
+        source_date_epoch: int,
+    ) -> tuple[str, bytes]: ...
+
+
+def _require_optional_probe_runner(
+    probe_runner: IsolatedWheelProbeRunner | None,
+) -> IsolatedWheelProbeRunner | None:
+    if probe_runner is not None and not isinstance(probe_runner, IsolatedWheelProbeRunner):
+        raise ValueError("probe_runner: must satisfy IsolatedWheelProbeRunner")
+    return probe_runner
 
 # Exact empirically verified PEP 517 closure specs:
 # lock_pkg_name -> (version, uv_lock_wheel_sha256, dist_info_dir, module_dir, unpacked_tree_sha256)
@@ -1680,7 +1720,7 @@ def _stage_git_snapshot_tree(stage_dir: Path, snapshot: GitBuildSnapshot) -> Non
         os.chmod(dest, 0o755 if snapshot.modes[rel_path] == "100755" else 0o644)
 
 
-def _run_isolated_pep517_wheel_build(
+def _run_local_pep517_subprocess(
     *,
     stage_dir: Path,
     wheel_out_dir: Path,
@@ -1690,73 +1730,83 @@ def _run_isolated_pep517_wheel_build(
 ) -> tuple[str, bytes]:
     wheel_out_dir.mkdir(parents=True, exist_ok=False)
     tmp_dir.mkdir(parents=True, exist_ok=False)
-
-    closure_modules = sorted(
-        {
-            spec[3]
-            for spec in PINNED_UV_LOCK_CLOSURE_SPECS.values()
-        }
-        | {EXPECTED_BUILD_BACKEND},
+    closure_mods = sorted(
+        {spec[3] for spec in PINNED_UV_LOCK_CLOSURE_SPECS.values()} | {EXPECTED_BUILD_BACKEND},
         key=lambda s: s.encode("utf-8"),
     )
-    closure_mods_csv = ",".join(closure_modules)
-
     clean_env = {
-        "HOME": "/nonexistent",
-        "LANG": "C.UTF-8",
-        "LC_ALL": "C.UTF-8",
-        "PATH": _clean_system_path(),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONNOUSERSITE": "1",
-        "PYTHONSAFEPATH": "1",
-        "SOURCE_DATE_EPOCH": str(source_date_epoch),
-        "TMPDIR": str(tmp_dir.resolve()),
-        "TZ": "UTC",
+        "HOME": "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "PATH": _clean_system_path(), "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
+        "SOURCE_DATE_EPOCH": str(source_date_epoch), "TMPDIR": str(tmp_dir.resolve()), "TZ": "UTC",
     }
-
+    cmd = [
+        sys.executable, "-I", "-B", "-S", "-c", _PEP517_DRIVER_SCRIPT,
+        str(verified_backend_site_dir.resolve()), ",".join(closure_mods),
+        str(stage_dir.resolve()), str(wheel_out_dir.resolve()),
+        str(tmp_dir.resolve()), str(source_date_epoch), _PEP517_RUNNER_BOOTSTRAP,
+    ]
     try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                "-S",
-                "-c",
-                _PEP517_DRIVER_SCRIPT,
-                str(verified_backend_site_dir.resolve()),
-                closure_mods_csv,
-                str(stage_dir.resolve()),
-                str(wheel_out_dir.resolve()),
-                str(tmp_dir.resolve()),
-                str(source_date_epoch),
-                _PEP517_RUNNER_BOOTSTRAP,
-            ],
-            cwd=str(stage_dir.resolve()),
-            env=clean_env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        proc = subprocess.run(cmd, cwd=str(stage_dir.resolve()), env=clean_env, capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ValueError(f"isolated PEP 517 build failed or timed out: {exc}") from exc
-
     if proc.returncode != 0:
-        raise ValueError(
-            f"isolated PEP 517 build failed (rc={proc.returncode}): {proc.stderr.strip()}"
-        )
-
+        raise ValueError(f"isolated PEP 517 build failed (rc={proc.returncode}): {proc.stderr.strip()}")
     parsed = loads_strict(proc.stdout)
     if not isinstance(parsed, dict) or type(parsed.get("wheel_name")) is not str:
         raise ValueError("isolated PEP 517 driver returned malformed JSON output")
     wheel_name = parsed["wheel_name"]
-    _require_exact_str(
-        wheel_name, EXPECTED_WHEEL_FILENAME, "isolated_pep517.wheel_name"
-    )
-
     built_wheels = list(wheel_out_dir.glob("*.whl"))
     if len(built_wheels) != 1 or built_wheels[0].name != wheel_name:
         raise ValueError("isolated PEP 517 build did not emit unique expected wheel")
     return wheel_name, built_wheels[0].read_bytes()
+
+
+def _run_isolated_pep517_wheel_build(
+    *,
+    snapshot: GitBuildSnapshot,
+    stage_dir: Path,
+    wheel_out_dir: Path,
+    verified_backend_site_dir: Path,
+    tmp_dir: Path,
+    source_date_epoch: int,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
+) -> tuple[str, bytes]:
+    runner = _require_optional_probe_runner(probe_runner)
+    if runner is not None:
+        wheel_name, wheel_bytes = runner.run_pep517_wheel_build(
+            snapshot_files=MappingProxyType(dict(snapshot.files)),
+            snapshot_modes=MappingProxyType(dict(snapshot.modes)),
+            verified_backend_site_dir=verified_backend_site_dir,
+            source_date_epoch=source_date_epoch,
+        )
+    else:
+        _stage_git_snapshot_tree(stage_dir, snapshot)
+        wheel_name, wheel_bytes = _run_local_pep517_subprocess(
+            stage_dir=stage_dir,
+            wheel_out_dir=wheel_out_dir,
+            verified_backend_site_dir=verified_backend_site_dir,
+            tmp_dir=tmp_dir,
+            source_date_epoch=source_date_epoch,
+        )
+    _require_exact_str(wheel_name, EXPECTED_WHEEL_FILENAME, "isolated_pep517.wheel_name")
+    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
+        raise ValueError("isolated_pep517.wheel_bytes: expected non-empty bytes")
+    return wheel_name, wheel_bytes
+
+
+def _write_verified_wheel_output(out_dir: Path, wheel_name: str, wheel_bytes: bytes) -> Path:
+    out_path = Path(out_dir)
+    if out_path.is_symlink():
+        raise ValueError("out_dir: symlink forbidden")
+    out_path.mkdir(parents=True, exist_ok=True)
+    final_wheel_path = out_path / wheel_name
+    if final_wheel_path.is_symlink():
+        raise ValueError("out_dir: target wheel path is a symlink")
+    final_wheel_path.write_bytes(wheel_bytes)
+    if final_wheel_path.read_bytes() != wheel_bytes:
+        raise ValueError("build_reproducible_wheel: wheel writeback verification failed")
+    return final_wheel_path
 
 
 def build_reproducible_wheel(
@@ -1767,66 +1817,36 @@ def build_reproducible_wheel(
     source_date_epoch: int = DEFAULT_SOURCE_DATE_EPOCH,
     backend_wheel_dir: Path | None = None,
     site_packages_dir: Path | None = None,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
 ) -> tuple[Path, GitBuildSnapshot]:
-    """Build `smart-ads` wheel twice in isolated `python -I -B -S` staging and verify byte identity."""
+    """Build `smart-ads` wheel twice in isolated staging and verify byte identity."""
     _verify_cpython_312_runtime()
+    runner = _require_optional_probe_runner(probe_runner)
     _require_safe_nonneg_int(source_date_epoch, "source_date_epoch", minimum=0)
-
     snapshot = materialize_git_build_snapshot(
-        repo_root,
-        commit_ref=commit_ref,
-        site_packages_dir=site_packages_dir,
-        backend_wheel_dir=backend_wheel_dir,
+        repo_root, commit_ref=commit_ref, site_packages_dir=site_packages_dir, backend_wheel_dir=backend_wheel_dir
     )
-
     with tempfile.TemporaryDirectory(prefix="gov1-pep517-") as raw_tmp:
         work_root = Path(raw_tmp).resolve()
         verified_backend_site_dir = work_root / "verified_backend_site"
         verify_build_runtime_environment(
-            snapshot.files["uv.lock"],
-            target_backend_site_dir=verified_backend_site_dir,
-            site_packages_dir=site_packages_dir,
-            backend_wheel_dir=backend_wheel_dir,
+            snapshot.files["uv.lock"], target_backend_site_dir=verified_backend_site_dir,
+            site_packages_dir=site_packages_dir, backend_wheel_dir=backend_wheel_dir,
         )
-
-        stage_1 = work_root / "stage_1"
-        stage_2 = work_root / "stage_2"
-        _stage_git_snapshot_tree(stage_1, snapshot)
-        _stage_git_snapshot_tree(stage_2, snapshot)
-
         wheel_name_1, wheel_bytes_1 = _run_isolated_pep517_wheel_build(
-            stage_dir=stage_1,
-            wheel_out_dir=work_root / "wheel_out_1",
-            verified_backend_site_dir=verified_backend_site_dir,
-            tmp_dir=work_root / "tmp_1",
-            source_date_epoch=source_date_epoch,
+            snapshot=snapshot, stage_dir=work_root / "stage_1", wheel_out_dir=work_root / "wheel_out_1",
+            verified_backend_site_dir=verified_backend_site_dir, tmp_dir=work_root / "tmp_1",
+            source_date_epoch=source_date_epoch, probe_runner=runner,
         )
         wheel_name_2, wheel_bytes_2 = _run_isolated_pep517_wheel_build(
-            stage_dir=stage_2,
-            wheel_out_dir=work_root / "wheel_out_2",
-            verified_backend_site_dir=verified_backend_site_dir,
-            tmp_dir=work_root / "tmp_2",
-            source_date_epoch=source_date_epoch,
+            snapshot=snapshot, stage_dir=work_root / "stage_2", wheel_out_dir=work_root / "wheel_out_2",
+            verified_backend_site_dir=verified_backend_site_dir, tmp_dir=work_root / "tmp_2",
+            source_date_epoch=source_date_epoch, probe_runner=runner,
         )
-
         _assert_clean_backend_site_tree(verified_backend_site_dir)
-
     if wheel_name_1 != wheel_name_2 or wheel_bytes_1 != wheel_bytes_2:
-        raise ValueError(
-            "build_reproducible_wheel: non-deterministic wheel output across double build"
-        )
-
-    out_path = Path(out_dir)
-    if out_path.is_symlink():
-        raise ValueError("out_dir: symlink forbidden")
-    out_path.mkdir(parents=True, exist_ok=True)
-    final_wheel_path = out_path / wheel_name_1
-    if final_wheel_path.is_symlink():
-        raise ValueError("out_dir: target wheel path is a symlink")
-    final_wheel_path.write_bytes(wheel_bytes_1)
-    if final_wheel_path.read_bytes() != wheel_bytes_1:
-        raise ValueError("build_reproducible_wheel: wheel writeback verification failed")
-    return final_wheel_path, snapshot
+        raise ValueError("build_reproducible_wheel: non-deterministic wheel output across double build")
+    return _write_verified_wheel_output(out_dir, wheel_name_1, wheel_bytes_1), snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -2367,110 +2387,91 @@ def _read_and_validate_wheel_archive(
     return members, sorted_record_entries, sorted_record_digest, sorted_modules
 
 
-def inspect_wheel_boundary(wheel_path: Path) -> dict[str, Any]:
-    """Verify wheel allowlist, PEP 427 RECORD, AST boundary, and outside-repo clean-venv `python -I` import."""
-    _verify_cpython_312_runtime()
-    whl_file = Path(wheel_path)
-    if whl_file.is_symlink() or not whl_file.is_file():
-        raise ValueError(f"wheel_path: expected regular non-symlink file at {whl_file}")
-    wheel_bytes = whl_file.read_bytes()
-    wheel_digest = digest(wheel_bytes)
+def _create_outside_repo_clean_venv(
+    tmp_root: Path, governance_repo_root: Path
+) -> tuple[Path, Path, dict[str, str]]:
+    if tmp_root.is_relative_to(governance_repo_root):
+        raise ValueError("clean_venv: temporary directory must reside outside repository")
+    venv_dir = tmp_root / "venv"
+    probe_cwd = tmp_root / "cwd"
+    probe_cwd.mkdir(parents=True, exist_ok=True)
+    venv.EnvBuilder(system_site_packages=False, with_pip=False, clear=True, symlinks=os.name != "nt").create(venv_dir)
+    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    clean_env = {
+        "HOME": "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "PATH": _clean_system_path(), "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1", "TMPDIR": str(probe_cwd), "TZ": "UTC",
+    }
+    try:
+        purelib_proc = subprocess.run(
+            [str(venv_python), "-I", "-B", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            cwd=str(probe_cwd), env=clean_env, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"clean_venv: failed to query purelib: {exc}") from exc
+    if purelib_proc.returncode != 0:
+        raise ValueError(f"clean_venv: failed to query purelib: {purelib_proc.stderr.strip()}")
+    purelib_path = Path(purelib_proc.stdout.strip()).resolve()
+    if not purelib_path.is_relative_to(venv_dir.resolve()):
+        raise ValueError("clean_venv: purelib resolved outside venv root")
+    return venv_python, purelib_path, clean_env
 
-    members, sorted_record_entries, sorted_record_digest, expected_modules = (
-        _read_and_validate_wheel_archive(wheel_bytes)
-    )
 
+def _run_local_clean_venv_import_probe(
+    *, members: Mapping[str, bytes], expected_modules: Sequence[str]
+) -> dict[str, Any]:
     governance_repo_root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="gov1-clean-venv-") as raw_tmp:
         tmp_root = Path(raw_tmp).resolve()
-        if tmp_root.is_relative_to(governance_repo_root):
-            raise ValueError("clean_venv: temporary directory must reside outside repository")
-
-        venv_dir = tmp_root / "venv"
-        probe_cwd = tmp_root / "cwd"
-        probe_cwd.mkdir(parents=True, exist_ok=True)
-        venv.EnvBuilder(
-            system_site_packages=False,
-            with_pip=False,
-            clear=True,
-            symlinks=os.name != "nt",
-        ).create(venv_dir)
-        venv_python = venv_dir / (
-            "Scripts/python.exe" if os.name == "nt" else "bin/python"
-        )
-
-        clean_env = {
-            "HOME": "/nonexistent",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "PATH": _clean_system_path(),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONSAFEPATH": "1",
-            "TMPDIR": str(probe_cwd),
-            "TZ": "UTC",
-        }
-
-        try:
-            purelib_proc = subprocess.run(
-                [
-                    str(venv_python),
-                    "-I",
-                    "-B",
-                    "-c",
-                    "import sysconfig; print(sysconfig.get_path('purelib'))",
-                ],
-                cwd=str(probe_cwd),
-                env=clean_env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(f"clean_venv: failed to query purelib: {exc}") from exc
-        if purelib_proc.returncode != 0:
-            raise ValueError(
-                f"clean_venv: failed to query purelib: {purelib_proc.stderr.strip()}"
-            )
-        purelib_path = Path(purelib_proc.stdout.strip()).resolve()
-        if not purelib_path.is_relative_to(venv_dir.resolve()):
-            raise ValueError("clean_venv: purelib resolved outside venv root")
-
-        # Safe materialization of verified regular-file wheel members into purelib
+        venv_python, purelib_path, clean_env = _create_outside_repo_clean_venv(tmp_root, governance_repo_root)
         for rel_path, raw_bytes in members.items():
             dest = (purelib_path / rel_path).resolve()
             if not dest.is_relative_to(purelib_path):
                 raise ValueError(f"clean_venv: path traversal rejected for {rel_path!r}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(raw_bytes)
-
+        cmd = [
+            str(venv_python), "-I", "-B", "-c", _CLEAN_VENV_PROBE_SCRIPT,
+            str(purelib_path), canonicalize(list(expected_modules)).decode("utf-8"),
+        ]
         try:
-            probe_proc = subprocess.run(
-                [
-                    str(venv_python),
-                    "-I",
-                    "-B",
-                    "-c",
-                    _CLEAN_VENV_PROBE_SCRIPT,
-                    str(purelib_path),
-                    canonicalize(expected_modules).decode("utf-8"),
-                ],
-                cwd=str(probe_cwd),
-                env=clean_env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
+            probe_proc = subprocess.run(cmd, cwd=clean_env["TMPDIR"], env=clean_env, capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(
-                f"clean_venv: isolated import probe failed or timed out: {exc}"
-            ) from exc
+            raise ValueError(f"clean_venv: isolated import probe failed or timed out: {exc}") from exc
         if probe_proc.returncode != 0:
-            raise ValueError(
-                f"clean_venv: isolated import probe failed: {probe_proc.stderr.strip()}"
-            )
-
+            raise ValueError(f"clean_venv: isolated import probe failed: {probe_proc.stderr.strip()}")
     probe_out = loads_strict(probe_proc.stdout)
+    if not isinstance(probe_out, dict):
+        raise ValueError("clean_venv: probe returned non-object JSON")
+    return probe_out
+
+
+def inspect_wheel_boundary(
+    wheel_path: Path,
+    *,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
+) -> dict[str, Any]:
+    """Verify wheel allowlist, PEP 427 RECORD, AST boundary, and clean-venv `python -I` import."""
+    _verify_cpython_312_runtime()
+    runner = _require_optional_probe_runner(probe_runner)
+    whl_file = Path(wheel_path)
+    if whl_file.is_symlink() or not whl_file.is_file():
+        raise ValueError(f"wheel_path: expected regular non-symlink file at {whl_file}")
+    wheel_bytes = whl_file.read_bytes()
+    wheel_digest = digest(wheel_bytes)
+    members, sorted_record_entries, sorted_record_digest, expected_modules = (
+        _read_and_validate_wheel_archive(wheel_bytes)
+    )
+    if runner is not None:
+        probe_out = runner.run_wheel_import_probe(
+            wheel_bytes=wheel_bytes,
+            expected_member_paths=frozenset(members.keys()),
+            expected_modules=tuple(expected_modules),
+        )
+    else:
+        probe_out = _run_local_clean_venv_import_probe(
+            members=members, expected_modules=expected_modules
+        )
     if not isinstance(probe_out, dict):
         raise ValueError("clean_venv: probe returned non-object JSON")
     packaged_modules = probe_out.get("packaged_modules")
@@ -2479,7 +2480,6 @@ def inspect_wheel_boundary(wheel_path: Path) -> dict[str, Any]:
     schema_bundle_digest = _require_sha256_digest(
         probe_out.get("schema_bundle_digest"), "clean_venv.schema_bundle_digest"
     )
-
     return {
         "wheel_digest": wheel_digest,
         "schema_bundle_digest": schema_bundle_digest,
@@ -2637,6 +2637,70 @@ def build_wheel_build_provenance_candidate(
     return wrap_local_candidate(WHEEL_BUILD_PROVENANCE_SCHEMA, payload)
 
 
+def _unwrap_and_validate_provenance_payload(artifact: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    if not isinstance(artifact, dict):
+        raise ValueError("verify_wheel_build_provenance: artifact must be a JSON object")
+    if artifact.get("artifact_kind") == LOCAL_CANDIDATE_KIND:
+        if "$schema" in artifact or "integrity" in artifact:
+            raise ValueError("verify_wheel_build_provenance: local candidate must not contain envelope fields")
+        payload = unwrap_local_candidate(artifact, expected_schema=WHEEL_BUILD_PROVENANCE_SCHEMA)
+        mode = "candidate"
+    elif artifact.get("$schema") == WHEEL_BUILD_PROVENANCE_SCHEMA and "artifact_kind" not in artifact:
+        exact_fields(artifact, _PROVENANCE_ENVELOPE_FIELDS, "wheel_build_provenance_envelope")
+        _verify_envelope_integrity(artifact, label="wheel_build_provenance")
+        payload = {k: copy.deepcopy(v) for k, v in artifact.items() if k not in {"$schema", "integrity"}}
+        mode = "envelope"
+    else:
+        raise ValueError("verify_wheel_build_provenance: expected wheel_build_provenance/v1 envelope or gov1_local_candidate")
+    exact_fields(payload, _PROVENANCE_PAYLOAD_FIELDS, "wheel_build_provenance_payload")
+    validate_locator(payload["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
+    _require_strict_str(payload["build_run_id"], "provenance.build_run_id")
+    timestamp(payload["built_at_utc"])
+    _require_exact_str(payload["repository"], DEFAULT_REPOSITORY, "provenance.repository")
+    _require_git_oid(payload["source_commit_sha"], "provenance.source_commit_sha")
+    _require_git_oid(payload["source_tree_oid"], "provenance.source_tree_oid")
+    _require_safe_nonneg_int(payload["source_date_epoch"], "provenance.source_date_epoch", minimum=0)
+    _require_exact_str(payload["python_abi_tag"], EXPECTED_PYTHON_ABI_TAG, "provenance.python_abi_tag")
+    _require_exact_str(payload["build_backend"], EXPECTED_BUILD_BACKEND, "provenance.build_backend")
+    _require_exact_str(payload["build_backend_version"], EXPECTED_BUILD_BACKEND_VERSION, "provenance.build_backend_version")
+    for key in ("build_backend_digest", "pyproject_sha256", "uv_lock_sha256", "schema_bundle_digest", "wheel_digest"):
+        _require_sha256_digest(payload[key], f"provenance.{key}")
+    return mode, payload
+
+
+def _reconcile_wheel_against_git_snapshot(
+    *,
+    payload: Mapping[str, Any],
+    members: Mapping[str, bytes],
+    repo_root: Path,
+    site_packages_dir: Path | None,
+    backend_wheel_dir: Path | None,
+) -> None:
+    source_commit_sha = payload["source_commit_sha"]
+    snapshot = materialize_git_build_snapshot(
+        repo_root, commit_ref=source_commit_sha, site_packages_dir=site_packages_dir, backend_wheel_dir=backend_wheel_dir
+    )
+    if snapshot.commit_sha != source_commit_sha or snapshot.tree_oid != payload["source_tree_oid"]:
+        raise ValueError("provenance: source_commit_sha or source_tree_oid mismatch against Git object store")
+    if snapshot.pyproject_sha256 != payload["pyproject_sha256"]:
+        raise ValueError("provenance: pyproject_sha256 mismatch against source_commit_sha")
+    if snapshot.uv_lock_sha256 != payload["uv_lock_sha256"]:
+        raise ValueError("provenance: uv_lock_sha256 mismatch against source_commit_sha")
+    if snapshot.build_backend_digest != payload["build_backend_digest"]:
+        raise ValueError("provenance: build_backend_digest mismatch against executed PEP 517 closure")
+    wheel_py_members = {p: b for p, b in members.items() if p.endswith(".py")}
+    git_py_blobs = {
+        p[len("src/") :]: b for p, b in snapshot.files.items() if p.startswith("src/smart_ads/") and p.endswith(".py")
+    }
+    if set(wheel_py_members.keys()) != set(git_py_blobs.keys()):
+        raise ValueError("provenance: .py member set in wheel diverges from src/smart_ads/**/*.py at source_commit_sha")
+    for rel_mod_path, mod_bytes in wheel_py_members.items():
+        if mod_bytes != git_py_blobs[rel_mod_path]:
+            raise ValueError(
+                f"provenance: byte mismatch between wheel member {rel_mod_path!r} and Git blob 'src/{rel_mod_path}'"
+            )
+
+
 def verify_wheel_build_provenance(
     artifact: dict[str, Any],
     *,
@@ -2644,82 +2708,13 @@ def verify_wheel_build_provenance(
     wheel_path: Path,
     backend_wheel_dir: Path | None = None,
     site_packages_dir: Path | None = None,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
 ) -> dict[str, Any]:
     """Materially verify `wheel_build_provenance/v1` by reconciling Git blobs and rebuilding the wheel."""
-    if not isinstance(artifact, dict):
-        raise ValueError("verify_wheel_build_provenance: artifact must be a JSON object")
-
-    if artifact.get("artifact_kind") == LOCAL_CANDIDATE_KIND:
-        if "$schema" in artifact or "integrity" in artifact:
-            raise ValueError(
-                "verify_wheel_build_provenance: local candidate must not contain envelope fields"
-            )
-        payload = unwrap_local_candidate(
-            artifact, expected_schema=WHEEL_BUILD_PROVENANCE_SCHEMA
-        )
-        mode = "candidate"
-    elif (
-        artifact.get("$schema") == WHEEL_BUILD_PROVENANCE_SCHEMA
-        and "artifact_kind" not in artifact
-    ):
-        exact_fields(
-            artifact, _PROVENANCE_ENVELOPE_FIELDS, "wheel_build_provenance_envelope"
-        )
-        _verify_envelope_integrity(artifact, label="wheel_build_provenance")
-        payload = {
-            k: copy.deepcopy(v)
-            for k, v in artifact.items()
-            if k not in {"$schema", "integrity"}
-        }
-        mode = "envelope"
-    else:
-        raise ValueError(
-            "verify_wheel_build_provenance: expected wheel_build_provenance/v1 envelope or gov1_local_candidate"
-        )
-
-    exact_fields(payload, _PROVENANCE_PAYLOAD_FIELDS, "wheel_build_provenance_payload")
-    validate_locator(payload["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
-    _require_strict_str(payload["build_run_id"], "provenance.build_run_id")
-    timestamp(payload["built_at_utc"])
-    _require_exact_str(
-        payload["repository"], DEFAULT_REPOSITORY, "provenance.repository"
-    )
-    source_commit_sha = _require_git_oid(
-        payload["source_commit_sha"], "provenance.source_commit_sha"
-    )
-    source_tree_oid = _require_git_oid(
-        payload["source_tree_oid"], "provenance.source_tree_oid"
-    )
-    source_date_epoch = _require_safe_nonneg_int(
-        payload["source_date_epoch"], "provenance.source_date_epoch", minimum=0
-    )
-    _require_exact_str(
-        payload["python_abi_tag"],
-        EXPECTED_PYTHON_ABI_TAG,
-        "provenance.python_abi_tag",
-    )
-    _require_exact_str(
-        payload["build_backend"],
-        EXPECTED_BUILD_BACKEND,
-        "provenance.build_backend",
-    )
-    _require_exact_str(
-        payload["build_backend_version"],
-        EXPECTED_BUILD_BACKEND_VERSION,
-        "provenance.build_backend_version",
-    )
-    _require_sha256_digest(
-        payload["build_backend_digest"], "provenance.build_backend_digest"
-    )
-    _require_sha256_digest(payload["pyproject_sha256"], "provenance.pyproject_sha256")
-    _require_sha256_digest(payload["uv_lock_sha256"], "provenance.uv_lock_sha256")
-    _require_sha256_digest(
-        payload["schema_bundle_digest"], "provenance.schema_bundle_digest"
-    )
-    declared_wheel_digest = _require_sha256_digest(
-        payload["wheel_digest"], "provenance.wheel_digest"
-    )
-
+    runner = _require_optional_probe_runner(probe_runner)
+    mode, payload = _unwrap_and_validate_provenance_payload(artifact)
+    declared_wheel_digest = payload["wheel_digest"]
+    source_commit_sha = payload["source_commit_sha"]
     whl_file = Path(wheel_path)
     if whl_file.is_symlink() or not whl_file.is_file():
         raise ValueError(f"wheel_path: expected regular non-symlink file at {whl_file}")
@@ -2727,78 +2722,29 @@ def verify_wheel_build_provenance(
     verify_wheel_object_locator(payload["wheel"], expected_wheel_bytes=wheel_bytes)
     if payload["wheel"]["wheel_digest"] != declared_wheel_digest:
         raise ValueError("provenance: wheel.wheel_digest != wheel_digest")
-
-    inspection = inspect_wheel_boundary(whl_file)
+    inspection = inspect_wheel_boundary(whl_file, probe_runner=runner)
     if inspection["wheel_digest"] != declared_wheel_digest:
         raise ValueError("provenance: wheel_digest mismatch against wheel_path")
     if inspection["schema_bundle_digest"] != payload["schema_bundle_digest"]:
-        raise ValueError(
-            "provenance: schema_bundle_digest mismatch against isolated wheel import"
-        )
-
+        raise ValueError("provenance: schema_bundle_digest mismatch against isolated wheel import")
     members, _, _, _ = _read_and_validate_wheel_archive(wheel_bytes)
-    snapshot = materialize_git_build_snapshot(
-        repo_root,
-        commit_ref=source_commit_sha,
-        site_packages_dir=site_packages_dir,
-        backend_wheel_dir=backend_wheel_dir,
+    _reconcile_wheel_against_git_snapshot(
+        payload=payload, members=members, repo_root=repo_root,
+        site_packages_dir=site_packages_dir, backend_wheel_dir=backend_wheel_dir,
     )
-    if snapshot.commit_sha != source_commit_sha or snapshot.tree_oid != source_tree_oid:
-        raise ValueError(
-            "provenance: source_commit_sha or source_tree_oid mismatch against Git object store"
-        )
-    if snapshot.pyproject_sha256 != payload["pyproject_sha256"]:
-        raise ValueError("provenance: pyproject_sha256 mismatch against source_commit_sha")
-    if snapshot.uv_lock_sha256 != payload["uv_lock_sha256"]:
-        raise ValueError("provenance: uv_lock_sha256 mismatch against source_commit_sha")
-    if snapshot.build_backend_digest != payload["build_backend_digest"]:
-        raise ValueError(
-            "provenance: build_backend_digest mismatch against executed PEP 517 closure"
-        )
-
-    # 1. Byte-for-byte reconciliation of every smart_ads/**/*.py member against Git commit blobs
-    wheel_py_members = {p: b for p, b in members.items() if p.endswith(".py")}
-    git_py_blobs = {
-        p[len("src/") :]: b
-        for p, b in snapshot.files.items()
-        if p.startswith("src/smart_ads/") and p.endswith(".py")
-    }
-    if set(wheel_py_members.keys()) != set(git_py_blobs.keys()):
-        raise ValueError(
-            "provenance: .py member set in wheel diverges from src/smart_ads/**/*.py at source_commit_sha"
-        )
-    for rel_mod_path, mod_bytes in wheel_py_members.items():
-        if mod_bytes != git_py_blobs[rel_mod_path]:
-            raise ValueError(
-                f"provenance: byte mismatch between wheel member {rel_mod_path!r} "
-                f"and Git blob 'src/{rel_mod_path}' at {source_commit_sha}"
-            )
-
-    # 2. Full hermetic rebuild from source_commit_sha and source_date_epoch
     with tempfile.TemporaryDirectory(prefix="gov1-prov-rebuild-") as tmp_out:
         rebuilt_wheel_path, _ = build_reproducible_wheel(
-            repo_root,
-            Path(tmp_out) / "dist",
-            commit_ref=source_commit_sha,
-            source_date_epoch=source_date_epoch,
-            backend_wheel_dir=backend_wheel_dir,
-            site_packages_dir=site_packages_dir,
+            repo_root, Path(tmp_out) / "dist", commit_ref=source_commit_sha,
+            source_date_epoch=payload["source_date_epoch"], backend_wheel_dir=backend_wheel_dir,
+            site_packages_dir=site_packages_dir, probe_runner=runner,
         )
         rebuilt_bytes = rebuilt_wheel_path.read_bytes()
-
     if rebuilt_bytes != wheel_bytes:
-        raise ValueError(
-            "provenance: rebuilt wheel bytes from source_commit_sha do not match wheel_path bytes"
-        )
-
+        raise ValueError("provenance: rebuilt wheel bytes from source_commit_sha do not match wheel_path bytes")
     return {
-        "mode": mode,
-        "schema": WHEEL_BUILD_PROVENANCE_SCHEMA,
-        "wheel_digest": declared_wheel_digest,
-        "source_commit_sha": source_commit_sha,
-        "build_backend_digest": payload["build_backend_digest"],
-        "schema_bundle_digest": payload["schema_bundle_digest"],
-        "payload": copy.deepcopy(payload),
+        "mode": mode, "schema": WHEEL_BUILD_PROVENANCE_SCHEMA, "wheel_digest": declared_wheel_digest,
+        "source_commit_sha": source_commit_sha, "build_backend_digest": payload["build_backend_digest"],
+        "schema_bundle_digest": payload["schema_bundle_digest"], "payload": copy.deepcopy(payload),
     }
 
 
@@ -3037,80 +2983,51 @@ def build_wheel_boundary_report_candidate(
     return wrap_local_candidate(WHEEL_BOUNDARY_REPORT_SCHEMA, payload)
 
 
-def verify_wheel_boundary_report(
-    artifact: dict[str, Any], *, wheel_path: Path
-) -> dict[str, Any]:
-    """Materially verify `wheel_boundary_report/v1` by re-running `inspect_wheel_boundary`."""
+def _unwrap_and_validate_boundary_payload(artifact: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not isinstance(artifact, dict):
         raise ValueError("verify_wheel_boundary_report: artifact must be a JSON object")
-
     if artifact.get("artifact_kind") == LOCAL_CANDIDATE_KIND:
         if "$schema" in artifact or "integrity" in artifact:
-            raise ValueError(
-                "verify_wheel_boundary_report: local candidate must not contain envelope fields"
-            )
-        payload = unwrap_local_candidate(
-            artifact, expected_schema=WHEEL_BOUNDARY_REPORT_SCHEMA
-        )
-        exact_fields(
-            payload,
-            _BOUNDARY_CANDIDATE_PAYLOAD_FIELDS,
-            "wheel_boundary_report_candidate_payload",
-        )
+            raise ValueError("verify_wheel_boundary_report: local candidate must not contain envelope fields")
+        payload = unwrap_local_candidate(artifact, expected_schema=WHEEL_BOUNDARY_REPORT_SCHEMA)
+        exact_fields(payload, _BOUNDARY_CANDIDATE_PAYLOAD_FIELDS, "wheel_boundary_report_candidate_payload")
         verify_local_candidate_ref(
-            payload["wheel_build_provenance_candidate_ref"],
-            expected_schema=WHEEL_BUILD_PROVENANCE_SCHEMA,
+            payload["wheel_build_provenance_candidate_ref"], expected_schema=WHEEL_BUILD_PROVENANCE_SCHEMA
         )
         mode = "candidate"
-    elif (
-        artifact.get("$schema") == WHEEL_BOUNDARY_REPORT_SCHEMA
-        and "artifact_kind" not in artifact
-    ):
-        exact_fields(
-            artifact, _BOUNDARY_ENVELOPE_FIELDS, "wheel_boundary_report_envelope"
-        )
+    elif artifact.get("$schema") == WHEEL_BOUNDARY_REPORT_SCHEMA and "artifact_kind" not in artifact:
+        exact_fields(artifact, _BOUNDARY_ENVELOPE_FIELDS, "wheel_boundary_report_envelope")
         _verify_envelope_integrity(artifact, label="wheel_boundary_report")
-        payload = {
-            k: copy.deepcopy(v)
-            for k, v in artifact.items()
-            if k not in {"$schema", "integrity"}
-        }
-        exact_fields(
-            payload,
-            _BOUNDARY_ENVELOPE_PAYLOAD_FIELDS,
-            "wheel_boundary_report_envelope_payload",
-        )
-        validate_locator(
-            payload["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA
-        )
+        payload = {k: copy.deepcopy(v) for k, v in artifact.items() if k not in {"$schema", "integrity"}}
+        exact_fields(payload, _BOUNDARY_ENVELOPE_PAYLOAD_FIELDS, "wheel_boundary_report_envelope_payload")
+        validate_locator(payload["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA)
         mode = "envelope"
     else:
         raise ValueError(
             "verify_wheel_boundary_report: expected wheel_boundary_report/v1 envelope or gov1_local_candidate"
         )
-
     validate_locator(payload["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
     _require_strict_str(payload["build_run_id"], "boundary_report.build_run_id")
     timestamp(payload["verified_at_utc"])
-    _require_exact_str(
-        payload["repository"], DEFAULT_REPOSITORY, "boundary_report.repository"
-    )
-    _require_git_oid(
-        payload["source_commit_sha"], "boundary_report.source_commit_sha"
-    )
-    _require_sha256_digest(
-        payload["build_backend_digest"], "boundary_report.build_backend_digest"
-    )
+    _require_exact_str(payload["repository"], DEFAULT_REPOSITORY, "boundary_report.repository")
+    _require_git_oid(payload["source_commit_sha"], "boundary_report.source_commit_sha")
+    _require_sha256_digest(payload["build_backend_digest"], "boundary_report.build_backend_digest")
+    return mode, payload
 
-    declared_inspection = _validate_inspection_dict(
-        {k: payload[k] for k in _INSPECTION_FIELDS}
-    )
-    live_inspection = inspect_wheel_boundary(wheel_path)
+
+def verify_wheel_boundary_report(
+    artifact: dict[str, Any],
+    *,
+    wheel_path: Path,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
+) -> dict[str, Any]:
+    """Materially verify `wheel_boundary_report/v1` by re-running `inspect_wheel_boundary`."""
+    runner = _require_optional_probe_runner(probe_runner)
+    mode, payload = _unwrap_and_validate_boundary_payload(artifact)
+    declared_inspection = _validate_inspection_dict({k: payload[k] for k in _INSPECTION_FIELDS})
+    live_inspection = inspect_wheel_boundary(wheel_path, probe_runner=runner)
     if canonicalize(declared_inspection) != canonicalize(live_inspection):
-        raise ValueError(
-            "verify_wheel_boundary_report: declared report diverges from live wheel boundary inspection"
-        )
-
+        raise ValueError("verify_wheel_boundary_report: declared report diverges from live wheel boundary inspection")
     return {
         "mode": mode,
         "schema": WHEEL_BOUNDARY_REPORT_SCHEMA,
