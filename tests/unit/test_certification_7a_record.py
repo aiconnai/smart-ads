@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Mapping
 import copy
 from dataclasses import dataclass, replace
 import hashlib
+import io
 from pathlib import Path
 from typing import Any
+import zipfile
 
 import pytest
 
@@ -81,8 +84,8 @@ _PYPROJECT_DIGEST = "sha256:" + ("6" * 64)
 _UVLOCK_DIGEST = "sha256:" + ("7" * 64)
 _COMMIT_SHA = "abcde" * 8
 _TREE_OID = "12345" * 8
-_WHEEL_BYTES = b"PK\x03\x04deterministic-7a-wheel-bytes-v1"
 _BUILD_RUN_ID = "build-run-7a-cert-001"
+_RECORD_REL_PATH = "smart_ads-0.1.0.dist-info/RECORD"
 
 
 @dataclass(frozen=True)
@@ -91,11 +94,46 @@ class Valid7AWorld:
     negative_report: NegativeSecurityTestReport
     store: dict[ArtifactLocator, dict[str, Any]]
     wheel_bytes: bytes
+    wheel_members: dict[str, bytes]
     corpus_bytes: bytes
     resolved_git_blobs: dict[str, bytes]
     resolved_d26_blobs: dict[str, bytes]
     sbx_spec_digest: str
     bound_prov_locator: ArtifactLocator
+
+
+def _build_deterministic_wheel_archive(
+    git_blobs: Mapping[str, bytes],
+    *,
+    overrides: Mapping[str, bytes] | None = None,
+    include_record: bool = True,
+    patch_cd_flag_bits: int = 0,
+) -> tuple[bytes, dict[str, bytes]]:
+    members: dict[str, bytes] = {
+        src_path[4:]: raw for src_path, raw in sorted(git_blobs.items()) if src_path.startswith("src/")
+    }
+    if overrides:
+        members.update(overrides)
+    if include_record:
+        rec_lines = [
+            f"{rel},sha256={base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b'=').decode('ascii')},{len(raw)}"
+            for rel, raw in sorted(members.items())
+        ]
+        rec_lines.append(f"{_RECORD_REL_PATH},,")
+        members[_RECORD_REL_PATH] = ("\n".join(rec_lines) + "\n").encode("utf-8")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w") as zf:
+        for rel_path, raw in sorted(members.items()):
+            info = zipfile.ZipInfo(filename=rel_path, date_time=(2026, 9, 7, 10, 0, 5))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            zf.writestr(info, raw)
+    raw_whl = bytearray(buf.getvalue())
+    if patch_cd_flag_bits:
+        cd_off = int.from_bytes(raw_whl[-6:-2], "little")
+        cur_flags = int.from_bytes(raw_whl[cd_off + 8 : cd_off + 10], "little")
+        raw_whl[cd_off + 8 : cd_off + 10] = (cur_flags | patch_cd_flag_bits).to_bytes(2, "little")
+    return bytes(raw_whl), members
 
 
 def _sign_env(unsigned: dict[str, Any]) -> dict[str, Any]:
@@ -181,7 +219,7 @@ def _stage_sandbox_and_wheel_envelopes(
         "uv_lock_sha256": _UVLOCK_DIGEST, "schema_bundle_digest": schema_digest, "wheel_digest": whl_digest,
         "wheel": {"$schema": "smart_ads/wheel_object_locator/v1", "store_kind": "cell_immutable_object", "object_ref": f"cell-object:{whl_digest}", "wheel_digest": whl_digest, "size_bytes": len(wheel_bytes)},
     })
-    entries = [{"path": "smart_ads-0.1.0.dist-info/RECORD", "record_hash": "", "record_size": None}]
+    entries = [{"path": _RECORD_REL_PATH, "record_hash": "", "record_size": None}]
     bound_loc, _ = _put_signed(store, {
         "$schema": "smart_ads/wheel_boundary_report/v1",
         "migration_run_context_locator": _RUN_CTX_LOC.to_dict(), "build_run_id": build_run_id,
@@ -321,15 +359,19 @@ def _build_fixture_cases_from_corpus(
 
 
 def build_valid_7a_world(
-    *, wheel_bytes: bytes = _WHEEL_BYTES, build_run_id: str = _BUILD_RUN_ID,
+    *, wheel_bytes: bytes | None = None, wheel_members: Mapping[str, bytes] | None = None,
+    build_run_id: str = _BUILD_RUN_ID,
     neg_executed_at_utc: str = "2026-09-07T10:00:15Z", certified_at_utc: str = "2026-09-07T10:00:16Z",
 ) -> Valid7AWorld:
     store: dict[ArtifactLocator, dict[str, Any]] = {}
     corpus_bytes, git_blobs, d26_blobs = _load_d26_and_git_blobs()
+    built_whl_bytes, built_whl_members = _build_deterministic_wheel_archive(git_blobs)
+    eff_whl_bytes = built_whl_bytes if wheel_bytes is None else wheel_bytes
+    eff_whl_members = dict(built_whl_members if wheel_members is None else wheel_members)
     corpus_doc = loads_strict_json(corpus_bytes)
     corpus_digest = "sha256:" + hashlib.sha256(corpus_bytes).hexdigest()
     sbx_loc, prov_loc, bound_loc, sbx_spec_digest, whl_digest, schema_digest = _stage_sandbox_and_wheel_envelopes(
-        store, wheel_bytes=wheel_bytes, commit_sha=_COMMIT_SHA, build_run_id=build_run_id,
+        store, wheel_bytes=eff_whl_bytes, commit_sha=_COMMIT_SHA, build_run_id=build_run_id,
     )
     neg_unsigned = NegativeSecurityTestReport(
         _RUN_CTX_LOC, sbx_loc, prov_loc, build_run_id, neg_executed_at_utc, _COMMIT_SHA,
@@ -363,7 +405,21 @@ def build_valid_7a_world(
         compute_mapping_rules_digest([prov_map[k][1] for k in MAPPING_ARTIFACT_PATHS], reg_state.driver_contract.metric_source_mappings),
         ev,
     )
-    return Valid7AWorld(rec, neg_rep, store, wheel_bytes, corpus_bytes, git_blobs, d26_blobs, sbx_spec_digest, prov_loc)
+    return Valid7AWorld(rec, neg_rep, store, eff_whl_bytes, eff_whl_members, corpus_bytes, git_blobs, d26_blobs, sbx_spec_digest, prov_loc)
+
+
+def _verify_world(w: Valid7AWorld, **overrides: Any) -> None:
+    kw: dict[str, Any] = {
+        "object_resolver": w.store.__getitem__,
+        "wheel_bytes": w.wheel_bytes,
+        "wheel_members": w.wheel_members,
+        "corpus_bytes": w.corpus_bytes,
+        "resolved_git_blobs": w.resolved_git_blobs,
+        "resolved_d26_blobs": w.resolved_d26_blobs,
+    }
+    rec = overrides.pop("record", w.record)
+    kw.update(overrides)
+    verify_certification_7a_record(rec, **kw)
 
 
 def test_fixtures_line_budgets_and_pinned_d26_hashes() -> None:
@@ -445,17 +501,9 @@ def test_subobject_invariants_reject_malformed_cases_and_evidence() -> None:
 
 def test_positive_replay_c1_build_run_id_and_reconciliation_reexports() -> None:
     w = build_valid_7a_world()
-    verify_certification_7a_record(
-        w.record, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-        corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs,
-        resolved_d26_blobs=w.resolved_d26_blobs, boundary_report_wheel_provenance_locator=w.bound_prov_locator,
-    )
+    _verify_world(w, boundary_report_wheel_provenance_locator=w.bound_prov_locator)
     w_c1 = build_valid_7a_world(build_run_id="build\x80run-7a")
-    verify_certification_7a_record(
-        w_c1.record, object_resolver=w_c1.store.__getitem__, wheel_bytes=w_c1.wheel_bytes,
-        corpus_bytes=w_c1.corpus_bytes, resolved_git_blobs=w_c1.resolved_git_blobs,
-        resolved_d26_blobs=w_c1.resolved_d26_blobs,
-    )
+    _verify_world(w_c1)
     for sym in (
         "Certification7ARecord", "Certification7ACapabilityBinding",
         "Certification7AFixtureCase", "Certification7AFixtureEvidence",
@@ -464,14 +512,54 @@ def test_positive_replay_c1_build_run_id_and_reconciliation_reexports() -> None:
         assert hasattr(reconciliation_pkg, sym) and sym in reconciliation_pkg.__all__
 
 
+def test_verifier_enforces_wheel_zip_central_directory_and_member_binding() -> None:
+    # (a) Non-ZIP wheel_bytes rejected even when wheel_digest matches across all Stage 7/7A envelopes
+    w_nonzip = build_valid_7a_world(wheel_bytes=b"PK\x03\x04non-zip-payload-without-eocd")
+    with pytest.raises(ClosedValidationError, match="wheel"):
+        _verify_world(w_nonzip)
+
+    # (b) wheel_members forged to disagree with wheel_bytes central-directory CRC-32/size or key set
+    w = build_valid_7a_world()
+    wire_rel = "smart_ads/adapters/pipeboard/wire.py"
+    orig_wire = w.wheel_members[wire_rel]
+    same_len_flip = bytes([orig_wire[0] ^ 0x01]) + orig_wire[1:]
+    for bad_members in (
+        {**w.wheel_members, wire_rel: orig_wire + b"\n"},
+        {**w.wheel_members, wire_rel: same_len_flip},
+        {k: v for k, v in w.wheel_members.items() if k != wire_rel},
+        {**w.wheel_members, "smart_ads/extra.py": b"# extra\n"},
+    ):
+        with pytest.raises(ClosedValidationError, match="wheel_members"):
+            _verify_world(w, wheel_members=bad_members)
+
+    # Missing dist-info/RECORD, forbidden ZIP bitflags (bit 0 / bit 3), or traversal/dir member names
+    no_rec_bytes, no_rec_members = _build_deterministic_wheel_archive(w.resolved_git_blobs, include_record=False)
+    with pytest.raises(ClosedValidationError, match="RECORD"):
+        _verify_world(build_valid_7a_world(wheel_bytes=no_rec_bytes, wheel_members=no_rec_members))
+    for bad_kw in (
+        {"patch_cd_flag_bits": 0x01},
+        {"patch_cd_flag_bits": 0x08},
+        {"overrides": {"../evil.py": b"x"}},
+        {"overrides": {"smart_ads/dir/": b""}},
+    ):
+        bad_b, bad_m = _build_deterministic_wheel_archive(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
+        with pytest.raises(ClosedValidationError, match="wheel"):
+            _verify_world(build_valid_7a_world(wheel_bytes=bad_b, wheel_members=bad_m))
+
+    # (c) Real .whl archive (matching wheel_digest + matching wheel_members) whose Python member != git_blobs
+    tampered_whl, tampered_members = _build_deterministic_wheel_archive(
+        w.resolved_git_blobs, overrides={wire_rel: orig_wire + b"\n# tampered inside wheel\n"}
+    )
+    w_divergent = build_valid_7a_world(wheel_bytes=tampered_whl, wheel_members=tampered_members)
+    with pytest.raises(ClosedValidationError, match="wheel_members"):
+        _verify_world(w_divergent)
+
+
 def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:
     w = build_valid_7a_world()
     bad_rmc = Certification7ARecord.from_dict({**w.record.to_dict(), "resource_mapping_contract_digest": "sha256:" + ("e" * 64)})
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            bad_rmc, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=bad_rmc)
     store2 = dict(w.store)
     reg_fc, _ = _stage_git_and_registry_envelopes(
         store2, commit_sha=_COMMIT_SHA, git_blobs=w.resolved_git_blobs,
@@ -480,11 +568,7 @@ def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:
     cap_fc = replace(w.record.capability, registry_snapshot_locator=reg_fc.locator)
     ev_fc = replace(w.record.fixture_evidence, regression_fixture=RegressionFixtureV1.canonical(reg_fc.locator.content_digest))
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            replace(w.record, capability=cap_fc, fixture_evidence=ev_fc),
-            object_resolver=store2.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=replace(w.record, capability=cap_fc, fixture_evidence=ev_fc), object_resolver=store2.__getitem__)
 
 
 def test_verifier_checks_admitted_digest_before_execution_binding_digest() -> None:
@@ -498,10 +582,7 @@ def test_verifier_checks_admitted_digest_before_execution_binding_digest() -> No
     forged_case = replace(forged_draft, execution_binding_digest=forged_bind)
     bad_rec = replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(forged_case, *w.record.fixture_evidence.cases[1:])))
     with pytest.raises(ClosedValidationError, match="admitted_collection_digest"):
-        verify_certification_7a_record(
-            bad_rec, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=bad_rec)
 
 
 def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> None:
@@ -521,12 +602,9 @@ def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> No
     )
     wrong_inv_loc, _ = _put_signed(store_bad_inv, wrong_day_inv.to_dict())
     c0_wrong = replace(w.record.fixture_evidence.cases[0], expected_resource_inventory_locator=wrong_inv_loc)
+    bad_rec = replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_wrong, *w.record.fixture_evidence.cases[1:])))
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_wrong, *w.record.fixture_evidence.cases[1:]))),
-            object_resolver=store_bad_inv.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=bad_rec, object_resolver=store_bad_inv.__getitem__)
 
 
 def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
@@ -546,10 +624,9 @@ def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
         c_loc, _ = _put_signed(store2, p.to_dict())
         bad_ev = replace(w.record.fixture_evidence, corpus_git_locator=c_loc, corpus_digest=p.file_content_sha256)
         with pytest.raises(ClosedValidationError):
-            verify_certification_7a_record(
-                replace(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__,
-                wheel_bytes=w.wheel_bytes, corpus_bytes=bad_bytes,
-                resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes}, resolved_d26_blobs=w.resolved_d26_blobs,
+            _verify_world(
+                w, record=replace(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__,
+                corpus_bytes=bad_bytes, resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes},
             )
 
     c1 = w.record.fixture_evidence.cases[1]
@@ -560,68 +637,36 @@ def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
     )
     cases_t = (w.record.fixture_evidence.cases[0], replace(alt_draft, execution_binding_digest=alt_bind), *w.record.fixture_evidence.cases[2:])
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=cases_t)),
-            object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=cases_t)))
 
 
 def test_verifier_rejects_sandbox_provenance_readback_and_chronology_violations() -> None:
     w_late = build_valid_7a_world(neg_executed_at_utc="2026-09-07T10:00:17Z", certified_at_utc="2026-09-07T10:00:16Z")
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            w_late.record, object_resolver=w_late.store.__getitem__, wheel_bytes=w_late.wheel_bytes,
-            corpus_bytes=w_late.corpus_bytes, resolved_git_blobs=w_late.resolved_git_blobs, resolved_d26_blobs=w_late.resolved_d26_blobs,
-        )
+        _verify_world(w_late)
     w = build_valid_7a_world()
     for bad_whl in (b"", w.wheel_bytes + b"x"):
         with pytest.raises(ClosedValidationError):
-            verify_certification_7a_record(
-                w.record, object_resolver=w.store.__getitem__, wheel_bytes=bad_whl,
-                corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-            )
+            _verify_world(w, wheel_bytes=bad_whl)
     wrong_prov = ArtifactLocator.from_digest("smart_ads/wheel_build_provenance/v1", "sha256:" + ("d" * 64))
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            w.record, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs,
-            resolved_d26_blobs=w.resolved_d26_blobs, boundary_report_wheel_provenance_locator=wrong_prov,
-        )
-    # Positive case runtime_readback image digest mismatch or sandbox_instance_ref collision
+        _verify_world(w, boundary_report_wheel_provenance_locator=wrong_prov)
     c0_bad_rb = replace(w.record.fixture_evidence.cases[0], runtime_readback=SandboxRuntimeReadback.from_dict({**_make_readback().to_dict(), "oci_image_digest": "sha256:" + ("8" * 64)}))
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_bad_rb, *w.record.fixture_evidence.cases[1:]))),
-            object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_bad_rb, *w.record.fixture_evidence.cases[1:]))))
     c0_collide = replace(w.record.fixture_evidence.cases[0], sandbox_instance_ref="sandbox:neg-00-0")
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_collide, *w.record.fixture_evidence.cases[1:]))),
-            object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_collide, *w.record.fixture_evidence.cases[1:]))))
 
 
 def test_verifier_rejects_corpus_or_legacy_d26_blob_tampering() -> None:
     w = build_valid_7a_world()
     with pytest.raises(ClosedValidationError):
-        verify_certification_7a_record(
-            w.record, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-            corpus_bytes=b"{not-json", resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=w.resolved_d26_blobs,
-        )
+        _verify_world(w, corpus_bytes=b"{not-json")
     for _, rel_path, _, _ in PINNED_PIPEBOARD_D26_SPECS:
         missing_d26 = {k: v for k, v in w.resolved_d26_blobs.items() if k != rel_path}
         with pytest.raises(ClosedValidationError):
-            verify_certification_7a_record(
-                w.record, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-                corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=missing_d26,
-            )
+            _verify_world(w, resolved_d26_blobs=missing_d26)
         corrupt_d26 = {**w.resolved_d26_blobs, rel_path: w.resolved_d26_blobs[rel_path] + b"\n"}
         with pytest.raises(ClosedValidationError):
-            verify_certification_7a_record(
-                w.record, object_resolver=w.store.__getitem__, wheel_bytes=w.wheel_bytes,
-                corpus_bytes=w.corpus_bytes, resolved_git_blobs=w.resolved_git_blobs, resolved_d26_blobs=corrupt_d26,
-            )
+            _verify_world(w, resolved_d26_blobs=corrupt_d26)

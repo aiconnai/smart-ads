@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import functools
 import hashlib
 import re
 from typing import Any, ClassVar, Final
@@ -53,6 +54,7 @@ CORPUS_HTTP_RESPONSE_KEYS: Final[frozenset[str]] = frozenset({"network_ok", "htt
 CORPUS_CASE_KEYS: Final[frozenset[str]] = frozenset("case_id admission_id clock_reading collection_request retrieval_context http_response expected_completeness_status expected_reasons expected_error_code".split())
 
 _WHEEL_BOUNDARY_SCHEMA: Final[str] = "smart_ads/wheel_boundary_report/v1"
+_WHEEL_RECORD_MEMBER: Final[str] = "smart_ads-0.1.0.dist-info/RECORD"
 _PHASE1_REQUIRED_METRICS: Final[tuple[str, ...]] = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
 _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed"})
 _SOURCE_CONTRACT_REF_RE: Final[re.Pattern[str]] = re.compile(r"\Aopaque-driver-contract:sha256:[0-9a-f]{64}\Z")
@@ -79,6 +81,100 @@ _RECORD_SCALAR_KEYS: Final[tuple[str, ...]] = (
     "build_run_id", "certified_at_utc", "certified_state", "source_commit_sha", "build_backend_digest", "schema_bundle_digest",
     "wheel_digest", "resource_mapping_contract_digest", "parser_code_digest", "adapter_code_digest", "mapping_rules_digest",
 )
+
+
+def _u16(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off : off + 2], "little")
+
+def _u32(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off : off + 4], "little")
+
+@functools.lru_cache(maxsize=1)
+def _crc32_table() -> tuple[int, ...]:
+    table: list[int] = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (0xEDB88320 ^ (c >> 1)) if (c & 1) else (c >> 1)
+        table.append(c)
+    return tuple(table)
+
+def _crc32_ieee(data: bytes) -> int:
+    tbl = _crc32_table()
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc = tbl[(crc ^ b) & 0xFF] ^ (crc >> 8)
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+
+def _validate_wheel_member_path(raw_name: bytes) -> str:
+    try:
+        name = raw_name.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ClosedValidationError("wheel_bytes: non-UTF-8 member path in central directory") from None
+    if not name or "\x00" in name or "\\" in name or name.startswith("/") or name.endswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")):
+        raise ClosedValidationError(f"wheel_bytes: invalid, directory, or traversal member path {name!r}")
+    return name
+
+def _parse_cd_entry_and_lfh(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_offset: int) -> tuple[str, tuple[int, int, int, int], tuple[int, int], int]:
+    if cd_cursor + 46 > cd_end or wheel_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
+        raise ClosedValidationError("wheel_bytes: corrupt ZIP central directory file header")
+    cd_flags, cd_method = _u16(wheel_bytes, cd_cursor + 8), _u16(wheel_bytes, cd_cursor + 10)
+    cd_crc, cd_comp, cd_uncomp = _u32(wheel_bytes, cd_cursor + 16), _u32(wheel_bytes, cd_cursor + 20), _u32(wheel_bytes, cd_cursor + 24)
+    fn_len, ex_len, cm_len = _u16(wheel_bytes, cd_cursor + 28), _u16(wheel_bytes, cd_cursor + 30), _u16(wheel_bytes, cd_cursor + 32)
+    ext_attr, lfh_off = _u32(wheel_bytes, cd_cursor + 38), _u32(wheel_bytes, cd_cursor + 42)
+    next_cd = cd_cursor + 46 + fn_len + ex_len + cm_len
+    unix_type = (ext_attr >> 16) & 0o170000
+    if next_cd > cd_end or (cd_flags & 0x09) != 0 or cd_method not in (0, 8) or 0xFFFFFFFF in (cd_comp, cd_uncomp, lfh_off) or unix_type not in (0, 0o100000):
+        raise ClosedValidationError("wheel_bytes: forbidden ZIP flags, compression method, Zip64 sentinel, or special mode")
+    raw_name = wheel_bytes[cd_cursor + 46 : cd_cursor + 46 + fn_len]
+    name = _validate_wheel_member_path(raw_name)
+    if lfh_off + 30 > cd_offset or wheel_bytes[lfh_off : lfh_off + 4] != b"PK\x03\x04":
+        raise ClosedValidationError(f"wheel_bytes: invalid local file header for {name!r}")
+    lfh_fn, lfh_ex = _u16(wheel_bytes, lfh_off + 26), _u16(wheel_bytes, lfh_off + 28)
+    data_off = lfh_off + 30 + lfh_fn + lfh_ex
+    lfh_end = data_off + cd_comp
+    if (
+        (_u16(wheel_bytes, lfh_off + 6) & 0x09) != 0 or lfh_end > cd_offset
+        or (_u16(wheel_bytes, lfh_off + 8), _u32(wheel_bytes, lfh_off + 14), _u32(wheel_bytes, lfh_off + 18), _u32(wheel_bytes, lfh_off + 22)) != (cd_method, cd_crc, cd_comp, cd_uncomp)
+        or wheel_bytes[lfh_off + 30 : lfh_off + 30 + lfh_fn] != raw_name
+    ):
+        raise ClosedValidationError(f"wheel_bytes: local header mismatch or overflow on {name!r}")
+    return name, (cd_uncomp, cd_crc, cd_method, data_off), (lfh_off, lfh_end), next_cd
+
+def _parse_wheel_central_directory(wheel_bytes: bytes) -> dict[str, tuple[int, int, int, int]]:
+    if len(wheel_bytes) < 22 or (len(wheel_bytes) >= 42 and wheel_bytes[-42:-38] == b"PK\x06\x07") or wheel_bytes[-22:-18] != b"PK\x05\x06":
+        raise ClosedValidationError("wheel_bytes: missing standard 22-byte ZIP EOCD or forbidden Zip64 locator")
+    eocd = wheel_bytes[-22:]
+    disk_no, cd_disk, disk_cnt, cd_cnt = _u16(eocd, 4), _u16(eocd, 6), _u16(eocd, 8), _u16(eocd, 10)
+    cd_size, cd_offset, comment_len = _u32(eocd, 12), _u32(eocd, 16), _u16(eocd, 20)
+    if comment_len != 0 or disk_no != 0 or cd_disk != 0 or disk_cnt != cd_cnt or cd_cnt in (0, 0xFFFF) or 0xFFFFFFFF in (cd_size, cd_offset) or cd_offset + cd_size + 22 != len(wheel_bytes):
+        raise ClosedValidationError("wheel_bytes: invalid or non-contiguous ZIP EOCD header")
+    cd_entries: dict[str, tuple[int, int, int, int]] = {}
+    lfh_spans: list[tuple[int, int]] = []
+    cd_cursor, cd_end = cd_offset, cd_offset + cd_size
+    for _ in range(cd_cnt):
+        name, meta, span, cd_cursor = _parse_cd_entry_and_lfh(wheel_bytes, cd_cursor, cd_end, cd_offset)
+        if name in cd_entries:
+            raise ClosedValidationError(f"wheel_bytes: duplicate central directory entry {name!r}")
+        cd_entries[name] = meta
+        lfh_spans.append(span)
+    lfh_cursor = 0
+    for span_start, span_end in sorted(lfh_spans):
+        if span_start != lfh_cursor:
+            raise ClosedValidationError("wheel_bytes: non-contiguous local file spans in wheel archive")
+        lfh_cursor = span_end
+    if cd_cursor != cd_end or lfh_cursor != cd_offset or _WHEEL_RECORD_MEMBER not in cd_entries:
+        raise ClosedValidationError(f"wheel_bytes: central directory span mismatch or missing {_WHEEL_RECORD_MEMBER!r}")
+    return cd_entries
+
+def _verify_wheel_members_against_zip(wheel_bytes: bytes, wheel_members: Mapping[str, bytes]) -> None:
+    cd_entries = _parse_wheel_central_directory(wheel_bytes)
+    if set(cd_entries.keys()) != set(wheel_members.keys()):
+        raise ClosedValidationError("wheel_members: member path set mismatch against wheel central directory")
+    for member_path, member_bytes in wheel_members.items():
+        exp_size, exp_crc, method, data_off = cd_entries[member_path]
+        if (len(member_bytes), _crc32_ieee(member_bytes)) != (exp_size, exp_crc) or (method == 0 and wheel_bytes[data_off : data_off + exp_size] != member_bytes):
+            raise ClosedValidationError(f"wheel_members[{member_path!r}]: size or CRC-32 mismatch against wheel central directory")
 
 
 def _require_sorted_git_locators(locators: object, expected_len: int, *, label: str) -> tuple[ArtifactLocator, ...]:
@@ -446,7 +542,19 @@ def _resolve_verified_object(resolver: Callable[[ArtifactLocator], Mapping[str, 
     return checked
 
 
-def _verify_stage7_and_negative_report(record: Certification7ARecord, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, boundary_prov_loc: ArtifactLocator | None, certified_us: int) -> tuple[NegativeSecurityTestReport, dict[str, Any], SandboxResourceLimits, str, int, int, int, int]:
+@dataclass(frozen=True, slots=True)
+class _Stage7VerifiedContext:
+    negative_report: NegativeSecurityTestReport
+    sandbox_payload: dict[str, Any]
+    sandbox_limits: SandboxResourceLimits
+    sandbox_spec_digest: str
+    sandbox_issued_us: int
+    sandbox_from_us: int
+    sandbox_until_us: int
+    provenance_built_us: int
+
+
+def _verify_stage7_and_negative_report(record: Certification7ARecord, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, boundary_prov_loc: ArtifactLocator | None, certified_us: int) -> _Stage7VerifiedContext:
     sbx_env = _resolve_verified_object(resolver, record.sealed_sandbox_profile_locator, label="sealed_sandbox_profile")
     prov_env = _resolve_verified_object(resolver, record.wheel_build_provenance_locator, label="wheel_build_provenance")
     bound_env = _resolve_verified_object(resolver, record.wheel_boundary_report_locator, label="wheel_boundary_report")
@@ -474,7 +582,7 @@ def _verify_stage7_and_negative_report(record: Certification7ARecord, resolver: 
     if _utc_sec_micros(neg_report.executed_at_utc, label="neg_report.executed_at_utc") > certified_us:
         raise ClosedValidationError("certification_7a_record: negative_report.executed_at_utc > certified_at_utc")
     sbx_payload = {k: v for k, v in sbx_env.items() if k not in {"$schema", "integrity"}}
-    return (neg_report, sbx_payload, SandboxResourceLimits.from_dict(sbx_payload["resource_limits"]), jcs_sha256({k: sbx_payload[k] for k in _SPEC_17_FIELDS}), _utc_sec_micros(sbx_payload["issued_at_utc"], label="sbx.issued"), _utc_sec_micros(sbx_payload["validity"]["from"], label="sbx.from"), _utc_sec_micros(sbx_payload["validity"]["until"], label="sbx.until"), _utc_sec_micros(prov_env["built_at_utc"], label="prov.built"))
+    return _Stage7VerifiedContext(neg_report, sbx_payload, SandboxResourceLimits.from_dict(sbx_payload["resource_limits"]), jcs_sha256({k: sbx_payload[k] for k in _SPEC_17_FIELDS}), _utc_sec_micros(sbx_payload["issued_at_utc"], label="sbx.issued"), _utc_sec_micros(sbx_payload["validity"]["from"], label="sbx.from"), _utc_sec_micros(sbx_payload["validity"]["until"], label="sbx.until"), _utc_sec_micros(prov_env["built_at_utc"], label="prov.built"))
 
 def _verify_registry_and_contract(record: Certification7ARecord, resolver: Callable[[ArtifactLocator], Mapping[str, Any]]) -> ResolvedRegistryState:
     snapshot = PrivateRegistrySnapshot.from_dict(_resolve_verified_object(resolver, record.capability.registry_snapshot_locator, label="registry_snapshot"))
@@ -514,7 +622,7 @@ def _verify_corpus_and_d26_provenances(record: Certification7ARecord, driver_con
         raise ClosedValidationError("parser_artifact_locators: missing legacy reducer provenance locator")
     return unique_locs, reducer_loc
 
-def _resolve_code_group_provs(locators: tuple[ArtifactLocator, ...], *, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], source_commit_sha: str, reducer_loc: ArtifactLocator, git_blobs: Mapping[str, bytes], d26_blobs: Mapping[str, bytes], certified_us: int, unique_locs: set[ArtifactLocator], label: str) -> list[GitArtifactProvenance]:
+def _resolve_code_group_provs(locators: tuple[ArtifactLocator, ...], *, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], source_commit_sha: str, reducer_loc: ArtifactLocator, wheel_members: Mapping[str, bytes], git_blobs: Mapping[str, bytes], d26_blobs: Mapping[str, bytes], certified_us: int, unique_locs: set[ArtifactLocator], label: str) -> list[GitArtifactProvenance]:
     provs: list[GitArtifactProvenance] = []
     for loc in locators:
         prov = GitArtifactProvenance.from_dict(_resolve_verified_object(resolver, loc, label=label))
@@ -525,16 +633,19 @@ def _resolve_code_group_provs(locators: tuple[ArtifactLocator, ...], *, resolver
                 raise ClosedValidationError(f"{label}: legacy reducer provenance locator mismatch")
             verify_git_provenance_against_bytes(prov, d26_blobs[prov.path])
         else:
-            if prov.repository != "aiconnai/smart-ads" or prov.commit_sha != source_commit_sha or prov.path not in git_blobs:
+            if prov.repository != "aiconnai/smart-ads" or prov.commit_sha != source_commit_sha or not prov.path.startswith("src/") or prov.path not in git_blobs:
                 raise ClosedValidationError(f"{label}: smart-ads git provenance commit or blob missing")
-            verify_git_provenance_against_bytes(prov, git_blobs[prov.path])
+            rel_path = prov.path[4:]
+            if rel_path not in wheel_members or wheel_members[rel_path] != git_blobs[prov.path]:
+                raise ClosedValidationError(f"{label}: wheel_members[{rel_path!r}] missing or diverges from resolved_git_blobs[{prov.path!r}]")
+            verify_git_provenance_against_bytes(prov, wheel_members[rel_path])
         unique_locs.add(loc)
         provs.append(prov)
     return provs
 
-def _verify_all_13_git_provenances(record: Certification7ARecord, *, driver_contract: PipeboardPhase1Contract, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], corpus_bytes: bytes, git_blobs: Mapping[str, bytes], d26_blobs: Mapping[str, bytes], certified_us: int) -> None:
+def _verify_all_13_git_provenances(record: Certification7ARecord, *, driver_contract: PipeboardPhase1Contract, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_members: Mapping[str, bytes], corpus_bytes: bytes, git_blobs: Mapping[str, bytes], d26_blobs: Mapping[str, bytes], certified_us: int) -> None:
     unique_locs, reducer_loc = _verify_corpus_and_d26_provenances(record, driver_contract, resolver, corpus_bytes, git_blobs, d26_blobs, certified_us)
-    kw = {"resolver": resolver, "source_commit_sha": record.source_commit_sha, "reducer_loc": reducer_loc, "git_blobs": git_blobs, "d26_blobs": d26_blobs, "certified_us": certified_us, "unique_locs": unique_locs}
+    kw = {"resolver": resolver, "source_commit_sha": record.source_commit_sha, "reducer_loc": reducer_loc, "wheel_members": wheel_members, "git_blobs": git_blobs, "d26_blobs": d26_blobs, "certified_us": certified_us, "unique_locs": unique_locs}
     p_provs = _resolve_code_group_provs(record.parser_artifact_locators, label="parser_prov", **kw)  # type: ignore[arg-type]
     a_provs = _resolve_code_group_provs(record.adapter_artifact_locators, label="adapter_prov", **kw)  # type: ignore[arg-type]
     m_provs = _resolve_code_group_provs(record.mapping_artifact_locators, label="mapping_prov", **kw)  # type: ignore[arg-type]
@@ -634,25 +745,27 @@ def _verify_and_replay_single_case(record: Certification7ARecord, corpus: Mappin
         raise ClosedValidationError(f"case[{rec_case.case_id}]: deterministic offline 7A replay mismatch")
 
 
-def verify_certification_7a_record(record: Certification7ARecord, *, object_resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, corpus_bytes: bytes, resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes], boundary_report_wheel_provenance_locator: ArtifactLocator | None = None) -> None:
-    """Materially verify `record` against Store envelopes, Git/d26 blobs, and offline 7A replay."""
+def verify_certification_7a_record(record: Certification7ARecord, *, object_resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, wheel_members: Mapping[str, bytes], corpus_bytes: bytes, resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes], boundary_report_wheel_provenance_locator: ArtifactLocator | None = None) -> None:
+    """Materially verify `record` against Store envelopes, wheel ZIP members, Git/d26 blobs, and offline 7A replay."""
     checked = _reparse(record, Certification7ARecord, label="record")
     if not callable(object_resolver) or type(wheel_bytes) is not bytes or len(wheel_bytes) == 0 or type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
         raise ClosedValidationError("verify_certification_7a_record: invalid resolver or empty wheel/corpus bytes")
+    checked_wheel_members = _check_blob_map(wheel_members, label="wheel_members")
     git_blobs, d26_blobs = _check_blob_map(resolved_git_blobs, label="resolved_git_blobs"), _check_blob_map(resolved_d26_blobs, label="resolved_d26_blobs")
     if boundary_report_wheel_provenance_locator is not None:
         _require_typed_locator(boundary_report_wheel_provenance_locator, _WHEEL_PROVENANCE_SCHEMA, label="boundary_report_wheel_provenance_locator")
     certified_us = _utc_sec_micros(checked.certified_at_utc, label="record.certified_at_utc")
-    neg_rep, sbx_payload, sbx_limits, sbx_digest, sbx_issued_us, sbx_from_us, sbx_until_us, prov_built_us = _verify_stage7_and_negative_report(checked, object_resolver, wheel_bytes, boundary_report_wheel_provenance_locator, certified_us)
+    stage7 = _verify_stage7_and_negative_report(checked, object_resolver, wheel_bytes, boundary_report_wheel_provenance_locator, certified_us)
+    _verify_wheel_members_against_zip(wheel_bytes, checked_wheel_members)
     resolved_registry = _verify_registry_and_contract(checked, object_resolver)
-    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
+    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, wheel_members=checked_wheel_members, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
     expected_reg_loc = ArtifactLocator.for_canonical_bytes(RegressionFixtureV1.SCHEMA, canonicalize_jcs(checked.fixture_evidence.regression_fixture.to_dict()))
     corpus = _parse_pipeboard_7a_corpus(corpus_bytes)
     if [c["case_id"] for c in corpus["cases"]] != [c.case_id for c in checked.fixture_evidence.cases]:
         raise ClosedValidationError("fixture_evidence.cases: case_id list diverges from corpus")
     boundary, inv_map = _build_verified_boundary_and_inventories(checked, corpus, resolved_registry, object_resolver)
-    neg_refs = {r.sandbox_instance_ref for c in neg_rep.cases for r in c.runs}
-    ctx = {"sbx_payload": sbx_payload, "sbx_limits": sbx_limits, "sbx_digest": sbx_digest, "sbx_issued_us": sbx_issued_us, "sbx_from_us": sbx_from_us, "sbx_until_us": sbx_until_us, "prov_built_us": prov_built_us, "snap_issued_us": _utc_sec_micros(resolved_registry.snapshot.issued_at_utc, label="snap.issued"), "snap_until_us": _utc_sec_micros(resolved_registry.snapshot.valid_until_utc, label="snap.until"), "certified_us": certified_us, "expected_reg_loc": expected_reg_loc}
+    neg_refs = {r.sandbox_instance_ref for c in stage7.negative_report.cases for r in c.runs}
+    ctx = {"sbx_payload": stage7.sandbox_payload, "sbx_limits": stage7.sandbox_limits, "sbx_digest": stage7.sandbox_spec_digest, "sbx_issued_us": stage7.sandbox_issued_us, "sbx_from_us": stage7.sandbox_from_us, "sbx_until_us": stage7.sandbox_until_us, "prov_built_us": stage7.provenance_built_us, "snap_issued_us": _utc_sec_micros(resolved_registry.snapshot.issued_at_utc, label="snap.issued"), "snap_until_us": _utc_sec_micros(resolved_registry.snapshot.valid_until_utc, label="snap.until"), "certified_us": certified_us, "expected_reg_loc": expected_reg_loc}
     for corpus_case, rec_case in zip(corpus["cases"], checked.fixture_evidence.cases, strict=True):
         if rec_case.sandbox_instance_ref in neg_refs:
             raise ClosedValidationError(f"case[{rec_case.case_id}]: sandbox_instance_ref collides with negative report")
