@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import hashlib
 import io
 from pathlib import Path
+import tracemalloc
 from typing import Any
 import zipfile
 
@@ -107,6 +108,9 @@ def _build_deterministic_wheel_bytes(
     overrides: Mapping[str, bytes] | None = None,
     include_record: bool = True,
     corrupt_record_hash_for: str | None = None,
+    custom_record_size: tuple[str, str] | None = None,
+    quote_record: bool = False,
+    custom_record_raw: bytes | None = None,
     patch_cd_flag_bits: int = 0,
     compress_type: int = zipfile.ZIP_DEFLATED,
 ) -> bytes:
@@ -115,13 +119,17 @@ def _build_deterministic_wheel_bytes(
     }
     if overrides:
         members.update(overrides)
-    if include_record:
+    if custom_record_raw is not None:
+        members[_RECORD_REL_PATH] = custom_record_raw
+    elif include_record:
         rec_lines: list[str] = []
         for rel, raw in sorted(members.items()):
             digest = b"\xee" * 32 if rel == corrupt_record_hash_for else hashlib.sha256(raw).digest()
             b64_nopad = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-            rec_lines.append(f"{rel},sha256={b64_nopad},{len(raw)}")
-        rec_lines.append(f"{_RECORD_REL_PATH},,")
+            sz = custom_record_size[1] if custom_record_size and custom_record_size[0] == rel else str(len(raw))
+            row = f'"{rel}","sha256={b64_nopad}","{sz}"' if quote_record else f"{rel},sha256={b64_nopad},{sz}"
+            rec_lines.append(row)
+        rec_lines.append(f'"{_RECORD_REL_PATH}","",""' if quote_record else f"{_RECORD_REL_PATH},,")
         members[_RECORD_REL_PATH] = ("\n".join(rec_lines) + "\n").encode("utf-8")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w") as zf:
@@ -136,6 +144,16 @@ def _build_deterministic_wheel_bytes(
         cur_flags = int.from_bytes(raw_whl[cd_off + 8 : cd_off + 10], "little")
         raw_whl[cd_off + 8 : cd_off + 10] = (cur_flags | patch_cd_flag_bits).to_bytes(2, "little")
     return bytes(raw_whl)
+
+
+def _spoof_first_zip_entry_uncomp_size(whl_bytes: bytes, spoofed_uncomp: int) -> bytes:
+    raw = bytearray(whl_bytes)
+    cd_off = int.from_bytes(raw[-6:-2], "little")
+    lfh_off = int.from_bytes(raw[cd_off + 42 : cd_off + 46], "little")
+    sz_le = spoofed_uncomp.to_bytes(4, "little")
+    raw[lfh_off + 22 : lfh_off + 26] = sz_le
+    raw[cd_off + 24 : cd_off + 28] = sz_le
+    return bytes(raw)
 
 
 def _sign_env(unsigned: dict[str, Any]) -> dict[str, Any]:
@@ -549,6 +567,46 @@ def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None
         bad_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
         with pytest.raises(ClosedValidationError, match="wheel"):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_whl))
+
+
+def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None:
+    w = build_valid_7a_world()
+    wire_rel = "smart_ads/adapters/pipeboard/wire.py"
+
+    # (a) 12 MiB DEFLATE zero-bomb with spoofed header uncomp_size=64 stops immediately without inflating 12 MiB
+    bomb_raw = _build_deterministic_wheel_bytes(
+        w.resolved_git_blobs, overrides={"00_bomb.py": b"\x00" * (12 * 1024 * 1024)}
+    )
+    w_bomb = build_valid_7a_world(wheel_bytes=_spoof_first_zip_entry_uncomp_size(bomb_raw, 64))
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        with pytest.raises(ClosedValidationError, match="DEFLATE"):
+            _verify_world(w_bomb)
+        _, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak_bytes < 2 * 1024 * 1024
+
+    # (b) Cumulative archive uncomp_size > 32 MiB (5 x 7 MiB = 35 MiB, each < 8 MiB) rejected
+    over_total_whl = _build_deterministic_wheel_bytes(
+        w.resolved_git_blobs, overrides={f"smart_ads/pad_{i}.py": b"\x00" * (7 * 1024 * 1024) for i in range(5)}
+    )
+    with pytest.raises(ClosedValidationError, match="ceiling|total"):
+        _verify_world(build_valid_7a_world(wheel_bytes=over_total_whl))
+
+    # (c) Valid RFC 4180 quoted RECORD fields accepted; malformed unclosed/extra-column CSV rejected
+    quoted_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, quote_record=True)
+    _verify_world(build_valid_7a_world(wheel_bytes=quoted_whl))
+    for bad_csv in (b'"unclosed,sha256=abc,1\n', b'a,b,c,d\n'):
+        bad_csv_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=bad_csv)
+        with pytest.raises(ClosedValidationError, match="RECORD"):
+            _verify_world(build_valid_7a_world(wheel_bytes=bad_csv_whl))
+
+    # (d) 5000-digit RECORD size rejected with ClosedValidationError (never ValueError)
+    huge_sz_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_size=(wire_rel, "9" * 5000))
+    with pytest.raises(ClosedValidationError, match="RECORD"):
+        _verify_world(build_valid_7a_world(wheel_bytes=huge_sz_whl))
 
 
 def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:

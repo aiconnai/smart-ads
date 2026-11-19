@@ -42,7 +42,9 @@ CORPUS_CASE_KEYS: Final[frozenset[str]] = frozenset("case_id admission_id clock_
 _WHEEL_BOUNDARY_SCHEMA: Final[str] = "smart_ads/wheel_boundary_report/v1"
 _WHEEL_RECORD_MEMBER: Final[str] = "smart_ads-0.1.0.dist-info/RECORD"
 _MAX_WHEEL_MEMBER_BYTES: Final[int] = 8_388_608
-_NONNEG_DEC_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]*)\Z")
+_MAX_WHEEL_TOTAL_UNCOMP_BYTES: Final[int] = 33_554_432
+_MAX_WHEEL_ENTRIES: Final[int] = 512
+_NONNEG_DEC_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,17})\Z")
 _PHASE1_REQUIRED_METRICS: Final[tuple[str, ...]] = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
 _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed"})
 _SOURCE_CONTRACT_REF_RE: Final[re.Pattern[str]] = re.compile(r"\Aopaque-driver-contract:sha256:[0-9a-f]{64}\Z")
@@ -79,16 +81,16 @@ def _decompress_wheel_member(comp_slice: bytes, *, method: int, uncomp_size: int
     else:
         try:
             decomp = zlib.decompressobj(-15)
-            raw = decomp.decompress(comp_slice, uncomp_size + 1) + decomp.flush(1)
+            raw = decomp.decompress(comp_slice, uncomp_size + 1)
+            if len(raw) != uncomp_size or decomp.unconsumed_tail != b"" or not decomp.eof or decomp.unused_data != b"" or decomp.flush(1) != b"":
+                raise ClosedValidationError(f"wheel_bytes[{name!r}]: incomplete, trailing, or oversized DEFLATE stream")
         except zlib.error:
             raise ClosedValidationError(f"wheel_bytes[{name!r}]: corrupt DEFLATE stream") from None
-        if not decomp.eof or decomp.unused_data != b"" or decomp.unconsumed_tail != b"":
-            raise ClosedValidationError(f"wheel_bytes[{name!r}]: incomplete or trailing DEFLATE stream")
     if len(raw) != uncomp_size or (zlib.crc32(raw) & 0xFFFFFFFF) != exp_crc:
         raise ClosedValidationError(f"wheel_bytes[{name!r}]: size or CRC-32 mismatch after decompression")
     return raw
 
-def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_offset: int) -> tuple[str, bytes, tuple[int, int], int]:
+def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_offset: int, max_remaining_uncomp: int) -> tuple[str, bytes, tuple[int, int], int]:
     if cd_cursor + 46 > cd_end or wheel_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
         raise ClosedValidationError("wheel_bytes: corrupt ZIP central directory file header")
     cd_flags, cd_method = _u16(wheel_bytes, cd_cursor + 8), _u16(wheel_bytes, cd_cursor + 10)
@@ -98,6 +100,8 @@ def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int,
     next_cd, unix_type = cd_cursor + 46 + fn_len + ex_len + cm_len, (ext_attr >> 16) & 0o170000
     if next_cd > cd_end or (cd_flags & 0x09) != 0 or cd_method not in (0, 8) or 0xFFFFFFFF in (cd_comp, cd_uncomp, lfh_off) or unix_type not in (0, 0o100000):
         raise ClosedValidationError("wheel_bytes: forbidden ZIP flags, compression method, Zip64 sentinel, or special mode")
+    if cd_uncomp > max_remaining_uncomp:
+        raise ClosedValidationError("wheel_bytes: total archive uncompressed size exceeds 32 MiB ceiling")
     raw_name = wheel_bytes[cd_cursor + 46 : cd_cursor + 46 + fn_len]
     name = _validate_wheel_member_path(raw_name)
     if lfh_off + 30 > cd_offset or wheel_bytes[lfh_off : lfh_off + 4] != b"PK\x03\x04":
@@ -109,17 +113,52 @@ def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int,
     raw = _decompress_wheel_member(wheel_bytes[data_off:lfh_end], method=cd_method, uncomp_size=cd_uncomp, exp_crc=cd_crc, name=name)
     return name, raw, (lfh_off, lfh_end), next_cd
 
+def _parse_record_csv_line(line: str) -> tuple[str, str, str]:
+    fields: list[str] = []
+    i, n = 0, len(line)
+    while True:
+        if i < n and line[i] == '"':
+            i, buf = i + 1, []
+            while i < n:
+                if line[i] == '"':
+                    if i + 1 < n and line[i + 1] == '"':
+                        buf.append('"')
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                buf.append(line[i])
+                i += 1
+            else:
+                raise ClosedValidationError("wheel RECORD: unclosed quoted CSV field")
+            if i < n and line[i] != ",":
+                raise ClosedValidationError("wheel RECORD: trailing characters after quoted CSV field")
+            fields.append("".join(buf))
+        else:
+            comma = line.find(",", i)
+            seg = line[i:] if comma == -1 else line[i:comma]
+            if '"' in seg:
+                raise ClosedValidationError("wheel RECORD: unexpected quote in unquoted CSV field")
+            fields.append(seg)
+            i = n if comma == -1 else comma
+        if i == n:
+            break
+        i += 1
+    if len(fields) != 3:
+        raise ClosedValidationError("wheel RECORD: expected exact 3 CSV columns")
+    return fields[0], fields[1], fields[2]
+
 def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
     try:
         record_text = members[_WHEEL_RECORD_MEMBER].decode("utf-8")
     except UnicodeDecodeError:
         raise ClosedValidationError("wheel RECORD: invalid UTF-8") from None
     lines = record_text.splitlines()
-    if not lines or "\x00" in record_text or any(not ln or ln.count(",") != 2 or '"' in ln for ln in lines):
-        raise ClosedValidationError("wheel RECORD: empty, blank, or malformed CSV row")
+    if not lines or "\x00" in record_text or any(not ln for ln in lines):
+        raise ClosedValidationError("wheel RECORD: empty or blank CSV row")
     seen: set[str] = set()
     for ln in lines:
-        rec_path, rec_hash, rec_size = ln.split(",")
+        rec_path, rec_hash, rec_size = _parse_record_csv_line(ln)
         if rec_path in seen or rec_path not in members:
             raise ClosedValidationError(f"wheel RECORD: duplicate or unknown member {rec_path!r}")
         seen.add(rec_path)
@@ -140,16 +179,17 @@ def _extract_verified_wheel_members(wheel_bytes: bytes) -> dict[str, bytes]:
     eocd = wheel_bytes[-22:]
     disk_no, cd_disk, disk_cnt, cd_cnt = _u16(eocd, 4), _u16(eocd, 6), _u16(eocd, 8), _u16(eocd, 10)
     cd_size, cd_offset, comment_len = _u32(eocd, 12), _u32(eocd, 16), _u16(eocd, 20)
-    if comment_len != 0 or disk_no != 0 or cd_disk != 0 or disk_cnt != cd_cnt or cd_cnt in (0, 0xFFFF) or 0xFFFFFFFF in (cd_size, cd_offset) or cd_offset + cd_size + 22 != len(wheel_bytes):
-        raise ClosedValidationError("wheel_bytes: invalid or non-contiguous ZIP EOCD header")
+    if comment_len != 0 or disk_no != 0 or cd_disk != 0 or disk_cnt != cd_cnt or not (1 <= cd_cnt <= _MAX_WHEEL_ENTRIES) or 0xFFFFFFFF in (cd_size, cd_offset) or cd_offset + cd_size + 22 != len(wheel_bytes):
+        raise ClosedValidationError("wheel_bytes: invalid, oversized, or non-contiguous ZIP EOCD header")
     members: dict[str, bytes] = {}
     lfh_spans: list[tuple[int, int]] = []
-    cd_cursor, cd_end = cd_offset, cd_offset + cd_size
+    cd_cursor, cd_end, remaining_uncomp = cd_offset, cd_offset + cd_size, _MAX_WHEEL_TOTAL_UNCOMP_BYTES
     for _ in range(cd_cnt):
-        name, raw, span, cd_cursor = _parse_cd_entry_and_extract(wheel_bytes, cd_cursor, cd_end, cd_offset)
+        name, raw, span, cd_cursor = _parse_cd_entry_and_extract(wheel_bytes, cd_cursor, cd_end, cd_offset, remaining_uncomp)
         if name in members:
             raise ClosedValidationError(f"wheel_bytes: duplicate central directory entry {name!r}")
         members[name] = raw
+        remaining_uncomp -= len(raw)
         lfh_spans.append(span)
     lfh_cursor = 0
     for span_start, span_end in sorted(lfh_spans):
