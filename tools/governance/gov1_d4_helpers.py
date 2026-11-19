@@ -177,16 +177,12 @@ def _validate_deployed_runtime_config(
     _strict_str(cfg_d["trust_anchor_id"], "runtime_config.trust_anchor_id")
     val_d = dict(cfg_d["validity"]) if isinstance(cfg_d["validity"], Mapping) else {}
     exact_fields(val_d, {"from", "until"}, "runtime_config.validity")
-    require(timestamp(val_d["from"]) < timestamp(val_d["until"]), "invalid runtime_config validity interval")
-    anchor_file = repo_path / "docs/governance/trust-anchor/cell_trust_anchor_config.json"
-    if anchor_file.is_file():
-        anchor_doc = loads_strict(anchor_file.read_text(encoding="utf-8"))
-        require(
-            isinstance(anchor_doc, dict)
-            and cfg_d["trust_anchor_id"] == anchor_doc.get("trust_anchor_id")
-            and canonicalize(val_d) == canonicalize(anchor_doc.get("validity")),
-            "runtime_config trust_anchor_id or validity mismatch against repo trust anchor",
-        )
+    require(
+        type(val_d["from"]) is str
+        and type(val_d["until"]) is str
+        and timestamp(val_d["from"]) < timestamp(val_d["until"]),
+        "invalid runtime_config validity interval",
+    )
     require(cfg_d["allowed_registry_artifact_types"] == [REGISTRY, INVENTORY], "bootstrap allowlist mismatch")
     adr_raw = (repo_path / "docs/adr/ADR-0001-smart-ads-read-gateway.md").read_bytes()
     profiles = {p["schema"]: p for p in profile_proposals(adr_raw)}

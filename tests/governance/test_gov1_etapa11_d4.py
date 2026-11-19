@@ -369,6 +369,10 @@ def _assert_from_repo_prerequisites_d4_bootstrap(
     rt_real = MemoryProtectedRuntime(deployed_cfg, world.head_loc, world.checkpoint_loc)
     v_real = gov1_convergence.Gov1AdmissionVerifier(rt_real, pins_cfg, Store(REPO_ROOT / "docs/governance/cell-objects"), world.adr)
     assert canonicalize(v_real._configuration(rt_real.authenticated_clock())) == canonicalize(deployed_cfg)
+    narrow_cfg = {**deployed_cfg, "validity": {"from": "2026-09-03T00:00:00Z", "until": "2027-09-02T00:00:00Z"}}
+    pins_narrow = Gov1InstallationPins.from_repo_prerequisites(REPO_ROOT, runtime_config=narrow_cfg)
+    rt_narrow = MemoryProtectedRuntime(narrow_cfg, world.head_loc, world.checkpoint_loc)
+    assert canonicalize(gov1_convergence.Gov1AdmissionVerifier(rt_narrow, pins_narrow, Store(REPO_ROOT / "docs/governance/cell-objects"), world.adr)._configuration(rt_narrow.authenticated_clock())) == canonicalize(narrow_cfg)
     _assert_e2e_admission_via_repo_pins(tmp_path, world, keys, baseline, monkeypatch)
 
 
