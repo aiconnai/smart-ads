@@ -25,6 +25,7 @@ PYTEST_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pytest.yml"
 
 EXPECTED_PACKAGED_SUBPACKAGES = frozenset(
     {
+        "adapters",
         "contracts",
         "domain",
         "ports",
@@ -38,6 +39,11 @@ EXPECTED_PR1_SUBPACKAGES = EXPECTED_PACKAGED_SUBPACKAGES
 EXPECTED_PACKAGED_MODULES = frozenset(
     {
         "smart_ads",
+        "smart_ads.adapters",
+        "smart_ads.adapters.pipeboard",
+        "smart_ads.adapters.pipeboard.adapter",
+        "smart_ads.adapters.pipeboard.reducer",
+        "smart_ads.adapters.pipeboard.wire",
         "smart_ads.contracts",
         "smart_ads.contracts.git_provenance",
         "smart_ads.contracts.jcs",
@@ -554,8 +560,11 @@ def test_ast_zero_io_and_zero_tooling_imports_in_src() -> None:
         assert not wheel_violations, "\n".join(wheel_violations)
 
         is_pure_layer = (
-            len(rel_parts) == 1 and rel_parts[0] == "__init__.py"
-        ) or (len(rel_parts) >= 2 and rel_parts[0] in PURE_LAYER_SUBPACKAGES)
+            (len(rel_parts) == 1 and rel_parts[0] == "__init__.py")
+            or (len(rel_parts) >= 2 and rel_parts[0] in PURE_LAYER_SUBPACKAGES)
+            or rel_parts == ("adapters", "__init__.py")
+            or rel_parts[:2] == ("adapters", "pipeboard")
+        )
         if is_pure_layer:
             pure_violations = scan_pure_layer_ast_violations(
                 source, filename=str(path)

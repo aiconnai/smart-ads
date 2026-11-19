@@ -140,6 +140,11 @@ PINNED_UV_LOCK_CLOSURE_SPECS: Final[Mapping[str, tuple[str, str, str, str, str]]
 EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
     {
         "smart_ads",
+        "smart_ads.adapters",
+        "smart_ads.adapters.pipeboard",
+        "smart_ads.adapters.pipeboard.adapter",
+        "smart_ads.adapters.pipeboard.reducer",
+        "smart_ads.adapters.pipeboard.wire",
         "smart_ads.contracts",
         "smart_ads.contracts.git_provenance",
         "smart_ads.contracts.jcs",
@@ -1888,6 +1893,128 @@ def verify_wheel_object_locator(
 # ---------------------------------------------------------------------------
 
 
+def _scan_wheel_wide_import_node(
+    node: ast.AST, *, filename: str, violations: list[str]
+) -> None:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.asname == "re" and alias.name != "re":
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden import alias 're' for {alias.name!r}"
+                )
+            if alias.name.split(".")[0] in _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS:
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden wheel-wide import {alias.name!r}"
+                )
+    elif isinstance(node, ast.ImportFrom):
+        if node.module and node.module.split(".")[0] in _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden wheel-wide from-import {node.module!r}"
+            )
+        for alias in node.names:
+            if alias.name in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden wheel-wide imported symbol {alias.name!r}"
+                )
+            if alias.asname == "re":
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden shadowing alias 're'"
+                )
+            if alias.asname is not None and alias.asname in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden wheel-wide alias {alias.asname!r}"
+                )
+
+
+def _scan_wheel_wide_expr_node(
+    node: ast.AST,
+    *,
+    filename: str,
+    forbidden_attr_strings: frozenset[str],
+    violations: list[str],
+) -> None:
+    if isinstance(node, ast.Name):
+        if node.id == "re" and isinstance(node.ctx, (ast.Store, ast.Del)):
+            violations.append(f"{filename}:{node.lineno}: forbidden rebinding of 're'")
+        if node.id in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden dynamic builtin name {node.id!r}"
+            )
+    elif isinstance(node, ast.Attribute) and node.attr in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
+        if not (node.attr == "compile" and isinstance(node.value, ast.Name) and node.value.id == "re"):
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden dynamic attribute {node.attr!r}"
+            )
+    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {
+        "getattr",
+        "setattr",
+        "hasattr",
+        "delattr",
+    }:
+        if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
+            attr_lit = node.args[1].value
+            if isinstance(attr_lit, str) and attr_lit in forbidden_attr_strings:
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden {node.func.id} literal {attr_lit!r}"
+                )
+    elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        if isinstance(node.slice.value, str) and node.slice.value in forbidden_attr_strings:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden subscript literal {node.slice.value!r}"
+            )
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if node.value in {"__import__", "__builtins__"}:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden dynamic import string literal {node.value!r}"
+            )
+    elif isinstance(node, ast.Assert):
+        violations.append(
+            f"{filename}:{node.lineno}: forbidden assert statement in wheel source"
+        )
+
+
+def _scan_pure_layer_node(
+    node: ast.AST, *, filename: str, violations: list[str]
+) -> None:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if alias.name.split(".")[0] not in _PURE_LAYER_ALLOWED_TOP_IMPORTS:
+                violations.append(
+                    f"{filename}:{node.lineno}: import {alias.name!r} outside pure-layer allowlist"
+                )
+    elif isinstance(node, ast.ImportFrom):
+        if node.level == 0:
+            if not node.module:
+                violations.append(
+                    f"{filename}:{node.lineno}: empty absolute from-import module"
+                )
+            elif node.module.split(".")[0] not in _PURE_LAYER_ALLOWED_TOP_IMPORTS:
+                violations.append(
+                    f"{filename}:{node.lineno}: from-import {node.module!r} outside pure-layer allowlist"
+                )
+        for alias in node.names:
+            if (
+                alias.name == "open"
+                or alias.asname == "open"
+                or alias.name in _PURE_LAYER_FORBIDDEN_FILE_ATTRS
+                or alias.name in _PURE_LAYER_FORBIDDEN_AMBIENT_TIME_ATTRS
+            ):
+                violations.append(
+                    f"{filename}:{node.lineno}: forbidden pure-layer symbol {alias.name!r}"
+                )
+    elif isinstance(node, ast.Name) and node.id == "open":
+        violations.append(f"{filename}:{node.lineno}: forbidden pure-layer builtin 'open'")
+    elif isinstance(node, ast.Attribute):
+        if node.attr in _PURE_LAYER_FORBIDDEN_FILE_ATTRS:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden pure-layer file I/O attribute {node.attr!r}"
+            )
+        if node.attr in _PURE_LAYER_FORBIDDEN_AMBIENT_TIME_ATTRS:
+            violations.append(
+                f"{filename}:{node.lineno}: forbidden ambient time attribute {node.attr!r}"
+            )
+
+
 def _scan_wheel_python_ast_violations(source: str, *, filename: str) -> list[str]:
     try:
         tree = ast.parse(source, filename=filename)
@@ -1898,142 +2025,25 @@ def _scan_wheel_python_ast_violations(source: str, *, filename: str) -> list[str
     forbidden_attr_strings = (
         _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES | _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS
     )
-
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname == "re" and alias.name != "re":
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden import alias 're' for {alias.name!r}"
-                    )
-                top = alias.name.split(".")[0]
-                if top in _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden wheel-wide import {alias.name!r}"
-                    )
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                top = node.module.split(".")[0]
-                if top in _WHEEL_WIDE_FORBIDDEN_TOP_IMPORTS:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden wheel-wide from-import {node.module!r}"
-                    )
-            for alias in node.names:
-                if alias.name in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden wheel-wide imported symbol {alias.name!r}"
-                    )
-                if alias.asname == "re":
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden shadowing alias 're'"
-                    )
-                if (
-                    alias.asname is not None
-                    and alias.asname in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES
-                ):
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden wheel-wide alias {alias.asname!r}"
-                    )
-        elif isinstance(node, ast.Name):
-            if node.id == "re" and isinstance(node.ctx, (ast.Store, ast.Del)):
-                violations.append(
-                    f"{filename}:{node.lineno}: forbidden rebinding of 're'"
-                )
-            if node.id in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
-                violations.append(
-                    f"{filename}:{node.lineno}: forbidden dynamic builtin name {node.id!r}"
-                )
-        elif isinstance(node, ast.Attribute):
-            if node.attr in _WHEEL_WIDE_FORBIDDEN_DYNAMIC_NAMES:
-                is_stdlib_re_compile = (
-                    node.attr == "compile"
-                    and isinstance(node.value, ast.Name)
-                    and node.value.id == "re"
-                )
-                if not is_stdlib_re_compile:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden dynamic attribute {node.attr!r}"
-                    )
-        elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in {
-                "getattr",
-                "setattr",
-                "hasattr",
-                "delattr",
-            }:
-                if len(node.args) >= 2 and isinstance(node.args[1], ast.Constant):
-                    attr_lit = node.args[1].value
-                    if isinstance(attr_lit, str) and attr_lit in forbidden_attr_strings:
-                        violations.append(
-                            f"{filename}:{node.lineno}: forbidden {node.func.id} literal {attr_lit!r}"
-                        )
-        elif isinstance(node, ast.Subscript):
-            if isinstance(node.slice, ast.Constant) and isinstance(
-                node.slice.value, str
-            ):
-                if node.slice.value in forbidden_attr_strings:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden subscript literal {node.slice.value!r}"
-                    )
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if node.value in {"__import__", "__builtins__"}:
-                violations.append(
-                    f"{filename}:{node.lineno}: forbidden dynamic import string literal {node.value!r}"
-                )
-        elif isinstance(node, ast.Assert):
-            violations.append(
-                f"{filename}:{node.lineno}: forbidden assert statement in wheel source"
-            )
+        _scan_wheel_wide_import_node(node, filename=filename, violations=violations)
+        _scan_wheel_wide_expr_node(
+            node,
+            filename=filename,
+            forbidden_attr_strings=forbidden_attr_strings,
+            violations=violations,
+        )
 
-    # Pure-layer checks (smart_ads/__init__.py and pure subpackages)
     rel_parts = filename.split("/")[1:]
     is_pure_layer = (
-        len(rel_parts) == 1 and rel_parts[0] == "__init__.py"
-    ) or (len(rel_parts) >= 2 and rel_parts[0] in _PURE_LAYER_SUBPACKAGES)
+        (len(rel_parts) == 1 and rel_parts[0] == "__init__.py")
+        or (len(rel_parts) >= 2 and rel_parts[0] in _PURE_LAYER_SUBPACKAGES)
+        or rel_parts == ["adapters", "__init__.py"]
+        or rel_parts[:2] == ["adapters", "pipeboard"]
+    )
     if is_pure_layer:
         for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    top = alias.name.split(".")[0]
-                    if top not in _PURE_LAYER_ALLOWED_TOP_IMPORTS:
-                        violations.append(
-                            f"{filename}:{node.lineno}: import {alias.name!r} outside pure-layer allowlist"
-                        )
-            elif isinstance(node, ast.ImportFrom):
-                if node.level == 0:
-                    if not node.module:
-                        violations.append(
-                            f"{filename}:{node.lineno}: empty absolute from-import module"
-                        )
-                    else:
-                        top = node.module.split(".")[0]
-                        if top not in _PURE_LAYER_ALLOWED_TOP_IMPORTS:
-                            violations.append(
-                                f"{filename}:{node.lineno}: from-import {node.module!r} outside pure-layer allowlist"
-                            )
-                for alias in node.names:
-                    if (
-                        alias.name == "open"
-                        or alias.asname == "open"
-                        or alias.name in _PURE_LAYER_FORBIDDEN_FILE_ATTRS
-                        or alias.name in _PURE_LAYER_FORBIDDEN_AMBIENT_TIME_ATTRS
-                    ):
-                        violations.append(
-                            f"{filename}:{node.lineno}: forbidden pure-layer symbol {alias.name!r}"
-                        )
-            elif isinstance(node, ast.Name) and node.id == "open":
-                violations.append(
-                    f"{filename}:{node.lineno}: forbidden pure-layer builtin 'open'"
-                )
-            elif isinstance(node, ast.Attribute):
-                if node.attr in _PURE_LAYER_FORBIDDEN_FILE_ATTRS:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden pure-layer file I/O attribute {node.attr!r}"
-                    )
-                if node.attr in _PURE_LAYER_FORBIDDEN_AMBIENT_TIME_ATTRS:
-                    violations.append(
-                        f"{filename}:{node.lineno}: forbidden ambient time attribute {node.attr!r}"
-                    )
+            _scan_pure_layer_node(node, filename=filename, violations=violations)
 
     return violations
 
