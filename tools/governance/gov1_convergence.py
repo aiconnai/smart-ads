@@ -988,6 +988,8 @@ def _capture_envelope_pr3_preflight_inputs(
             raise ValueError("verify_gov1_convergence_record: require corpus_path and (legacy_repo XOR legacy_blobs_dir)")
         _, corpus_bytes = _read_nonempty_regular_file(corpus_path, "corpus_path")
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
+        if corpus_bytes != git_blobs.get(cert7a.CORPUS_GIT_PATH[1]):
+            raise ValueError("verify_gov1_convergence_record: corpus_path bytes disagree with Git blob at source_commit_sha")
         d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
         if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
             if wheel_bytes != pr3_verifier._wheel_bytes or corpus_bytes != pr3_verifier._corpus_bytes or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs) or dict(d26_blobs) != dict(pr3_verifier._resolved_d26_blobs):
@@ -1511,6 +1513,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             envelope, validated, auth, (signer, GOV1_CONVERGENCE_SCHEMA, action), artifact_locator
         )
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, validated["source_commit_sha"])
+        require(corpus_bytes == git_blobs.get(cert7a.CORPUS_GIT_PATH[1]), "corpus_path bytes disagree with Git blob at source_commit_sha")
         d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=self.legacy_repo, legacy_blobs_dir=self.legacy_blobs_dir)
         _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
             wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sbx_env, prov_obj=prov_env,  # type: ignore[arg-type]

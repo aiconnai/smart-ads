@@ -13,9 +13,10 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from tools.governance import decomposition_governance, gov1_7a_runner, p1
+from tools.governance.decomposition_admission import profile_proposals
 from tools.governance.decomposition_governance import ANCHOR_PUBLIC, REPO_ROOT
 from tools.governance.decomposition_runtime import (
-    CONFIG, HEAD, INVENTORY, REGISTRY, STATE, ClockInterval, InstallationPins,
+    CHECKPOINT, CONFIG, HEAD, INVENTORY, REGISTRY, STATE, ClockInterval, InstallationPins,
     load_object, public_key, registry, require, validity,
 )
 from tools.governance.gov1_7a_negative import (
@@ -155,42 +156,58 @@ class SnapshotStore(Store):
         return copy.deepcopy(value)
 
 
+def _validate_deployed_runtime_config(
+    runtime_config: Mapping[str, Any] | bytes, repo_path: Path
+) -> tuple[bytes, dict[str, Any]]:
+    if type(runtime_config) is bytes:
+        raw_cfg, loaded = runtime_config, loads_strict(runtime_config.decode("utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("runtime_config: expected JSON object bytes")
+        cfg_d = loaded
+    elif isinstance(runtime_config, Mapping):
+        cfg_d = dict(runtime_config)
+        raw_cfg = canonicalize(cfg_d)
+        loads_strict(raw_cfg.decode("utf-8"))
+    else:
+        raise ValueError("runtime_config: expected Mapping or canonical UTF-8 bytes")
+    exact_fields(cfg_d, CONFIG, "protected configuration")
+    require(cfg_d["$schema"] == "smart_ads/cell_trust_anchor_config/v1", "configuration schema mismatch")
+    public_key(cfg_d)
+    require(cfg_d["public_key_base64"] == decomposition_governance.ANCHOR_PUBLIC, "runtime_config anchor mismatch")
+    _strict_str(cfg_d["trust_anchor_id"], "runtime_config.trust_anchor_id")
+    val_d = dict(cfg_d["validity"]) if isinstance(cfg_d["validity"], Mapping) else {}
+    exact_fields(val_d, {"from", "until"}, "runtime_config.validity")
+    require(timestamp(val_d["from"]) < timestamp(val_d["until"]), "invalid runtime_config validity interval")
+    anchor_file = repo_path / "docs/governance/trust-anchor/cell_trust_anchor_config.json"
+    if anchor_file.is_file():
+        anchor_doc = loads_strict(anchor_file.read_text(encoding="utf-8"))
+        require(
+            isinstance(anchor_doc, dict)
+            and cfg_d["trust_anchor_id"] == anchor_doc.get("trust_anchor_id")
+            and canonicalize(val_d) == canonicalize(anchor_doc.get("validity")),
+            "runtime_config trust_anchor_id or validity mismatch against repo trust anchor",
+        )
+    require(cfg_d["allowed_registry_artifact_types"] == [REGISTRY, INVENTORY], "bootstrap allowlist mismatch")
+    adr_raw = (repo_path / "docs/adr/ADR-0001-smart-ads-read-gateway.md").read_bytes()
+    profiles = {p["schema"]: p for p in profile_proposals(adr_raw)}
+    for fld, sch in (("inventory_bootstrap_profile", INVENTORY), ("anti_rollback_checkpoint_profile", CHECKPOINT)):
+        require(
+            isinstance(cfg_d[fld], Mapping) and canonicalize(dict(cfg_d[fld])) == canonicalize(profiles[sch]),
+            "protected profile mismatch",
+        )
+    return raw_cfg, cfg_d
+
+
 def _resolve_repo_pins_identity(
-    *,
-    configuration_digest: str | None,
-    runtime_config: Mapping[str, Any] | bytes | None,
-    installation_authority: str | None,
-    cell_id: str | None,
-    head_register: str | None,
-    checkpoint_register: str | None,
+    *, repo_path: Path, configuration_digest: str | None, runtime_config: Mapping[str, Any] | bytes | None,
+    installation_authority: str | None, cell_id: str | None, head_register: str | None, checkpoint_register: str | None,
 ) -> tuple[str, str, str, str, str]:
     if (configuration_digest is None) == (runtime_config is None):
-        raise ValueError(
-            "Gov1InstallationPins.from_repo_prerequisites: specify exactly one of configuration_digest or runtime_config"
-        )
+        raise ValueError("Gov1InstallationPins.from_repo_prerequisites: specify exactly one of configuration_digest or runtime_config")
     if runtime_config is not None:
-        if type(runtime_config) is bytes:
-            raw_cfg = runtime_config
-            loaded = loads_strict(raw_cfg.decode("utf-8"))
-            if not isinstance(loaded, dict):
-                raise ValueError("runtime_config: expected JSON object bytes")
-            cfg_d = loaded
-        elif isinstance(runtime_config, Mapping):
-            cfg_d = dict(runtime_config)
-            raw_cfg = canonicalize(cfg_d)
-            loads_strict(raw_cfg.decode("utf-8"))
-        else:
-            raise ValueError("runtime_config: expected Mapping or canonical UTF-8 bytes")
-        exact_fields(cfg_d, CONFIG, "protected configuration")
-        require(cfg_d["$schema"] == "smart_ads/cell_trust_anchor_config/v1", "configuration schema mismatch")
-        public_key(cfg_d)
-        require(cfg_d["public_key_base64"] == decomposition_governance.ANCHOR_PUBLIC, "runtime_config anchor mismatch")
-        require(cfg_d["allowed_registry_artifact_types"] == [REGISTRY, INVENTORY], "bootstrap allowlist mismatch")
+        raw_cfg, cfg_d = _validate_deployed_runtime_config(runtime_config, repo_path)
         resolved: list[str] = []
-        for name, val in (
-            ("installation_authority", installation_authority), ("cell_id", cell_id),
-            ("head_register", head_register), ("checkpoint_register", checkpoint_register),
-        ):
+        for name, val in (("installation_authority", installation_authority), ("cell_id", cell_id), ("head_register", head_register), ("checkpoint_register", checkpoint_register)):
             cfg_str = _strict_str(cfg_d[name], f"runtime_config.{name}")
             if val is not None and val != cfg_str:
                 raise ValueError(f"Gov1InstallationPins: {name} mismatch against runtime_config")
@@ -241,12 +258,13 @@ class Gov1InstallationPins(InstallationPins):
         owner_principal: str = "principal:ronaldo", owner_tenant: str = "mbras",
         extra_pre_head_registry_locators: Sequence[dict[str, Any]] = (),
     ) -> Gov1InstallationPins:
+        repo_path = Path(root)
         cfg_dig, inst_auth, c_id, h_reg, ck_reg = _resolve_repo_pins_identity(
-            configuration_digest=configuration_digest, runtime_config=runtime_config,
+            repo_path=repo_path, configuration_digest=configuration_digest, runtime_config=runtime_config,
             installation_authority=installation_authority, cell_id=cell_id,
             head_register=head_register, checkpoint_register=checkpoint_register,
         )
-        ident = decomposition_governance.verified_run_context_identity(Path(root))
+        ident = decomposition_governance.verified_run_context_identity(repo_path)
         pre_locs = (
             ident["gate2_registry_locator"], ident["run_registry_locator"], ident["prerequisite_epoch3_registry_locator"],
             *(copy.deepcopy(dict(x)) for x in extra_pre_head_registry_locators),
@@ -259,47 +277,19 @@ class Gov1InstallationPins(InstallationPins):
 
 
 def _resolve_d4_pins(
-    pins: InstallationPins,
-    *,
-    config: Mapping[str, Any],
-    head_1_reg: Mapping[str, Any],
-    repo_root: Path | None = None,
+    pins: InstallationPins, *, config: Mapping[str, Any], head_1_reg: Mapping[str, Any], repo_root: Path | None = None
 ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
     require(isinstance(pins, InstallationPins), "invalid installation pins")
-    require(
-        isinstance(head_1_reg, Mapping) and type(head_1_reg.get("epoch")) is int and head_1_reg["epoch"] >= 1,
-        "invalid head_1_reg epoch",
-    )
+    require(isinstance(head_1_reg, Mapping) and type(head_1_reg.get("epoch")) is int and head_1_reg["epoch"] >= 1, "invalid head_1_reg epoch")
     h1_epoch = head_1_reg["epoch"]
     if isinstance(pins, Gov1InstallationPins):
-        require(
-            len(pins.pinned_pre_head_registry_locators) == h1_epoch - 1,
-            "pre-head registry locator count mismatch against head_1_reg epoch",
-        )
-        return (
-            copy.deepcopy(pins.pinned_run_context_locator),
-            tuple(copy.deepcopy(loc) for loc in pins.pinned_pre_head_registry_locators),
-        )
-    require(
-        isinstance(config, Mapping) and config.get("public_key_base64") == decomposition_governance.ANCHOR_PUBLIC,
-        "base InstallationPins fallback requires ANCHOR_PUBLIC",
-    )
-    require(
-        h1_epoch <= 4,
-        "base InstallationPins fallback requires head_1_reg epoch <= 4",
-    )
-    ident = decomposition_governance.verified_run_context_identity(
-        Path(repo_root) if repo_root is not None else REPO_ROOT
-    )
-    base_3 = (
-        ident["gate2_registry_locator"],
-        ident["run_registry_locator"],
-        ident["prerequisite_epoch3_registry_locator"],
-    )
-    return (
-        copy.deepcopy(ident["run_context_locator"]),
-        tuple(copy.deepcopy(loc) for loc in base_3[: h1_epoch - 1]),
-    )
+        require(len(pins.pinned_pre_head_registry_locators) == h1_epoch - 1, "pre-head registry locator count mismatch against head_1_reg epoch")
+        return copy.deepcopy(pins.pinned_run_context_locator), tuple(copy.deepcopy(loc) for loc in pins.pinned_pre_head_registry_locators)
+    require(isinstance(config, Mapping) and config.get("public_key_base64") == decomposition_governance.ANCHOR_PUBLIC, "base InstallationPins fallback requires ANCHOR_PUBLIC")
+    require(h1_epoch <= 4, "base InstallationPins fallback requires head_1_reg epoch <= 4")
+    ident = decomposition_governance.verified_run_context_identity(Path(repo_root) if repo_root is not None else REPO_ROOT)
+    base_3 = (ident["gate2_registry_locator"], ident["run_registry_locator"], ident["prerequisite_epoch3_registry_locator"])
+    return copy.deepcopy(ident["run_context_locator"]), tuple(copy.deepcopy(loc) for loc in base_3[: h1_epoch - 1])
 
 
 def _validate_anchor_signed_registry_entries(
@@ -336,29 +326,17 @@ def _verify_d4_registry_lineage_step(
 ) -> None:
     old_by_id = _validate_anchor_signed_registry_entries(older_reg, config, "older_registry")
     new_by_id = _validate_anchor_signed_registry_entries(newer_reg, config, "newer_registry")
-    require(
-        older_reg["epoch"] + 1 == newer_reg["epoch"],
-        "registry lineage epoch skipped or out of order",
-    )
-    require(
-        timestamp(older_reg["issued_at_utc"]) <= timestamp(newer_reg["issued_at_utc"]),
-        "registry lineage issued_at_utc reversed",
-    )
+    require(older_reg["epoch"] + 1 == newer_reg["epoch"], "registry lineage epoch skipped or out of order")
+    require(timestamp(older_reg["issued_at_utc"]) <= timestamp(newer_reg["issued_at_utc"]), "registry lineage issued_at_utc reversed")
     for key_id, old_entry in old_by_id.items():
         require(key_id in new_by_id, f"registry lineage dropped historical key {key_id}")
         new_entry = new_by_id[key_id]
-        old_ident = {k: old_entry[k] for k in _IMMUTABLE_KEY_FIELDS}
-        new_ident = {k: new_entry[k] for k in _IMMUTABLE_KEY_FIELDS}
         require(
-            canonicalize(old_ident) == canonicalize(new_ident),
+            canonicalize({k: old_entry[k] for k in _IMMUTABLE_KEY_FIELDS}) == canonicalize({k: new_entry[k] for k in _IMMUTABLE_KEY_FIELDS}),
             f"registry lineage mutated immutable identity of {key_id}",
         )
-        old_state = old_entry["lifecycle_state"]
-        new_state = new_entry["lifecycle_state"]
-        require(
-            new_state in _LIFECYCLE_TRANSITIONS[old_state],
-            f"non-monotonic key lifecycle transition {old_state!r} -> {new_state!r} for {key_id}",
-        )
+        old_state, new_state = old_entry["lifecycle_state"], new_entry["lifecycle_state"]
+        require(new_state in _LIFECYCLE_TRANSITIONS[old_state], f"non-monotonic key lifecycle transition {old_state!r} -> {new_state!r} for {key_id}")
 
 
 def _verify_d4_registry_membership(
@@ -717,6 +695,8 @@ def verify_gov1_convergence_candidate(
     )
     cert7a = _cert7a_mod()
     resolved_git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, conv_p["source_commit_sha"])
+    if corpus_bytes != resolved_git_blobs.get(cert7a.CORPUS_GIT_PATH[1]):
+        raise ValueError("verify_gov1_convergence_candidate: corpus_path bytes disagree with Git blob at source_commit_sha")
     resolved_d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
     _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
         wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sandbox_profile,

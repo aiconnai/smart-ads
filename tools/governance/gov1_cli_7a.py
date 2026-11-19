@@ -555,6 +555,8 @@ def _build_gov1_convergence_record(args: argparse.Namespace) -> tuple[dict[str, 
     _, whl_bytes = _read_nonempty_regular_file(Path(args.wheel), "wheel")
     _, corpus_bytes = _read_nonempty_regular_file(Path(args.corpus), "corpus")
     git_blobs, d26_blobs = _resolve_trusted_7a_preflights(args, source_commit_sha=params["source_commit_sha"], cmd=cmd)
+    if corpus_bytes != git_blobs.get(gov1_7a_certification.CORPUS_GIT_PATH[1]):
+        raise ValueError(f"{cmd}: corpus bytes disagree with Git blob at source_commit_sha")
     bound_env = store.get(bound_loc, expected_type=gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA)
     prov_env = store.get(bound_env["wheel_build_provenance_locator"], expected_type=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA)
     _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(

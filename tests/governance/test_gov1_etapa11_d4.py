@@ -181,20 +181,26 @@ def _assert_envelope_bad_preflight_stops_before_stage7(
     bad_blobs = _stage_d26_blobs_dir(world.store.root.parent / "bad_env_d26", baseline["d26_blobs"])
     role0, rel0, _, _ = PINNED_PIPEBOARD_D26_SPECS[0]
     (bad_blobs / f"{role0}__{Path(rel0).name}").write_bytes(b"corrupted")
+    bad_corpus = world.store.root.parent / "nonempty_divergent_corpus.json"
+    bad_corpus.write_bytes(baseline["corpus_bytes"] + b"\n")
     base_kw: dict[str, Any] = {
         "store": world.store, "seccomp_profile": baseline["seccomp_profile"], "wheel_path": baseline["wheel_path"],
         "corpus_path": world.corpus_path, "repo_root": REPO_ROOT, "legacy_blobs_dir": world.legacy_blobs_dir,
         "pr3_verifier": pr3_v, "probe_runner": spy_runner,
     }
-    for bad_over in ({"corpus_path": world.store.root.parent / "missing_corpus.json"}, {"legacy_blobs_dir": bad_blobs}):
+    for bad_over in ({"corpus_path": world.store.root.parent / "missing_corpus.json"}, {"corpus_path": bad_corpus}, {"legacy_blobs_dir": bad_blobs}):
         with pytest.raises(ValueError):
             gov1_convergence.verify_gov1_convergence_record(conv_s, **{**base_kw, **bad_over})
         assert spy_runner.calls == []
+    with pytest.raises(ValueError, match="corpus_path bytes disagree with Git blob"):
+        gov1_convergence._verify_convergence_envelope_core(
+            conv_s, store=world.store, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"],
+            corpus_path=bad_corpus, repo_root=REPO_ROOT, legacy_repo=None, legacy_blobs_dir=world.legacy_blobs_dir,
+            backend_wheel_dir=None, site_packages_dir=None, pr3_verifier=None, probe_runner=spy_runner, cli_auto_pr3=True,
+        )
+    assert spy_runner.calls == []
     orig_git = gov1_7a_certification.resolve_7a_smart_ads_git_blobs
-    monkeypatch.setattr(
-        gov1_7a_certification, "resolve_7a_smart_ads_git_blobs",
-        lambda r, sha: {**dict(orig_git(r, sha)), CORPUS_GIT_PATH[1]: b"tampered"},
-    )
+    monkeypatch.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda r, sha: {**dict(orig_git(r, sha)), CORPUS_GIT_PATH[1]: b"tampered"})
     with pytest.raises(ValueError):
         gov1_convergence.verify_gov1_convergence_record(conv_s, **base_kw)
     assert spy_runner.calls == []
@@ -222,21 +228,17 @@ def _assert_d4_rejects_all_5_divergent_preflight_inputs(
     world: Gov1D4World, baseline: Mapping[str, Any], conv_loc: dict[str, Any]
 ) -> None:
     prov_p = gov1_7a_negative.extract_provenance_payload(world.prov_env)
-    alt_whl = baseline["wheel_bytes"] + b"alt"
-    alt_whl_prov_p = {**prov_p, "wheel_digest": digest(alt_whl), "wheel": gov1_wheel.build_wheel_object_locator(alt_whl)}
-    alt_corpus = baseline["corpus_bytes"] + b"\n"
-    bad_d26_v = world.make_pr3_verifier()
-    object.__setattr__(bad_d26_v, "_resolved_d26_blobs", MappingProxyType({**dict(baseline["d26_blobs"]), PINNED_PIPEBOARD_D26_SPECS[0][1]: b"diverged"}))
-    cls_v = gov1_7a_certification.SevenAConstituentVerifier
-    bad_verifiers = [
-        cls_v(wheel_bytes=alt_whl, corpus_bytes=baseline["corpus_bytes"], stripped_provenance_payload=alt_whl_prov_p, resolved_git_blobs=baseline["git_blobs"], resolved_d26_blobs=baseline["d26_blobs"]),
-        cls_v(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=alt_corpus, stripped_provenance_payload=prov_p, resolved_git_blobs={**dict(baseline["git_blobs"]), CORPUS_GIT_PATH[1]: alt_corpus}, resolved_d26_blobs=baseline["d26_blobs"]),
-        cls_v(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=baseline["corpus_bytes"], stripped_provenance_payload={**prov_p, "built_at_utc": "2026-09-07T10:00:06Z"}, resolved_git_blobs=baseline["git_blobs"], resolved_d26_blobs=baseline["d26_blobs"]),
-        cls_v(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=baseline["corpus_bytes"], stripped_provenance_payload=prov_p, resolved_git_blobs={**dict(baseline["git_blobs"]), "src/smart_ads/adapters/pipeboard/__init__.py": b"# tampered\n"}, resolved_d26_blobs=baseline["d26_blobs"]),
-        bad_d26_v,
-    ]
-    for bad_v in bad_verifiers:
-        with pytest.raises(ValueError, match="diverged from bound preflight"):
+    single_attr_mutations: tuple[tuple[str, Any, str], ...] = (
+        ("_wheel_bytes", baseline["wheel_bytes"] + b"alt", "wheel_bytes or corpus_bytes diverged"),
+        ("_corpus_bytes", baseline["corpus_bytes"] + b"\n", "wheel_bytes or corpus_bytes diverged"),
+        ("_stripped_provenance_payload", {**prov_p, "built_at_utc": "2026-09-07T10:00:06Z"}, "stripped_provenance_payload diverged"),
+        ("_resolved_git_blobs", MappingProxyType({**dict(baseline["git_blobs"]), "src/smart_ads/adapters/pipeboard/__init__.py": b"# tampered\n"}), "resolved_git_blobs or resolved_d26_blobs diverged"),
+        ("_resolved_d26_blobs", MappingProxyType({**dict(baseline["d26_blobs"]), PINNED_PIPEBOARD_D26_SPECS[0][1]: b"diverged"}), "resolved_git_blobs or resolved_d26_blobs diverged"),
+    )
+    for attr_name, mutated_val, expected_msg in single_attr_mutations:
+        bad_v = world.make_pr3_verifier()
+        object.__setattr__(bad_v, attr_name, mutated_val)
+        with pytest.raises(ValueError, match=expected_msg):
             world.make_verifier(pr3_verifier=bad_v).verify_artifact(conv_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
         assert world.runtime.cas_calls == 0
 
@@ -350,37 +352,35 @@ def _assert_from_repo_prerequisites_d4_bootstrap(
         "cell_id": "synthetic-gov1-cell", "head_register": "head:gov1-synthetic",
         "checkpoint_register": "checkpoint:gov1-synthetic", "installation_authority": "synthetic-gov1-installation",
     }
+    for bad_cfg, bad_match in (
+        ({**deployed_cfg, "trust_anchor_id": "   "}, "trust_anchor_id"),
+        ({**deployed_cfg, "validity": {"from": "2028-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z"}}, "validity"),
+        ({**deployed_cfg, "inventory_bootstrap_profile": {**world.profiles[INVENTORY], "domain_prefix": "WRONG\n"}}, "protected profile mismatch"),
+        ({**deployed_cfg, "anti_rollback_checkpoint_profile": {**world.profiles[CHECKPOINT], "domain_prefix": "WRONG\n"}}, "protected profile mismatch"),
+    ):
+        with pytest.raises(ValueError, match=bad_match):
+            Gov1InstallationPins.from_repo_prerequisites(REPO_ROOT, runtime_config=bad_cfg)
     pins_cfg = Gov1InstallationPins.from_repo_prerequisites(REPO_ROOT, runtime_config=deployed_cfg)
     pins_dig = Gov1InstallationPins.from_repo_prerequisites(
-        REPO_ROOT, configuration_digest=digest(canonicalize(deployed_cfg)),
-        installation_authority="synthetic-gov1-installation", cell_id="synthetic-gov1-cell",
-        head_register="head:gov1-synthetic", checkpoint_register="checkpoint:gov1-synthetic",
+        REPO_ROOT, configuration_digest=digest(canonicalize(deployed_cfg)), installation_authority="synthetic-gov1-installation",
+        cell_id="synthetic-gov1-cell", head_register="head:gov1-synthetic", checkpoint_register="checkpoint:gov1-synthetic",
     )
     assert pins_cfg == pins_dig and canonicalize(pins_cfg.pinned_run_context_locator) == canonicalize(ident["run_context_locator"])
     rt_real = MemoryProtectedRuntime(deployed_cfg, world.head_loc, world.checkpoint_loc)
     v_real = gov1_convergence.Gov1AdmissionVerifier(rt_real, pins_cfg, Store(REPO_ROOT / "docs/governance/cell-objects"), world.adr)
     assert canonicalize(v_real._configuration(rt_real.authenticated_clock())) == canonicalize(deployed_cfg)
+    _assert_e2e_admission_via_repo_pins(tmp_path, world, keys, baseline, monkeypatch)
 
+
+def _assert_e2e_admission_via_repo_pins(
+    tmp_path: Path, world: Gov1D4World, keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, conv_loc = _build_signed_conv_in_world(world, keys, baseline)
     syn_root = tmp_path / "syn_repo_root"
     orig_vrc = decomposition_governance.verified_run_context_identity
-    monkeypatch.setattr(
-        decomposition_governance, "verified_run_context_identity",
-        lambda r=REPO_ROOT: {
-            "run_context_locator": RUN_CONTEXT_LOCATOR, "gate2_registry_locator": world.pre_head_reg_locs[0],
-            "run_registry_locator": world.pre_head_reg_locs[1], "prerequisite_epoch3_registry_locator": world.pre_head_reg_locs[2],
-        } if Path(r) == syn_root else orig_vrc(r),
-    )
-    pins_e2e = Gov1InstallationPins.from_repo_prerequisites(
-        syn_root, configuration_digest=digest(world.runtime.config), installation_authority="synthetic-gov1-installation",
-        cell_id="synthetic-gov1-cell", head_register="head:gov1-synthetic", checkpoint_register="checkpoint:gov1-synthetic",
-        owner_tenant="synthetic-tenant",
-    )
-    v_e2e = gov1_convergence.Gov1AdmissionVerifier(
-        world.runtime, pins_e2e, world.store, world.adr, inventory_locator=world.inventory_loc,
-        pr3_verifier=world.make_pr3_verifier(), isolated_probe_runner=world.probe_runner,
-        corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir,
-    )
+    monkeypatch.setattr(decomposition_governance, "verified_run_context_identity", lambda r=REPO_ROOT: {"run_context_locator": RUN_CONTEXT_LOCATOR, "gate2_registry_locator": world.pre_head_reg_locs[0], "run_registry_locator": world.pre_head_reg_locs[1], "prerequisite_epoch3_registry_locator": world.pre_head_reg_locs[2]} if Path(r) == syn_root else orig_vrc(r))
+    pins_e2e = Gov1InstallationPins.from_repo_prerequisites(syn_root, configuration_digest=digest(world.runtime.config), installation_authority="synthetic-gov1-installation", cell_id="synthetic-gov1-cell", head_register="head:gov1-synthetic", checkpoint_register="checkpoint:gov1-synthetic", owner_tenant="synthetic-tenant")
+    v_e2e = gov1_convergence.Gov1AdmissionVerifier(world.runtime, pins_e2e, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=world.make_pr3_verifier(), isolated_probe_runner=world.probe_runner, corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir)
     assert v_e2e.verify_artifact(conv_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)["verification_status"] == "VERIFIED"
     assert world.runtime.cas_calls == 1
 
@@ -517,35 +517,53 @@ def _assert_indirect_7a_and_four_leaf_forks_rejected(
     keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any], fk_loc: dict[str, Any],
 ) -> None:
     fake_pr3 = _StructuralFakePr3Verifier(neg_ts=EXECUTED_AT_UTC, cert_ts=EXECUTED_AT_UTC)
+    fk_sbx_loc = _resign_on_fork(w_fk, w_fk.sandbox_env, "security_owner", fk_loc)
+    mcp_for_sbx = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.mcp_env), "sealed_sandbox_profile_locator": fk_sbx_loc}, "security_verifier", w_fk.registry_loc)
+    neg_for_sbx = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.neg_env), "sealed_sandbox_profile_locator": fk_sbx_loc}, "7a_verifier", w_fk.registry_loc)
+    cert_for_sbx = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.cert7a_env), "sealed_sandbox_profile_locator": fk_sbx_loc, "negative_security_test_report_locator": neg_for_sbx}, "independent_7a_verifier", w_fk.registry_loc)
+    fk_prov_loc = _resign_on_fork(w_fk, w_fk.prov_env, "build_provenance_verifier", fk_loc)
+    bound_for_prov = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.boundary_env), "wheel_build_provenance_locator": fk_prov_loc}, "build_boundary_verifier", w_fk.registry_loc)
+    neg_for_prov = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.neg_env), "wheel_build_provenance_locator": fk_prov_loc}, "7a_verifier", w_fk.registry_loc)
+    cert_for_prov = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.cert7a_env), "wheel_build_provenance_locator": fk_prov_loc, "wheel_boundary_report_locator": bound_for_prov, "negative_security_test_report_locator": neg_for_prov}, "independent_7a_verifier", w_fk.registry_loc)
+    fk_bound_loc = _resign_on_fork(w_fk, w_fk.boundary_env, "build_boundary_verifier", fk_loc)
+    cert_for_bound = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.cert7a_env), "wheel_boundary_report_locator": fk_bound_loc}, "independent_7a_verifier", w_fk.registry_loc)
+    fk_mcp_loc = _resign_on_fork(w_fk, w_fk.mcp_env, "security_verifier", fk_loc)
     fk_neg_loc = _resign_on_fork(w_fk, w_fk.neg_env, "7a_verifier", fk_loc)
-    cert_for_neg = {**copy.deepcopy(w_fk.cert7a_env), "negative_security_test_report_locator": fk_neg_loc}
-    cert_for_neg_loc = _resign_on_fork(w_fk, cert_for_neg, "independent_7a_verifier", w_fk.registry_loc)
+    cert_for_neg = _resign_on_fork(w_fk, {**copy.deepcopy(w_fk.cert7a_env), "negative_security_test_report_locator": fk_neg_loc}, "independent_7a_verifier", w_fk.registry_loc)
     fk_cert_loc = _resign_on_fork(w_fk, w_fk.cert7a_env, "independent_7a_verifier", fk_loc)
-
-    drv_fk_loc = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["capability"]["driver_contract_locator"]), "provider_port_policy_owner", fk_loc)
-    snap_fk_loc = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["capability"]["registry_snapshot_locator"]), "registry_publisher", fk_loc)
-    inv_fk_loc = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["fixture_evidence"]["cases"][0]["expected_resource_inventory_locator"]), "private_registry_publisher", fk_loc)
-    git_fk_loc = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["fixture_evidence"]["corpus_git_locator"]), "git_provenance_verifier", fk_loc)
-
-    leaf_muts: list[Callable[[dict[str, Any]], None]] = [
-        lambda c: c["capability"].update(driver_contract_locator=drv_fk_loc),
-        lambda c: c["capability"].update(registry_snapshot_locator=snap_fk_loc),
-        lambda c: c["fixture_evidence"]["cases"][0].update(expected_resource_inventory_locator=inv_fk_loc),
-        lambda c: c["fixture_evidence"].update(corpus_git_locator=git_fk_loc),
+    conv_overrides: list[dict[str, Any]] = [
+        {"sealed_sandbox_profile_locator": fk_sbx_loc, "mcp_rejection_matrix_report_locator": mcp_for_sbx, "negative_security_test_report_locator": neg_for_sbx, "certification_7a_record_locator": cert_for_sbx},
+        {"wheel_boundary_report_locator": bound_for_prov, "negative_security_test_report_locator": neg_for_prov, "certification_7a_record_locator": cert_for_prov},
+        {"wheel_boundary_report_locator": fk_bound_loc, "certification_7a_record_locator": cert_for_bound},
+        {"mcp_rejection_matrix_report_locator": fk_mcp_loc},
+        {"negative_security_test_report_locator": fk_neg_loc, "certification_7a_record_locator": cert_for_neg},
+        {"certification_7a_record_locator": fk_cert_loc},
+        *_build_four_leaf_fork_conv_overrides(w_fk, fk_loc),
     ]
-    conv_variants: list[tuple[dict[str, Any], dict[str, Any]]] = [(fk_neg_loc, cert_for_neg_loc), (w_fk.neg_loc, fk_cert_loc)]
-    for mut_fn in leaf_muts:
-        cert_m = copy.deepcopy(w_fk.cert7a_env)
-        mut_fn(cert_m)
-        conv_variants.append((w_fk.neg_loc, _resign_on_fork(w_fk, cert_m, "independent_7a_verifier", w_fk.registry_loc)))
-    for neg_l, cert_l in conv_variants:
-        conv_u = gov1_convergence.build_gov1_convergence_record_envelope(
-            **{**_make_conv_base_kwargs(w_fk, keys, baseline), "negative_security_test_report_locator": neg_l, "certification_7a_record_locator": cert_l},
-            store=w_fk.store, pr3_verifier=fake_pr3,
-        )
+    for ov in conv_overrides:
+        conv_u = gov1_convergence.build_gov1_convergence_record_envelope(**{**_make_conv_base_kwargs(w_fk, keys, baseline), **ov}, store=w_fk.store, pr3_verifier=fake_pr3)
         conv_l = w_fk.store.put(p1.sign_envelope(conv_u, w_fk.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], keys["gov1_convergence_verifier"][0]))
         with pytest.raises(ValueError, match="chain_registries_by_epoch"):
             v_fk.verify_artifact(conv_l, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
+
+
+def _build_four_leaf_fork_conv_overrides(w_fk: Gov1D4World, fk_loc: dict[str, Any]) -> list[dict[str, Any]]:
+    drv_fk = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["capability"]["driver_contract_locator"]), "provider_port_policy_owner", fk_loc)
+    snap_fk = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["capability"]["registry_snapshot_locator"]), "registry_publisher", fk_loc)
+    inv_fk = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["fixture_evidence"]["cases"][0]["expected_resource_inventory_locator"]), "private_registry_publisher", fk_loc)
+    git_fk = _resign_on_fork(w_fk, w_fk.store.get(w_fk.cert7a_env["fixture_evidence"]["corpus_git_locator"]), "git_provenance_verifier", fk_loc)
+    muts: list[Callable[[dict[str, Any]], None]] = [
+        lambda c: c["capability"].update(driver_contract_locator=drv_fk),
+        lambda c: c["capability"].update(registry_snapshot_locator=snap_fk),
+        lambda c: c["fixture_evidence"]["cases"][0].update(expected_resource_inventory_locator=inv_fk),
+        lambda c: c["fixture_evidence"].update(corpus_git_locator=git_fk),
+    ]
+    out: list[dict[str, Any]] = []
+    for mut_fn in muts:
+        cert_m = copy.deepcopy(w_fk.cert7a_env)
+        mut_fn(cert_m)
+        out.append({"certification_7a_record_locator": _resign_on_fork(w_fk, cert_m, "independent_7a_verifier", w_fk.registry_loc)})
+    return out
 
 
 @pytest.mark.parametrize("legacy_mode", ["blobs_dir", "git_repo"])
@@ -576,7 +594,14 @@ def test_post_cas_mutations_fail_closed_before_observe_head_and_clock(
         legacy_repo=fake_leg_repo if legacy_mode == "git_repo" else None,
         legacy_blobs_dir=None if legacy_mode == "git_repo" else blobs_dir,
     )
-    with pytest.raises(ValueError):
+    expected_err = {
+        "store_leaf": "locator must address canonical envelope bytes|store object mutated during admission",
+        "wheel_file": "wheel_path bytes mutated during admission",
+        "corpus_file": "corpus_path bytes mutated during admission",
+        "git_repo_blob": "smart_ads Git blobs mutated during admission",
+        "legacy_source": "Git blob OID or SHA-256 mismatch|pinned d26 legacy blobs mutated during admission",
+    }
+    with pytest.raises(ValueError, match=expected_err[mutation_kind]):
         v.verify_artifact(conv_loc, seccomp_profile=baseline_artifacts["seccomp_profile"], wheel_path=whl_copy, repo_root=REPO_ROOT)
     assert world.runtime.cas_calls == 1 and world.runtime.observe_calls == 0
     if legacy_mode == "git_repo":
@@ -660,29 +685,20 @@ def _run_cli_candidate_flow(
 
 
 def _run_cli_envelope_flow(
-    f: Mapping[str, Any],
-    world: Gov1D4World,
-    keys: dict[str, tuple[Path, bytes, str]],
-    baseline: Mapping[str, Any],
-    capsys: pytest.CaptureFixture[str],
+    f: Mapping[str, Any], world: Gov1D4World, keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any], capsys: pytest.CaptureFixture[str]
 ) -> None:
     d: Path = f["dir"]
     neg_u_p, cert_u_p, conv_u_p = d / "neg_u.json", d / "cert_u.json", d / "conv_u.json"
     assert cli.main(["build-negative-security-report", "--mode", "envelope", "--params", str(f["neg_params"]), "--wheel", str(baseline["wheel_path"]), "--sandbox-profile-locator", str(f["sbx_loc"]), "--provenance-locator", str(f["prov_loc"]), "--signer-key-id", keys["7a_verifier"][2], "--registry-locator", str(f["reg_loc"]), "--out", str(neg_u_p)]) == 0
     neg_s = p1.sign_envelope(json.loads(neg_u_p.read_text(encoding="utf-8")), world.profiles[gov1_convergence.NEGATIVE_SECURITY_SCHEMA]["domain_prefix"], keys["7a_verifier"][0])
-    neg_s_p = _write_cli_json(d / "neg_s.json", neg_s)
-    neg_loc_p = _write_cli_json(d / "neg_loc.json", world.store.put(neg_s))
+    neg_s_p, neg_loc_p = _write_cli_json(d / "neg_s.json", neg_s), _write_cli_json(d / "neg_loc.json", world.store.put(neg_s))
     assert cli.main(["verify-negative-security-report", "--in", str(neg_s_p), "--wheel", str(baseline["wheel_path"]), "--sandbox-profile", str(f["sbx_e"]), "--seccomp-profile", str(f["seccomp"]), "--provenance", str(f["prov_e"]), "--pubkey-raw-base64", base64.b64encode(keys["7a_verifier"][1]).decode("ascii")]) == 0
-
     assert cli.main(["build-certification-7a-record", "--mode", "envelope", "--params", str(f["cert_params"]), "--store-root", str(world.store.root), "--wheel", str(baseline["wheel_path"]), "--corpus", str(world.corpus_path), "--repo", str(REPO_ROOT), "--legacy-blobs-dir", str(world.legacy_blobs_dir), "--sandbox-profile-locator", str(f["sbx_loc"]), "--provenance-locator", str(f["prov_loc"]), "--boundary-report-locator", str(f["bound_loc"]), "--negative-report-locator", str(neg_loc_p), "--signer-key-id", keys["independent_7a_verifier"][2], "--registry-locator", str(f["reg_loc"]), "--out", str(cert_u_p)]) == 0
     cert_s = p1.sign_envelope(json.loads(cert_u_p.read_text(encoding="utf-8")), world.profiles[gov1_convergence.CERTIFICATION_7A_SCHEMA]["domain_prefix"], keys["independent_7a_verifier"][0])
-    cert_s_p = _write_cli_json(d / "cert_s.json", cert_s)
-    cert_loc_p = _write_cli_json(d / "cert_loc.json", world.store.put(cert_s))
+    cert_s_p, cert_loc_p = _write_cli_json(d / "cert_s.json", cert_s), _write_cli_json(d / "cert_loc.json", world.store.put(cert_s))
     assert cli.main(["verify-certification-7a-record", "--in", str(cert_s_p), "--store-root", str(world.store.root), "--wheel", str(baseline["wheel_path"]), "--corpus", str(world.corpus_path), "--repo", str(REPO_ROOT), "--legacy-blobs-dir", str(world.legacy_blobs_dir), "--pubkey-raw-base64", base64.b64encode(keys["independent_7a_verifier"][1]).decode("ascii")]) == 0
-
     assert cli.main(["build-gov1-convergence-record", "--mode", "envelope", "--params", str(f["conv_params"]), "--store-root", str(world.store.root), "--wheel", str(baseline["wheel_path"]), "--corpus", str(world.corpus_path), "--repo", str(REPO_ROOT), "--seccomp-profile", str(f["seccomp"]), "--legacy-blobs-dir", str(world.legacy_blobs_dir), "--sandbox-profile-locator", str(f["sbx_loc"]), "--boundary-report-locator", str(f["bound_loc"]), "--mcp-rejection-report-locator", str(f["mcp_loc"]), "--negative-report-locator", str(neg_loc_p), "--certification-7a-record-locator", str(cert_loc_p), "--signer-key-id", keys["gov1_convergence_verifier"][2], "--registry-locator", str(f["reg_loc"]), "--out", str(conv_u_p)]) == 0
-    conv_s = p1.sign_envelope(json.loads(conv_u_p.read_text(encoding="utf-8")), world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], keys["gov1_convergence_verifier"][0])
-    conv_s_p = _write_cli_json(d / "conv_s.json", conv_s)
+    conv_s_p = _write_cli_json(d / "conv_s.json", p1.sign_envelope(json.loads(conv_u_p.read_text(encoding="utf-8")), world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], keys["gov1_convergence_verifier"][0]))
     capsys.readouterr()
     assert cli.main(["verify-gov1-convergence-record", "--in", str(conv_s_p), "--store-root", str(world.store.root), "--wheel", str(baseline["wheel_path"]), "--corpus", str(world.corpus_path), "--repo", str(REPO_ROOT), "--seccomp-profile", str(f["seccomp"]), "--legacy-blobs-dir", str(world.legacy_blobs_dir), "--pubkey-raw-base64", base64.b64encode(keys["gov1_convergence_verifier"][1]).decode("ascii")]) == 0
     env_out = json.loads(capsys.readouterr().out)
@@ -690,45 +706,39 @@ def _run_cli_envelope_flow(
 
 
 def test_cli_four_7a_and_convergence_commands_fail_exit_1_on_git_or_legacy_tamper(
-    tmp_path: Path,
-    baseline_artifacts: dict[str, Any],
-    synthetic_gov1_keys: dict[str, tuple[Path, bytes, str]],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, baseline_artifacts: dict[str, Any], synthetic_gov1_keys: dict[str, tuple[Path, bytes, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     world = Gov1D4World(tmp_path / "cli_tamper", synthetic_gov1_keys, baseline_artifacts)
     f = _prepare_cli_fixture_files(tmp_path / "cli_tamper_f", world, baseline_artifacts)
     d: Path = f["dir"]
     cert_p = _write_cli_json(d / "cert_s.json", world.cert7a_env)
     conv_s, _ = _build_signed_conv_in_world(world, synthetic_gov1_keys, baseline_artifacts)
-    conv_p = _write_cli_json(d / "conv_s.json", conv_s)
-    neg_loc_p = _write_cli_json(d / "neg_loc.json", world.neg_loc)
-    cert_loc_p = _write_cli_json(d / "cert_loc.json", world.cert7a_loc)
-    empty_git = tmp_path / "empty_legacy_git"
+    conv_p, neg_loc_p, cert_loc_p = _write_cli_json(d / "conv_s.json", conv_s), _write_cli_json(d / "neg_loc.json", world.neg_loc), _write_cli_json(d / "cert_loc.json", world.cert7a_loc)
+    empty_git, fake_leg, bad_corpus = tmp_path / "empty_legacy_git", tmp_path / "fake_leg_repo", tmp_path / "bad_corpus.json"
     empty_git.mkdir()
+    fake_leg.mkdir()
+    bad_corpus.write_bytes(baseline_artifacts["corpus_bytes"] + b"\n")
     subprocess.run(["git", "init", "-q", str(empty_git)], check=True)
     bad_blobs = _stage_d26_blobs_dir(tmp_path / "bad_blobs", baseline_artifacts["d26_blobs"])
     role0, rel0, _, _ = PINNED_PIPEBOARD_D26_SPECS[0]
     (bad_blobs / f"{role0}__{Path(rel0).name}").write_bytes(b"corrupted-legacy-blob")
-
-    cmds = _make_four_7a_cli_arg_builders(d, f, world, synthetic_gov1_keys, baseline_artifacts, cert_p, conv_p, neg_loc_p, cert_loc_p)
-    for idx, build_argv in enumerate(cmds):
-        assert cli.main(build_argv(["--legacy-repo", str(empty_git)], repo_dir=REPO_ROOT, tag=f"eg{idx}")) == 1
-        assert cli.main(build_argv(["--legacy-blobs-dir", str(bad_blobs)], repo_dir=REPO_ROOT, tag=f"bb{idx}")) == 1
-
-    fake_leg = tmp_path / "fake_leg_repo"
-    fake_leg.mkdir()
-    seen: list[tuple[str, ...]] = []
-    _install_fake_d26_git_runner(monkeypatch, fake_leg, bad_blobs, seen)
-    for idx, build_argv in enumerate(cmds):
-        assert cli.main(build_argv(["--legacy-repo", str(fake_leg)], repo_dir=REPO_ROOT, tag=f"fl{idx}")) == 1
-    assert len(seen) >= 4
-
     good_blobs = _stage_d26_blobs_dir(tmp_path / "good_blobs", baseline_artifacts["d26_blobs"])
+    cmds = _make_four_7a_cli_arg_builders(d, f, world, synthetic_gov1_keys, baseline_artifacts, cert_p, conv_p, neg_loc_p, cert_loc_p)
+    seen: list[tuple[str, ...]] = []
+    with monkeypatch.context() as mp:
+        _forbid_local_stage7_probes(mp)
+        for idx, build_argv in enumerate(cmds):
+            assert cli.main(build_argv(["--legacy-repo", str(empty_git)], repo_dir=REPO_ROOT, tag=f"eg{idx}")) == 1
+            assert cli.main(build_argv(["--legacy-blobs-dir", str(bad_blobs)], repo_dir=REPO_ROOT, tag=f"bb{idx}")) == 1
+            argv_bc = build_argv(["--legacy-blobs-dir", str(good_blobs)], repo_dir=REPO_ROOT, tag=f"bc{idx}")
+            argv_bc[argv_bc.index("--corpus") + 1] = str(bad_corpus)
+            assert cli.main(argv_bc) == 1
+        _install_fake_d26_git_runner(mp, fake_leg, bad_blobs, seen)
+        for idx, build_argv in enumerate(cmds):
+            assert cli.main(build_argv(["--legacy-repo", str(fake_leg)], repo_dir=REPO_ROOT, tag=f"fl{idx}")) == 1
+    assert len(seen) >= 4
     orig_git = gov1_7a_certification.resolve_7a_smart_ads_git_blobs
-    monkeypatch.setattr(
-        gov1_7a_certification, "resolve_7a_smart_ads_git_blobs",
-        lambda r, sha: {**dict(orig_git(r, sha)), "src/smart_ads/adapters/pipeboard/wire.py": b"# tampered git blob\n"},
-    )
+    monkeypatch.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda r, sha: {**dict(orig_git(r, sha)), "src/smart_ads/adapters/pipeboard/wire.py": b"# tampered git blob\n"})
     for idx, build_argv in enumerate(cmds):
         assert cli.main(build_argv(["--legacy-blobs-dir", str(good_blobs)], repo_dir=REPO_ROOT, tag=f"gt{idx}")) == 1
 
