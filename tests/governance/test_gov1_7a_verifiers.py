@@ -62,7 +62,7 @@ import tools.governance.gov1_7a_negative as gov1_7a_negative
 import tools.governance.gov1_7a_replay_helpers as gov1_7a_replay_helpers
 import tools.governance.gov1_7a_certification as gov1_7a_certification
 from tools.governance.jcs import canonicalize
-from tools.governance.locator import Store, digest, make_locator
+from tools.governance.locator import Store, digest, json_digest, make_locator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "tests" / "certification_7a" / "fixtures"
@@ -99,21 +99,15 @@ def built_head_wheel(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]
     wheel_path, snapshot = gov1_wheel.build_reproducible_wheel(REPO_ROOT, out_dir)
     inspection = gov1_wheel.inspect_wheel_boundary(wheel_path)
     mcp_exec = gov1_mcp.execute_mcp_rejection_matrix_on_wheel(wheel_path)
-    return {
-        "wheel_path": wheel_path,
-        "wheel_bytes": wheel_path.read_bytes(),
-        "snapshot": snapshot,
-        "inspection": inspection,
-        "mcp_execution": mcp_exec,
-    }
+    return {"wheel_path": wheel_path, "wheel_bytes": wheel_path.read_bytes(), "snapshot": snapshot, "inspection": inspection, "mcp_execution": mcp_exec}
 
 
 def test_new_gov1_7a_modules_ast_purity_no_assert_and_no_smart_ads_imports() -> None:
-    new_names = ("gov1_7a_runner.py", "gov1_7a_negative.py", "gov1_7a_replay_helpers.py", "gov1_7a_certification.py")
-    for name in new_names:
+    budgets = (("gov1_7a_runner.py", 580), ("gov1_7a_negative.py", 650), ("gov1_7a_replay_helpers.py", 760), ("gov1_7a_certification.py", 760))
+    for name, max_lines in budgets:
         mod_path = REPO_ROOT / "tools" / "governance" / name
         src = mod_path.read_text(encoding="utf-8")
-        assert len(src.splitlines()) <= 800, f"{name} exceeds 800 lines"
+        assert len(src.splitlines()) <= max_lines, f"{name} exceeds {max_lines} lines"
         tree = ast.parse(src, filename=str(mod_path))
         assert [n for n in ast.walk(tree) if isinstance(n, ast.Assert)] == []
         for node in ast.walk(tree):
@@ -210,24 +204,11 @@ def test_probe_runner_propagates_across_all_wheel_and_mcp_entrypoints(
     assert rebuilt_path.read_bytes() == built_head_wheel["wheel_bytes"]
 
     run_ctx = decomposition_governance.verified_run_context_identity(REPO_ROOT)["run_context_locator"]
-    prov_env = gov1_wheel.build_wheel_build_provenance_envelope(
-        migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, built_at_utc="2026-09-07T10:00:05Z",
-        snapshot=snap, source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH,
-        schema_bundle_digest=insp["schema_bundle_digest"], wheel_bytes=built_head_wheel["wheel_bytes"],
-        registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID,
-    )
+    prov_env = gov1_wheel.build_wheel_build_provenance_envelope(migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, built_at_utc="2026-09-07T10:00:05Z", snapshot=snap, source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH, schema_bundle_digest=insp["schema_bundle_digest"], wheel_bytes=built_head_wheel["wheel_bytes"], registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID)
     prov_loc = make_locator(gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(prov_env))
-    bound_env = gov1_wheel.build_wheel_boundary_report_envelope(
-        migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, verified_at_utc="2026-09-07T10:00:10Z",
-        source_commit_sha=snap.commit_sha, build_backend_digest=snap.build_backend_digest,
-        wheel_build_provenance_locator=prov_loc, inspection=insp, registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID,
-    )
+    bound_env = gov1_wheel.build_wheel_boundary_report_envelope(migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, verified_at_utc="2026-09-07T10:00:10Z", source_commit_sha=snap.commit_sha, build_backend_digest=snap.build_backend_digest, wheel_build_provenance_locator=prov_loc, inspection=insp, registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID)
     sbx_loc = make_locator(gov1_sandbox.SANDBOX_PROFILE_SCHEMA, b'{"sbx":1}')
-    mcp_env = gov1_mcp.build_mcp_rejection_matrix_report_envelope(
-        migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, executed_at_utc="2026-09-07T10:00:12Z",
-        source_commit_sha=snap.commit_sha, build_backend_digest=snap.build_backend_digest,
-        sealed_sandbox_profile_locator=sbx_loc, execution=mcp_exec, registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID,
-    )
+    mcp_env = gov1_mcp.build_mcp_rejection_matrix_report_envelope(migration_run_context_locator=run_ctx, build_run_id=_BUILD_RUN_ID, executed_at_utc="2026-09-07T10:00:12Z", source_commit_sha=snap.commit_sha, build_backend_digest=snap.build_backend_digest, sealed_sandbox_profile_locator=sbx_loc, execution=mcp_exec, registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID)
     gov1_wheel.verify_wheel_boundary_report(bound_env, wheel_path=whl_path, probe_runner=runner)
     gov1_wheel.verify_wheel_build_provenance(prov_env, repo_root=REPO_ROOT, wheel_path=whl_path, probe_runner=runner)
     gov1_mcp.verify_mcp_rejection_matrix_report(mcp_env, wheel_path=whl_path, probe_runner=runner)
@@ -328,17 +309,14 @@ def test_load_isolated_pinned_meta_reducer_ast_builtins_and_prec28() -> None:
 
 
 class _FakeSealedOciSupervisorPort:
-    def __init__(self, *, sbx_payload: Mapping[str, Any], reg_state: ResolvedRegistryState, inv_pair: tuple[ArtifactLocator, ExpectedResourceInventory], tamper_readback: bool = False) -> None:
-        self._sbx = dict(sbx_payload)
-        self._reg_state = reg_state
-        self._inv_pair = inv_pair
-        self._tamper = tamper_readback
+    def __init__(self, *, sbx_payload: Mapping[str, Any], reg_state: ResolvedRegistryState, inv_pair: tuple[ArtifactLocator, ExpectedResourceInventory], tamper_val: Any = "none") -> None:
+        self._sbx, self._reg_state, self._inv_pair, self._tamper = dict(sbx_payload), reg_state, inv_pair, tamper_val
         self.reducer_calls = 0
 
     def readback_sandbox_environment(self) -> Mapping[str, Any]:
         shared = {k: copy.deepcopy(self._sbx[k]) for k in self._sbx if k not in {"resource_limits", "migration_run_context_locator", "issued_at_utc", "validity"}}
-        if self._tamper:
-            shared["rootfs_read_only"] = False
+        if self._tamper != "none":
+            shared["rootfs_read_only"] = self._tamper
         return {**shared, "effective_writable_mounts": ["/tmp"], "seccomp_enforced_before_entry": True, "network_absent": True, "loopback_absent": True}
 
     def execute_7a_corpus(
@@ -548,31 +526,14 @@ def _assemble_neg_and_cert7a_artifacts(
 
 
 def test_hermetic_execution_blocked_without_oci_and_injects_pinned_reducer_in_oci(world_7a: dict[str, Any]) -> None:
-    blocked = gov1_7a_runner.run_7a_hermetic_execution(
-        wheel_bytes=world_7a["wheel_bytes"], corpus_bytes=world_7a["corpus_bytes"],
-        sandbox_profile=world_7a["sbx_env"], seccomp_profile=world_7a["seccomp"],
-        resolved_d26_blobs=world_7a["d26_blobs"], supervisor=None,
-    )
-    assert blocked["status"] == "BLOCKED"
-
-    bad_sup = _FakeSealedOciSupervisorPort(
-        sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"], tamper_readback=True
-    )
-    blocked_rb = gov1_7a_runner.run_7a_hermetic_execution(
-        wheel_bytes=world_7a["wheel_bytes"], corpus_bytes=world_7a["corpus_bytes"],
-        sandbox_profile=world_7a["sbx_env"], seccomp_profile=world_7a["seccomp"],
-        resolved_d26_blobs=world_7a["d26_blobs"], supervisor=bad_sup,
-    )
-    assert blocked_rb["status"] == "BLOCKED" and bad_sup.reducer_calls == 0
-
+    kw = {"wheel_bytes": world_7a["wheel_bytes"], "corpus_bytes": world_7a["corpus_bytes"], "sandbox_profile": world_7a["sbx_env"], "seccomp_profile": world_7a["seccomp"], "resolved_d26_blobs": world_7a["d26_blobs"]}
+    assert gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=None)["status"] == "BLOCKED"
+    for bad_val in (False, 1):
+        bad_sup = _FakeSealedOciSupervisorPort(sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"], tamper_val=bad_val)
+        assert gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=bad_sup)["status"] == "BLOCKED" and bad_sup.reducer_calls == 0
     good_sup = _FakeSealedOciSupervisorPort(sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"])
-    executed = gov1_7a_runner.run_7a_hermetic_execution(
-        wheel_bytes=world_7a["wheel_bytes"], corpus_bytes=world_7a["corpus_bytes"],
-        sandbox_profile=world_7a["sbx_env"], seccomp_profile=world_7a["seccomp"],
-        resolved_d26_blobs=world_7a["d26_blobs"], supervisor=good_sup,
-    )
-    assert executed["status"] == "EXECUTED" and good_sup.reducer_calls >= 1
-    assert executed["execution"]["statuses"] == ["complete", "failed", "partial", "partial"]
+    executed = gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=good_sup)
+    assert executed["status"] == "EXECUTED" and good_sup.reducer_calls >= 1 and executed["execution"]["statuses"] == ["complete", "failed", "partial", "partial"]
 
 
 def test_replay_helpers_differential_parity_across_wire_outcomes_and_completeness(world_7a: dict[str, Any]) -> None:
@@ -585,17 +546,14 @@ def test_replay_helpers_differential_parity_across_wire_outcomes_and_completenes
             gov1_7a_replay_helpers.loads_pipeboard_wire_json(bad_json)
 
     hdr_ok = [("Content-Type", "application/json")]
+    overlap_next = b'{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"data\\":{},\\"paging\\":{\\"next\\":\\"https://x\\"}}"}]}}'
     wire_matrix = [
-        (False, None, hdr_ok, [b"{}"]),
-        (True, None, hdr_ok, [b"{}"]),
-        (True, 401, hdr_ok, [b"{}"]),
-        (True, 503, hdr_ok, [b"{}"]),
-        (True, 200, [("Content-Type", "text/html")], [b"{}"]),
-        (True, 200, [("Content-Type", "application/json"), ("Content-Length", "10")], [b"{}"]),
+        (False, None, hdr_ok, [b"{}"]), (True, None, hdr_ok, [b"{}"]), (True, 401, hdr_ok, [b"{}"]), (True, 503, hdr_ok, [b"{}"]),
+        (True, 200, [("Content-Type", "text/html")], [b"{}"]), (True, 200, [("Content-Type", "application/json"), ("Content-Length", "10")], [b"{}"]),
         (True, 200, hdr_ok, [b'{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"err"}}']),
         (True, 200, [("Content-Type", "application/json"), ("Content-Length", "2097153")], [b"{}"]),
         (True, 200, hdr_ok, [b'{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\\"data\\":[],\\"paging\\":{\\"next\\":\\"cur\\"}}"}]}}']),
-        (True, 200, hdr_ok, [b'{"jsonrpc":"2.0","id":1,"extra":1,"result":{}}']),
+        (True, 200, hdr_ok, [overlap_next]), (True, 200, hdr_ok, [b'{"jsonrpc":"2.0","id":1,"extra":1,"result":{}}']),
     ]
     for net_ok, status, hdrs, chunks in wire_matrix:
         with pytest.raises(PipeboardWireRejection) as w_exc:
@@ -603,6 +561,8 @@ def test_replay_helpers_differential_parity_across_wire_outcomes_and_completenes
         with pytest.raises(gov1_7a_replay_helpers.Gov1WireRejection) as g_exc:
             gov1_7a_replay_helpers.parse_pipeboard_http_and_mcp_envelope(network_ok=net_ok, http_status=status, headers=hdrs, body_chunks=chunks)
         assert (w_exc.value.code, w_exc.value.category, w_exc.value.outcome.to_dict()) == (g_exc.value.code, g_exc.value.category, g_exc.value.outcome)
+        if chunks == [overlap_next]:
+            assert g_exc.value.code == "non_empty_paging_next"
     _assert_gates_1_to_3_differential_parity(world_7a)
 
 
@@ -712,6 +672,7 @@ def test_passive_7a_certification_candidate_envelope_and_seven_a_constituent_ver
     )
     assert cand_res["mode"] == "candidate" and env_res["mode"] == "envelope"
     _assert_seven_a_constituent_verifier_and_tamper_guards(world_7a)
+    _assert_store_locator_typed_batch_and_pinned_mapping_guards(world_7a)
 
 
 def _assert_seven_a_constituent_verifier_and_tamper_guards(world_7a: dict[str, Any]) -> None:
@@ -756,3 +717,39 @@ def _assert_seven_a_constituent_verifier_and_tamper_guards(world_7a: dict[str, A
             world_7a["cert_env"], store=world_7a["store"], wheel_bytes=world_7a["wheel_bytes"],
             corpus_bytes=b"{invalid-json", resolved_git_blobs=world_7a["git_blobs"], resolved_d26_blobs=world_7a["d26_blobs"],
         )
+
+
+def _assert_store_locator_typed_batch_and_pinned_mapping_guards(world_7a: dict[str, Any]) -> None:
+    store = world_7a["store"]
+    kw = {"store": store, "wheel_bytes": world_7a["wheel_bytes"], "corpus_bytes": world_7a["corpus_bytes"], "resolved_git_blobs": world_7a["git_blobs"], "resolved_d26_blobs": world_7a["d26_blobs"]}
+    for loc_field, schema in (("wheel_boundary_report_locator", gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA), ("negative_security_test_report_locator", gov1_7a_negative.NEGATIVE_SECURITY_REPORT_SCHEMA)):
+        bad_loc_cert = copy.deepcopy(world_7a["cert_env"])
+        bad_loc_cert[loc_field] = make_locator(schema, b'{"unresolvable":1}')
+        with pytest.raises(ValueError):
+            gov1_7a_certification.verify_certification_7a_replay_bytes(_fake_sign_dict(bad_loc_cert), **kw, wheel_boundary_report=world_7a["bound_env"], negative_security_report=world_7a["neg_env"])
+    alt_bound = _fake_sign_dict({**copy.deepcopy(world_7a["bound_env"]), "verified_at_utc": "2026-09-07T10:00:11Z"})
+    with pytest.raises(ValueError, match="diverges from Store"):
+        gov1_7a_certification.verify_certification_7a_replay_bytes(world_7a["cert_env"], **kw, wheel_boundary_report=alt_bound)
+
+    bad_batch_cert = copy.deepcopy(world_7a["cert_env"])
+    c0 = bad_batch_cert["fixture_evidence"]["cases"][0]
+    c0["observation_batch"]["transport_outcome"]["network_ok"] = 1
+    c0["execution_binding_digest"] = json_digest({"case_id": c0["case_id"], "sandbox_instance_ref": c0["sandbox_instance_ref"], "started_at_utc": c0["started_at_utc"], "ended_at_utc": c0["ended_at_utc"], "wheel_digest": bad_batch_cert["wheel_digest"], "corpus_digest": bad_batch_cert["fixture_evidence"]["corpus_digest"], "admitted_collection_digest": c0["admitted_collection_digest"], "expected_resource_inventory_digest": c0["expected_resource_inventory_locator"]["content_digest"], "sealed_sandbox_profile_digest": world_7a["sbx_spec_digest"], "runtime_readback": c0["runtime_readback"], "effective_resource_limits": c0["effective_resource_limits"], "usage": c0["usage"], "termination": c0["termination"], "observation_batch": c0["observation_batch"]})
+    with pytest.raises(ValueError):
+        gov1_7a_certification.verify_certification_7a_replay_bytes(_fake_sign_dict(bad_batch_cert), **kw)
+
+    alt_drv = copy.deepcopy(store.get(world_7a["cert_env"]["capability"]["driver_contract_locator"]))
+    alt_drv["metric_source_mappings"]["metric:spend_v1"] = "source-metric:provider:pipeboard.spend_alt:v1"
+    alt_drv_loc = store.put(_fake_sign_dict(alt_drv))
+    alt_snap = copy.deepcopy(store.get(world_7a["cert_env"]["capability"]["registry_snapshot_locator"]))
+    alt_snap["capabilities"][0]["driver_contract_locator"] = alt_drv_loc
+    alt_snap["capabilities"][0]["driver_contract_digest"] = alt_drv_loc["content_digest"]
+    alt_snap_loc = store.put(_fake_sign_dict(alt_snap))
+    alt_cert = copy.deepcopy(world_7a["cert_env"])
+    alt_cert["capability"].update({"driver_contract_locator": alt_drv_loc, "driver_contract_digest": alt_drv_loc["content_digest"], "registry_snapshot_locator": alt_snap_loc})
+    alt_cert["fixture_evidence"]["regression_fixture"] = gov1_7a_replay_helpers.build_canonical_regression_fixture(alt_snap_loc["content_digest"])
+    for case_d in alt_cert["fixture_evidence"]["cases"]:
+        case_d["source_contract_ref"] = f"opaque-driver-contract:{alt_drv_loc['content_digest']}"
+    alt_cert["mapping_rules_digest"] = gov1_7a_certification.compute_mapping_rules_digest([store.get(l) for l in alt_cert["mapping_artifact_locators"]], alt_drv["metric_source_mappings"])
+    with pytest.raises(ValueError, match="pinned contract invariants"):
+        gov1_7a_certification.verify_certification_7a_replay_bytes(_fake_sign_dict(alt_cert), **kw)

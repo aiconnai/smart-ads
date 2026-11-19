@@ -19,8 +19,9 @@ import unicodedata
 
 from tools.governance.decomposition_scope import run_git_offline
 from tools.governance.gov1_7a_negative import (
-    _KEY_REGISTRY_SCHEMA, _exact_str, _hex40_str, _key_id_str, _opaque_ref_str,
-    _sha256_str, _strict_str, _utc_sec_micros, _verify_p1_integrity,
+    _KEY_REGISTRY_SCHEMA, _SHARED_RUNTIME_16_FIELDS, _exact_str, _hex40_str, _key_id_str,
+    _opaque_ref_str, _sha256_str, _strict_str, _utc_sec_micros, _validate_runtime_readback_dict,
+    _verify_p1_integrity,
 )
 from tools.governance.gov1_7a_replay_helpers import _parse_iso_date, validate_resource_ref_str
 from tools.governance.gov1_sandbox import verify_sealed_sandbox_profile
@@ -99,18 +100,6 @@ _RESTRICTED_REDUCER_BUILTINS: Final[Mapping[str, Any]] = MappingProxyType(
         "tuple": tuple,
     }
 )
-_SHARED_SBX_16_KEYS: Final[frozenset[str]] = frozenset(
-    "profile_id runtime_kind platform rootfs_read_only oci_image_digest runner_binary_digest "
-    "exact_environment namespaces read_only_mounts fresh_tmpfs_mounts masked_empty_mounts "
-    "host_bind_mounts_forbidden all_capabilities_dropped no_new_privs "
-    "inherited_fds_above_2_closed seccomp_profile_digest".split()
-)
-_READBACK_20_KEYS: Final[set[str]] = set(_SHARED_SBX_16_KEYS) | {
-    "effective_writable_mounts",
-    "seccomp_enforced_before_entry",
-    "network_absent",
-    "loopback_absent",
-}
 
 
 @runtime_checkable
@@ -330,21 +319,14 @@ def load_isolated_pinned_meta_reducer(
 def _verify_oci_readback_matches_profile(
     readback: object, sandbox_payload: Mapping[str, Any]
 ) -> dict[str, Any]:
-    if not isinstance(readback, Mapping):
-        raise ValueError("oci_readback: expected Mapping")
-    rb_dict = copy.deepcopy(dict(readback))
-    exact_fields(rb_dict, _READBACK_20_KEYS, "oci_readback")
-    if (
-        rb_dict["effective_writable_mounts"] != ["/tmp"]
-        or rb_dict["seccomp_enforced_before_entry"] is not True
-        or rb_dict["network_absent"] is not True
-        or rb_dict["loopback_absent"] is not True
-    ):
-        raise ValueError("oci_readback: writable mounts, seccomp, or network isolation invariant failed")
-    for key in _SHARED_SBX_16_KEYS:
-        if rb_dict[key] != sandbox_payload[key]:
-            raise ValueError(f"oci_readback.{key}: mismatch against sealed_sandbox_profile/v1")
-    return rb_dict
+    checked_rb = _validate_runtime_readback_dict(readback, "oci_readback")
+    if checked_rb["seccomp_enforced_before_entry"] is not True:
+        raise ValueError("oci_readback: seccomp_enforced_before_entry must be True")
+    rb_proj = {k: checked_rb[k] for k in _SHARED_RUNTIME_16_FIELDS}
+    sbx_proj = {k: sandbox_payload[k] for k in _SHARED_RUNTIME_16_FIELDS}
+    if canonicalize(rb_proj) != canonicalize(sbx_proj):
+        raise ValueError("oci_readback: canonical byte mismatch against sealed_sandbox_profile/v1")
+    return checked_rb
 
 
 def run_7a_hermetic_execution(

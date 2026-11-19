@@ -26,11 +26,10 @@ _RUN_CONTEXT_SCHEMA: Final[str] = "smart_ads/migration_run_context/v1"
 _KEY_REGISTRY_SCHEMA: Final[str] = "smart_ads/key_authorization_registry/v1"
 
 MANDATORY_7A_NEGATIVE_CASES: Final[tuple[str, ...]] = tuple(
-    "cpu_limit_enforced credential_paths_denied env_is_exact_allowlist "
-    "file_size_limit_enforced host_dev_denied host_home_denied host_proc_denied "
-    "host_sys_denied inherited_fd_denied memory_limit_enforced output_limit_enforced "
-    "pids_limit_enforced process_creation_denied socket_denied tmpfs_limit_enforced "
-    "wall_clock_limit_enforced write_outside_tmp_denied".split()
+    "cpu_limit_enforced credential_paths_denied env_is_exact_allowlist file_size_limit_enforced "
+    "host_dev_denied host_home_denied host_proc_denied host_sys_denied inherited_fd_denied "
+    "memory_limit_enforced output_limit_enforced pids_limit_enforced process_creation_denied "
+    "socket_denied tmpfs_limit_enforced wall_clock_limit_enforced write_outside_tmp_denied".split()
 )
 PINNED_7A_NEGATIVE_SUITE_DIGEST: Final[str] = json_digest({
     "suite_id": "smart_ads/7a_negative_security_suite/v1",
@@ -42,9 +41,7 @@ _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
 _HEX40_RE: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{40}\Z")
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(r"\Akey:ed25519:[0-9a-f]{64}\Z")
 _OPAQUE_REF_RE: Final[re.Pattern[str]] = re.compile(r"\A[a-z][a-z0-9_]*:[A-Za-z0-9._:-]+\Z")
-_UTC_SEC_RE: Final[re.Pattern[str]] = re.compile(
-    r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z\Z"
-)
+_UTC_SEC_RE: Final[re.Pattern[str]] = re.compile(r"\A([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z\Z")
 _EPOCH_DATE: Final[datetime.date] = datetime.date(1970, 1, 1)
 
 _EXACT_ENV: Final[Mapping[str, str]] = MappingProxyType({
@@ -57,50 +54,32 @@ _EXACT_TMPFS_MOUNTS: Final[tuple[str, ...]] = ("/tmp",)
 _EXACT_MASKED_MOUNTS: Final[tuple[str, ...]] = ("/proc", "/sys", "/dev", "/home", "/run", "/var/run")
 _EXACT_TMP_FLAGS: Final[tuple[str, ...]] = ("nodev", "noexec", "nosuid")
 _ALLOWED_CAUSES: Final[frozenset[str]] = frozenset(
-    "clean_exit cpu_time_limit memory_oom pids_max_limit tmpfs_enospc "
-    "rlimit_fsize stdout_limit stderr_limit wall_clock_watchdog".split()
+    "clean_exit cpu_time_limit memory_oom pids_max_limit tmpfs_enospc rlimit_fsize stdout_limit stderr_limit wall_clock_watchdog".split()
 )
 _ALLOWED_SIGNALS: Final[frozenset[str]] = frozenset({"SIGKILL", "SIGXCPU", "SIGXFSZ", "SIGTERM"})
 _SHARED_RUNTIME_16_FIELDS: Final[frozenset[str]] = frozenset(
     "profile_id runtime_kind platform rootfs_read_only oci_image_digest runner_binary_digest "
     "exact_environment namespaces read_only_mounts fresh_tmpfs_mounts masked_empty_mounts "
-    "host_bind_mounts_forbidden all_capabilities_dropped no_new_privs "
-    "inherited_fds_above_2_closed seccomp_profile_digest".split()
+    "host_bind_mounts_forbidden all_capabilities_dropped no_new_privs inherited_fds_above_2_closed seccomp_profile_digest".split()
 )
 _SPEC_17_FIELDS: Final[frozenset[str]] = _SHARED_RUNTIME_16_FIELDS | {"resource_limits"}
 _SANDBOX_PAYLOAD_20_KEYS: Final[set[str]] = set(_SPEC_17_FIELDS) | {"migration_run_context_locator", "issued_at_utc", "validity"}
 _WHEEL_PROVENANCE_16_KEYS: Final[set[str]] = set(
-    "migration_run_context_locator build_run_id built_at_utc repository source_commit_sha "
-    "source_tree_oid source_date_epoch python_abi_tag build_backend build_backend_version "
-    "build_backend_digest pyproject_sha256 uv_lock_sha256 schema_bundle_digest wheel wheel_digest".split()
+    "migration_run_context_locator build_run_id built_at_utc repository source_commit_sha source_tree_oid "
+    "source_date_epoch python_abi_tag build_backend build_backend_version build_backend_digest "
+    "pyproject_sha256 uv_lock_sha256 schema_bundle_digest wheel wheel_digest".split()
 )
 _PINNED_INT_LIMITS: Final[tuple[tuple[str, int], ...]] = (
     ("cgroup_version", 2), ("cpu_time_limit_seconds", 120), ("memory_max_bytes", 1_073_741_824),
     ("memory_swap_max_bytes", 0), ("pids_max", 32), ("rlimit_fsize_bytes", 67_108_864),
-    ("stdout_max_bytes", 8_388_608), ("stderr_max_bytes", 8_388_608),
-    ("wall_clock_timeout_seconds", 300), ("termination_grace_ms", 1000),
+    ("stdout_max_bytes", 8_388_608), ("stderr_max_bytes", 8_388_608), ("wall_clock_timeout_seconds", 300), ("termination_grace_ms", 1000),
 )
 _RESOURCE_LIMITS_KEYS: Final[set[str]] = {"profile_version", "cpu_max", "tmpfs_limits"} | {k for k, _ in _PINNED_INT_LIMITS}
-_READBACK_KEYS: Final[set[str]] = set(_SHARED_RUNTIME_16_FIELDS) | {
-    "effective_writable_mounts", "seccomp_enforced_before_entry", "network_absent", "loopback_absent"
-}
-_USAGE_KEYS: Final[set[str]] = set(
-    "cpu_time_us memory_peak_bytes pids_peak tmpfs_peak_bytes tmpfs_peak_inodes "
-    "max_file_bytes stdout_bytes stderr_bytes oom_delta oom_kill_delta pids_max_delta".split()
-)
-_TERM_KEYS: Final[set[str]] = set(
-    "cause supervisor_terminated_cgroup exit_code signal watchdog_elapsed_ms "
-    "grace_elapsed_ms whole_cgroup_empty force_kill_used".split()
-)
-_RUN_KEYS: Final[set[str]] = set(
-    "sandbox_instance_ref execution_binding_digest started_at_utc ended_at_utc "
-    "runtime_readback effective_resource_limits usage termination observation".split()
-)
-_NEG_COMMON_12_KEYS: Final[set[str]] = set(
-    "migration_run_context_locator build_run_id executed_at_utc source_commit_sha "
-    "build_backend_digest schema_bundle_digest wheel_digest oci_image_digest "
-    "runner_binary_digest test_suite_digest declared_resource_limits cases".split()
-)
+_READBACK_KEYS: Final[set[str]] = set(_SHARED_RUNTIME_16_FIELDS) | {"effective_writable_mounts", "seccomp_enforced_before_entry", "network_absent", "loopback_absent"}
+_USAGE_KEYS: Final[set[str]] = set("cpu_time_us memory_peak_bytes pids_peak tmpfs_peak_bytes tmpfs_peak_inodes max_file_bytes stdout_bytes stderr_bytes oom_delta oom_kill_delta pids_max_delta".split())
+_TERM_KEYS: Final[set[str]] = set("cause supervisor_terminated_cgroup exit_code signal watchdog_elapsed_ms grace_elapsed_ms whole_cgroup_empty force_kill_used".split())
+_RUN_KEYS: Final[set[str]] = set("sandbox_instance_ref execution_binding_digest started_at_utc ended_at_utc runtime_readback effective_resource_limits usage termination observation".split())
+_NEG_COMMON_12_KEYS: Final[set[str]] = set("migration_run_context_locator build_run_id executed_at_utc source_commit_sha build_backend_digest schema_bundle_digest wheel_digest oci_image_digest runner_binary_digest test_suite_digest declared_resource_limits cases".split())
 _NEG_CANDIDATE_14_KEYS: Final[set[str]] = _NEG_COMMON_12_KEYS | {"sealed_sandbox_profile_candidate_ref", "wheel_build_provenance_candidate_ref"}
 _NEG_ENVELOPE_PAYLOAD_14_KEYS: Final[set[str]] = _NEG_COMMON_12_KEYS | {"sealed_sandbox_profile_locator", "wheel_build_provenance_locator"}
 _NEG_ENVELOPE_16_KEYS: Final[set[str]] = _NEG_ENVELOPE_PAYLOAD_14_KEYS | {"$schema", "integrity"}
@@ -129,11 +108,7 @@ _STATIC_RESOURCE_SPECS: Final[Mapping[str, tuple[str, bool, frozenset[str], str,
 
 
 def _strict_str(value: object, label: str) -> str:
-    if (
-        type(value) is not str or not value or value != value.strip()
-        or any(0xD800 <= ord(c) <= 0xDFFF or ord(c) < 32 or ord(c) == 127 for c in value)
-        or not unicodedata.is_normalized("NFC", value)
-    ):
+    if type(value) is not str or not value or value != value.strip() or any(0xD800 <= ord(c) <= 0xDFFF or ord(c) < 32 or ord(c) == 127 for c in value) or not unicodedata.is_normalized("NFC", value):
         raise ValueError(f"{label}: expected non-empty stripped NFC string without ASCII control chars")
     return value
 
@@ -179,10 +154,8 @@ def _key_id_str(value: object, label: str) -> str:
 
 def _opaque_ref_str(value: object, label: str, *, expected_prefix: str | None = None) -> str:
     checked = _strict_str(value, label)
-    if _OPAQUE_REF_RE.fullmatch(checked) is None:
+    if _OPAQUE_REF_RE.fullmatch(checked) is None or (expected_prefix is not None and checked.split(":", 1)[0] != expected_prefix):
         raise ValueError(f"{label}: invalid opaque_ref {checked!r}")
-    if expected_prefix is not None and checked.split(":", 1)[0] != expected_prefix:
-        raise ValueError(f"{label}: expected prefix {expected_prefix!r}")
     return checked
 
 
@@ -220,8 +193,7 @@ def _verify_p1_integrity(envelope: Mapping[str, Any], *, label: str, require_sig
     integ = envelope.get("integrity")
     if not isinstance(integ, Mapping):
         raise ValueError(f"{label}.integrity: expected JSON object")
-    keys = set(integ.keys())
-    unsigned_keys = {"key_id", "key_registry_snapshot_locator"}
+    keys, unsigned_keys = set(integ.keys()), {"key_id", "key_registry_snapshot_locator"}
     signed_keys = unsigned_keys | {"content_digest", "signature_base64"}
     if keys not in ((signed_keys,) if require_signed else (unsigned_keys, signed_keys)):
         raise ValueError(f"{label}.integrity: invalid P1 integrity key set")
@@ -238,19 +210,13 @@ def _verify_p1_integrity(envelope: Mapping[str, Any], *, label: str, require_sig
 
 
 def _validate_resource_limits_dict(raw: object, label: str) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"{label}: expected Mapping")
-    d = dict(raw)
+    d = dict(raw) if isinstance(raw, Mapping) else {}
     exact_fields(d, _RESOURCE_LIMITS_KEYS, label)
     _exact_str(d["profile_version"], SANDBOX_RESOURCES_VERSION, f"{label}.profile_version")
     _exact_typed_dict(d["cpu_max"], {"quota_us": 100_000, "period_us": 100_000}, f"{label}.cpu_max")
-    if not isinstance(d["tmpfs_limits"], Mapping):
-        raise ValueError(f"{label}.tmpfs_limits: expected Mapping")
-    tmp_outer = dict(d["tmpfs_limits"])
+    tmp_outer = dict(d["tmpfs_limits"]) if isinstance(d["tmpfs_limits"], Mapping) else {}
     exact_fields(tmp_outer, {"/tmp"}, f"{label}.tmpfs_limits")
-    if not isinstance(tmp_outer["/tmp"], Mapping):
-        raise ValueError(f"{label}.tmpfs_limits./tmp: expected Mapping")
-    tmp_inner = dict(tmp_outer["/tmp"])
+    tmp_inner = dict(tmp_outer["/tmp"]) if isinstance(tmp_outer["/tmp"], Mapping) else {}
     exact_fields(tmp_inner, {"size_bytes", "inodes_max", "mount_flags"}, f"{label}.tmpfs_limits./tmp")
     _strict_int(tmp_inner["size_bytes"], f"{label}.size_bytes", minimum=268_435_456, maximum=268_435_456)
     _strict_int(tmp_inner["inodes_max"], f"{label}.inodes_max", minimum=4096, maximum=4096)
@@ -273,9 +239,7 @@ def _validate_shared_runtime_16(m: Mapping[str, Any], label: str) -> None:
 
 
 def _validate_runtime_readback_dict(raw: object, label: str) -> dict[str, Any]:
-    if not isinstance(raw, Mapping):
-        raise ValueError(f"{label}: expected Mapping")
-    d = dict(raw)
+    d = dict(raw) if isinstance(raw, Mapping) else {}
     exact_fields(d, _READBACK_KEYS, label)
     _validate_shared_runtime_16(d, label)
     _exact_str_list(d["effective_writable_mounts"], _EXACT_TMPFS_MOUNTS, f"{label}.effective_writable_mounts")
@@ -294,10 +258,8 @@ def _validate_usage_and_termination(raw_u: object, raw_t: object, label: str) ->
     exact_fields(t, _TERM_KEYS, f"{label}.termination")
     for k in _USAGE_KEYS:
         _strict_int(u[k], f"{label}.usage.{k}")
-    if type(t["cause"]) is not str or t["cause"] not in _ALLOWED_CAUSES:
-        raise ValueError(f"{label}.termination.cause: invalid {t['cause']!r}")
-    if type(t["supervisor_terminated_cgroup"]) is not bool or type(t["force_kill_used"]) is not bool:
-        raise ValueError(f"{label}.termination: expected bool flags")
+    if type(t["cause"]) is not str or t["cause"] not in _ALLOWED_CAUSES or type(t["supervisor_terminated_cgroup"]) is not bool or type(t["force_kill_used"]) is not bool:
+        raise ValueError(f"{label}.termination: invalid cause or bool flags")
     if t["exit_code"] is not None:
         _strict_int(t["exit_code"], f"{label}.termination.exit_code", minimum=0, maximum=255)
     if t["signal"] is not None and (type(t["signal"]) is not str or t["signal"] not in _ALLOWED_SIGNALS):
@@ -311,7 +273,6 @@ def _validate_usage_and_termination(raw_u: object, raw_t: object, label: str) ->
 
 
 def evaluate_breach_predicates(usage: Mapping[str, Any], termination: Mapping[str, Any]) -> dict[str, bool]:
-    """Evaluate the 9 closed 7A resource-ceiling breach predicates."""
     u, t = _validate_usage_and_termination(usage, termination, "breach_predicates")
     return {
         "B_cpu": u["cpu_time_us"] >= 120_000_000,
@@ -325,7 +286,7 @@ def evaluate_breach_predicates(usage: Mapping[str, Any], termination: Mapping[st
 
 
 def _validate_observation_dict(raw_obs: object, label: str) -> dict[str, Any]:
-    if not isinstance(raw_obs, Mapping) or len(raw_obs) == 0:
+    if not isinstance(raw_obs, Mapping) or not raw_obs:
         raise ValueError(f"{label}: expected non-empty observation mapping")
     out: dict[str, Any] = {}
     for k, v in raw_obs.items():
@@ -342,9 +303,7 @@ def _validate_observation_dict(raw_obs: object, label: str) -> dict[str, Any]:
 
 
 def _validate_run_dict(raw_run: object, label: str) -> dict[str, Any]:
-    if not isinstance(raw_run, Mapping):
-        raise ValueError(f"{label}: expected Mapping")
-    r = dict(raw_run)
+    r = dict(raw_run) if isinstance(raw_run, Mapping) else {}
     exact_fields(r, _RUN_KEYS, label)
     _opaque_ref_str(r["sandbox_instance_ref"], f"{label}.sandbox_instance_ref")
     _sha256_str(r["execution_binding_digest"], f"{label}.execution_binding_digest")
@@ -354,18 +313,13 @@ def _validate_run_dict(raw_run: object, label: str) -> dict[str, Any]:
     lim = _validate_resource_limits_dict(r["effective_resource_limits"], f"{label}.effective_resource_limits")
     u, t = _validate_usage_and_termination(r["usage"], r["termination"], label)
     obs = _validate_observation_dict(r["observation"], f"{label}.observation")
-    return {
-        "sandbox_instance_ref": r["sandbox_instance_ref"], "execution_binding_digest": r["execution_binding_digest"],
-        "started_at_utc": r["started_at_utc"], "ended_at_utc": r["ended_at_utc"],
-        "runtime_readback": rb, "effective_resource_limits": lim, "usage": u, "termination": t, "observation": obs,
-    }
+    return {"sandbox_instance_ref": r["sandbox_instance_ref"], "execution_binding_digest": r["execution_binding_digest"], "started_at_utc": r["started_at_utc"], "ended_at_utc": r["ended_at_utc"], "runtime_readback": rb, "effective_resource_limits": lim, "usage": u, "termination": t, "observation": obs}
 
 
 def compute_negative_run_execution_binding_digest(
     *, case_id: str, subrun_index: int, run: Mapping[str, Any],
     wheel_digest: str, test_suite_digest: str, sealed_sandbox_profile_digest: str,
 ) -> str:
-    """Compute canonical JCS SHA-256 execution binding digest for one negative security run."""
     _strict_str(case_id, "case_id")
     _strict_int(subrun_index, "subrun_index")
     r = _validate_run_dict(run, "run")
@@ -382,14 +336,8 @@ def compute_negative_run_execution_binding_digest(
 
 def _check_denial_run(case_id: str, run: Mapping[str, Any], label: str) -> None:
     t = run["termination"]
-    if any(evaluate_breach_predicates(run["usage"], t).values()):
-        raise ValueError(f"{label}: denial case must have all B_* == False")
-    if (
-        run["runtime_readback"]["seccomp_enforced_before_entry"] is not True
-        or t["supervisor_terminated_cgroup"] is not False or t["cause"] != "clean_exit"
-        or t["exit_code"] != 0 or t["signal"] is not None or t["force_kill_used"] is not False
-    ):
-        raise ValueError(f"{label}: invalid clean-exit/seccomp state for denial case")
+    if any(evaluate_breach_predicates(run["usage"], t).values()) or run["runtime_readback"]["seccomp_enforced_before_entry"] is not True or t["supervisor_terminated_cgroup"] is not False or t["cause"] != "clean_exit" or t["exit_code"] != 0 or t["signal"] is not None or t["force_kill_used"] is not False:
+        raise ValueError(f"{label}: invalid clean-exit/seccomp/ceiling state for denial case")
     if case_id in _EXACT_DENIAL_OBS:
         _exact_typed_dict(run["observation"], _EXACT_DENIAL_OBS[case_id], f"{label}.observation")
         return
@@ -400,19 +348,11 @@ def _check_denial_run(case_id: str, run: Mapping[str, Any], label: str) -> None:
     _strict_int(obs["denied_probe_count"], f"{label}.denied_probe_count", minimum=min_cnt)
 
 
-def _check_resource_common(
-    run: Mapping[str, Any], *, label: str, breach_key: str, seccomp: bool, signals: frozenset[str], cause: str
-) -> None:
+def _check_resource_common(run: Mapping[str, Any], *, label: str, breach_key: str, seccomp: bool, signals: frozenset[str], cause: str) -> None:
     fired = [k for k, v in evaluate_breach_predicates(run["usage"], run["termination"]).items() if v]
-    if fired != [breach_key]:
-        raise ValueError(f"{label}: expected one-hot breach [{breach_key!r}], got {fired!r}")
     t = run["termination"]
-    if (
-        run["runtime_readback"]["seccomp_enforced_before_entry"] is not seccomp
-        or t["supervisor_terminated_cgroup"] is not True or t["exit_code"] is not None
-        or t["signal"] is None or t["signal"] not in signals or t["cause"] != cause
-    ):
-        raise ValueError(f"{label}: resource termination/seccomp invariant violated")
+    if fired != [breach_key] or run["runtime_readback"]["seccomp_enforced_before_entry"] is not seccomp or t["supervisor_terminated_cgroup"] is not True or t["exit_code"] is not None or t["signal"] is None or t["signal"] not in signals or t["cause"] != cause:
+        raise ValueError(f"{label}: one-hot breach or resource termination/seccomp invariant violated")
 
 
 def _check_resource_case(case_id: str, runs: list[dict[str, Any]], label: str) -> None:
@@ -444,18 +384,13 @@ def _check_resource_case(case_id: str, runs: list[dict[str, Any]], label: str) -
         raise ValueError(f"{label}: invalid pids.max counters")
 
 
-def _validate_cases_list(
-    cases: object, *, declared_limits: Mapping[str, Any], oci_digest: str, runner_digest: str, executed_us: int
-) -> list[dict[str, Any]]:
+def _validate_cases_list(cases: object, *, declared_limits: Mapping[str, Any], oci_digest: str, runner_digest: str, executed_us: int) -> list[dict[str, Any]]:
     if type(cases) is not list:
         raise ValueError("negative_security_test_report.cases: expected JSON array list")
-    checked_cases: list[dict[str, Any]] = []
-    seen_refs: set[str] = set()
+    checked_cases, seen_refs, decl_b = [], set(), canonicalize(dict(declared_limits))
     for idx, raw_case in enumerate(cases):
         lbl = f"negative_security_test_report.cases[{idx}]"
-        if not isinstance(raw_case, Mapping):
-            raise ValueError(f"{lbl}: expected Mapping")
-        c = dict(raw_case)
+        c = dict(raw_case) if isinstance(raw_case, Mapping) else {}
         exact_fields(c, {"case_id", "outcome", "runs"}, lbl)
         cid = _strict_str(c["case_id"], f"{lbl}.case_id")
         if cid not in MANDATORY_7A_NEGATIVE_CASES:
@@ -469,12 +404,7 @@ def _validate_cases_list(
             if r["sandbox_instance_ref"] in seen_refs:
                 raise ValueError(f"duplicate sandbox_instance_ref {r['sandbox_instance_ref']!r}")
             seen_refs.add(r["sandbox_instance_ref"])
-            if (
-                r["effective_resource_limits"] != declared_limits
-                or r["runtime_readback"]["oci_image_digest"] != oci_digest
-                or r["runtime_readback"]["runner_binary_digest"] != runner_digest
-                or _utc_sec_micros(r["ended_at_utc"], "end") > executed_us
-            ):
+            if canonicalize(r["effective_resource_limits"]) != decl_b or r["runtime_readback"]["oci_image_digest"] != oci_digest or r["runtime_readback"]["runner_binary_digest"] != runner_digest or _utc_sec_micros(r["ended_at_utc"], "end") > executed_us:
                 raise ValueError(f"{lbl}: run limits, digests, or executed_at_utc chronology mismatch")
         checked_cases.append({"case_id": cid, "outcome": "passed", "runs": runs})
     if [c["case_id"] for c in checked_cases] != list(MANDATORY_7A_NEGATIVE_CASES):
@@ -482,36 +412,23 @@ def _validate_cases_list(
     return checked_cases
 
 
-def _build_neg_common_payload(
-    *, migration_run_context_locator: Mapping[str, Any], build_run_id: str, executed_at_utc: str,
-    source_commit_sha: str, build_backend_digest: str, schema_bundle_digest: str, wheel_digest: str,
-    oci_image_digest: str, runner_binary_digest: str, declared_resource_limits: Mapping[str, Any],
-    cases: Sequence[Mapping[str, Any]], test_suite_digest: str,
-) -> dict[str, Any]:
-    run_ctx = copy.deepcopy(dict(migration_run_context_locator))
+def _build_neg_common_payload(**kw: Any) -> dict[str, Any]:
+    run_ctx = copy.deepcopy(dict(kw["migration_run_context_locator"]))
     validate_locator(run_ctx, _RUN_CONTEXT_SCHEMA)
-    _strict_str(build_run_id, "build_run_id")
-    executed_us = _utc_sec_micros(executed_at_utc, "executed_at_utc")
-    _hex40_str(source_commit_sha, "source_commit_sha")
-    for name, val in (
-        ("build_backend_digest", build_backend_digest), ("schema_bundle_digest", schema_bundle_digest),
-        ("wheel_digest", wheel_digest), ("oci_image_digest", oci_image_digest),
-        ("runner_binary_digest", runner_binary_digest), ("test_suite_digest", test_suite_digest),
-    ):
-        _sha256_str(val, name)
-    _exact_str(test_suite_digest, PINNED_7A_NEGATIVE_SUITE_DIGEST, "test_suite_digest")
-    checked_limits = _validate_resource_limits_dict(declared_resource_limits, "declared_resource_limits")
-    checked_cases = _validate_cases_list(
-        list(cases), declared_limits=checked_limits, oci_digest=oci_image_digest,
-        runner_digest=runner_binary_digest, executed_us=executed_us,
-    )
+    _strict_str(kw["build_run_id"], "build_run_id")
+    executed_us = _utc_sec_micros(kw["executed_at_utc"], "executed_at_utc")
+    _hex40_str(kw["source_commit_sha"], "source_commit_sha")
+    for k in ("build_backend_digest", "schema_bundle_digest", "wheel_digest", "oci_image_digest", "runner_binary_digest", "test_suite_digest"):
+        _sha256_str(kw[k], k)
+    _exact_str(kw["test_suite_digest"], PINNED_7A_NEGATIVE_SUITE_DIGEST, "test_suite_digest")
+    checked_limits = _validate_resource_limits_dict(kw["declared_resource_limits"], "declared_resource_limits")
+    checked_cases = _validate_cases_list(list(kw["cases"]), declared_limits=checked_limits, oci_digest=kw["oci_image_digest"], runner_digest=kw["runner_binary_digest"], executed_us=executed_us)
     return {
-        "migration_run_context_locator": run_ctx, "build_run_id": build_run_id,
-        "executed_at_utc": executed_at_utc, "source_commit_sha": source_commit_sha,
-        "build_backend_digest": build_backend_digest, "schema_bundle_digest": schema_bundle_digest,
-        "wheel_digest": wheel_digest, "oci_image_digest": oci_image_digest,
-        "runner_binary_digest": runner_binary_digest, "test_suite_digest": test_suite_digest,
-        "declared_resource_limits": checked_limits, "cases": checked_cases,
+        "migration_run_context_locator": run_ctx, "build_run_id": kw["build_run_id"], "executed_at_utc": kw["executed_at_utc"],
+        "source_commit_sha": kw["source_commit_sha"], "build_backend_digest": kw["build_backend_digest"],
+        "schema_bundle_digest": kw["schema_bundle_digest"], "wheel_digest": kw["wheel_digest"],
+        "oci_image_digest": kw["oci_image_digest"], "runner_binary_digest": kw["runner_binary_digest"],
+        "test_suite_digest": kw["test_suite_digest"], "declared_resource_limits": checked_limits, "cases": checked_cases,
     }
 
 
@@ -523,19 +440,16 @@ def build_negative_security_test_report_envelope(
     cases: Sequence[Mapping[str, Any]], registry_locator: Mapping[str, Any], signer_key_id: str,
     test_suite_digest: str = PINNED_7A_NEGATIVE_SUITE_DIGEST,
 ) -> dict[str, Any]:
-    """Build an unsigned 16-key P1 `smart_ads/negative_security_test_report/v1` envelope."""
     sbx_loc, prov_loc, reg_loc = copy.deepcopy(dict(sealed_sandbox_profile_locator)), copy.deepcopy(dict(wheel_build_provenance_locator)), copy.deepcopy(dict(registry_locator))
     validate_locator(sbx_loc, SANDBOX_PROFILE_SCHEMA)
     validate_locator(prov_loc, WHEEL_BUILD_PROVENANCE_SCHEMA)
     validate_locator(reg_loc, _KEY_REGISTRY_SCHEMA)
     _key_id_str(signer_key_id, "signer_key_id")
     common = _build_neg_common_payload(
-        migration_run_context_locator=migration_run_context_locator, build_run_id=build_run_id,
-        executed_at_utc=executed_at_utc, source_commit_sha=source_commit_sha,
-        build_backend_digest=build_backend_digest, schema_bundle_digest=schema_bundle_digest,
-        wheel_digest=wheel_digest, oci_image_digest=oci_image_digest,
-        runner_binary_digest=runner_binary_digest, declared_resource_limits=declared_resource_limits,
-        cases=cases, test_suite_digest=test_suite_digest,
+        migration_run_context_locator=migration_run_context_locator, build_run_id=build_run_id, executed_at_utc=executed_at_utc,
+        source_commit_sha=source_commit_sha, build_backend_digest=build_backend_digest, schema_bundle_digest=schema_bundle_digest,
+        wheel_digest=wheel_digest, oci_image_digest=oci_image_digest, runner_binary_digest=runner_binary_digest,
+        declared_resource_limits=declared_resource_limits, cases=cases, test_suite_digest=test_suite_digest,
     )
     env = {"$schema": NEGATIVE_SECURITY_REPORT_SCHEMA, **common, "sealed_sandbox_profile_locator": sbx_loc, "wheel_build_provenance_locator": prov_loc, "integrity": {"key_id": signer_key_id, "key_registry_snapshot_locator": reg_loc}}
     loads_strict(canonicalize(env).decode("utf-8"))
@@ -549,17 +463,14 @@ def build_negative_security_test_report_candidate(
     oci_image_digest: str, runner_binary_digest: str, declared_resource_limits: Mapping[str, Any],
     cases: Sequence[Mapping[str, Any]], test_suite_digest: str = PINNED_7A_NEGATIVE_SUITE_DIGEST,
 ) -> dict[str, Any]:
-    """Build a non-signable `gov1_local_candidate` (14-key payload) for `negative_security_test_report/v1`."""
     sbx_ref, prov_ref = copy.deepcopy(dict(sealed_sandbox_profile_candidate_ref)), copy.deepcopy(dict(wheel_build_provenance_candidate_ref))
     verify_local_candidate_ref(sbx_ref, expected_schema=SANDBOX_PROFILE_SCHEMA)
     verify_local_candidate_ref(prov_ref, expected_schema=WHEEL_BUILD_PROVENANCE_SCHEMA)
     common = _build_neg_common_payload(
-        migration_run_context_locator=migration_run_context_locator, build_run_id=build_run_id,
-        executed_at_utc=executed_at_utc, source_commit_sha=source_commit_sha,
-        build_backend_digest=build_backend_digest, schema_bundle_digest=schema_bundle_digest,
-        wheel_digest=wheel_digest, oci_image_digest=oci_image_digest,
-        runner_binary_digest=runner_binary_digest, declared_resource_limits=declared_resource_limits,
-        cases=cases, test_suite_digest=test_suite_digest,
+        migration_run_context_locator=migration_run_context_locator, build_run_id=build_run_id, executed_at_utc=executed_at_utc,
+        source_commit_sha=source_commit_sha, build_backend_digest=build_backend_digest, schema_bundle_digest=schema_bundle_digest,
+        wheel_digest=wheel_digest, oci_image_digest=oci_image_digest, runner_binary_digest=runner_binary_digest,
+        declared_resource_limits=declared_resource_limits, cases=cases, test_suite_digest=test_suite_digest,
     )
     payload = {**common, "sealed_sandbox_profile_candidate_ref": sbx_ref, "wheel_build_provenance_candidate_ref": prov_ref}
     loads_strict(canonicalize(payload).decode("utf-8"))
@@ -567,7 +478,6 @@ def build_negative_security_test_report_candidate(
 
 
 def extract_provenance_payload(prov_obj: Mapping[str, Any]) -> dict[str, Any]:
-    """Extract and closed-validate the 16-key `wheel_build_provenance/v1` payload from candidate, envelope, or dict."""
     if not isinstance(prov_obj, Mapping):
         raise ValueError("wheel_provenance: expected Mapping")
     d = dict(prov_obj)
@@ -653,9 +563,8 @@ def _extract_provenance_for_mode(
     else:
         if "artifact_kind" in d:
             raise ValueError("wheel_provenance: envelope mode forbids gov1_local_candidate")
-        if "$schema" in d or "integrity" in d:
-            if canonicalize(make_locator(WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
-                raise ValueError("wheel_provenance: envelope locator mismatch against report")
+        if ("$schema" in d or "integrity" in d) and canonicalize(make_locator(WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
+            raise ValueError("wheel_provenance: envelope locator mismatch against report")
     verify_wheel_object_locator(dict(prov_payload["wheel"]), expected_wheel_bytes=wheel_bytes)
     actual_whl_digest = digest(wheel_bytes)
     _exact_str(prov_payload["wheel_digest"], actual_whl_digest, "wheel_provenance.wheel_digest")
@@ -663,9 +572,7 @@ def _extract_provenance_for_mode(
 
 
 def _unwrap_neg_report(artifact: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
-    if not isinstance(artifact, Mapping):
-        raise ValueError("negative_security_test_report: expected JSON object")
-    d = dict(artifact)
+    d = dict(artifact) if isinstance(artifact, Mapping) else {}
     if d.get("artifact_kind") == LOCAL_CANDIDATE_KIND:
         if "$schema" in d or "integrity" in d:
             raise ValueError("negative_security_test_report: candidate must not contain envelope fields")
@@ -689,17 +596,14 @@ def _verify_neg_runs_and_cross_bindings(
     payload: Mapping[str, Any], sbx_payload: Mapping[str, Any], prov_payload: Mapping[str, Any],
     *, sbx_limits: Mapping[str, Any], sbx_digest: str, actual_whl_digest: str, floor_us: int, from_us: int, until_us: int,
 ) -> None:
+    sbx_shared_b = canonicalize({k: sbx_payload[k] for k in _SHARED_RUNTIME_16_FIELDS})
     if (
-        payload["build_run_id"] != prov_payload["build_run_id"]
-        or payload["wheel_digest"] != actual_whl_digest
-        or payload["source_commit_sha"] != prov_payload["source_commit_sha"]
-        or payload["build_backend_digest"] != prov_payload["build_backend_digest"]
-        or payload["schema_bundle_digest"] != prov_payload["schema_bundle_digest"]
+        (payload["build_run_id"], payload["wheel_digest"], payload["source_commit_sha"], payload["build_backend_digest"], payload["schema_bundle_digest"])
+        != (prov_payload["build_run_id"], actual_whl_digest, prov_payload["source_commit_sha"], prov_payload["build_backend_digest"], prov_payload["schema_bundle_digest"])
         or canonicalize(payload["migration_run_context_locator"]) != canonicalize(prov_payload["migration_run_context_locator"])
         or canonicalize(payload["migration_run_context_locator"]) != canonicalize(sbx_payload["migration_run_context_locator"])
-        or payload["declared_resource_limits"] != sbx_limits
-        or payload["oci_image_digest"] != sbx_payload["oci_image_digest"]
-        or payload["runner_binary_digest"] != sbx_payload["runner_binary_digest"]
+        or canonicalize(payload["declared_resource_limits"]) != canonicalize(dict(sbx_limits))
+        or (payload["oci_image_digest"], payload["runner_binary_digest"]) != (sbx_payload["oci_image_digest"], sbx_payload["runner_binary_digest"])
     ):
         raise ValueError("negative_security_test_report: cross-artifact binding mismatch")
     executed_us = _utc_sec_micros(payload["executed_at_utc"], "executed_at_utc")
@@ -707,40 +611,27 @@ def _verify_neg_runs_and_cross_bindings(
         raise ValueError("negative_security_test_report.executed_at_utc: chronology violation")
     for case in payload["cases"]:
         for sub_idx, run in enumerate(case["runs"]):
-            if any(run["runtime_readback"][k] != sbx_payload[k] for k in _SHARED_RUNTIME_16_FIELDS):
+            if canonicalize({k: run["runtime_readback"][k] for k in _SHARED_RUNTIME_16_FIELDS}) != sbx_shared_b:
                 raise ValueError("negative_security_test_report: runtime_readback mismatch against sandbox_profile")
             s_us, e_us = _utc_sec_micros(run["started_at_utc"], "start"), _utc_sec_micros(run["ended_at_utc"], "end")
             if not (floor_us <= s_us <= e_us <= executed_us and from_us <= s_us <= e_us < until_us):
                 raise ValueError("negative_security_test_report: run chronology violation")
-            exp_bind = compute_negative_run_execution_binding_digest(
-                case_id=case["case_id"], subrun_index=sub_idx, run=run, wheel_digest=payload["wheel_digest"],
-                test_suite_digest=payload["test_suite_digest"], sealed_sandbox_profile_digest=sbx_digest,
-            )
-            if run["execution_binding_digest"] != exp_bind:
+            if run["execution_binding_digest"] != compute_negative_run_execution_binding_digest(case_id=case["case_id"], subrun_index=sub_idx, run=run, wheel_digest=payload["wheel_digest"], test_suite_digest=payload["test_suite_digest"], sealed_sandbox_profile_digest=sbx_digest):
                 raise ValueError("negative_security_test_report: run execution_binding_digest mismatch")
 
 
 def verify_negative_security_test_report(
-    artifact: Mapping[str, Any], *, sandbox_profile: Mapping[str, Any],
-    wheel_provenance: Mapping[str, Any], wheel_bytes: bytes,
+    artifact: Mapping[str, Any], *, sandbox_profile: Mapping[str, Any], wheel_provenance: Mapping[str, Any], wheel_bytes: bytes
 ) -> dict[str, Any]:
-    """Passively verify `negative_security_test_report/v1` (candidate or envelope) against sandbox, provenance, and `wheel_bytes`."""
     if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
         raise ValueError("verify_negative_security_test_report: wheel_bytes must be non-empty bytes")
     mode, raw_payload = _unwrap_neg_report(artifact)
     checked_common = _build_neg_common_payload(**{k: raw_payload[k] for k in _NEG_COMMON_12_KEYS})
     sbx_key = "sealed_sandbox_profile_candidate_ref" if mode == "candidate" else "sealed_sandbox_profile_locator"
     prov_key = "wheel_build_provenance_candidate_ref" if mode == "candidate" else "wheel_build_provenance_locator"
-    sbx_payload, sbx_limits, sbx_digest, issued_us, from_us, until_us = _extract_sandbox_payload_for_mode(
-        sandbox_profile, mode=mode, expected_bind=raw_payload[sbx_key]
-    )
-    prov_payload, actual_whl_digest, built_us = _extract_provenance_for_mode(
-        wheel_provenance, mode=mode, expected_bind=raw_payload[prov_key], wheel_bytes=wheel_bytes
-    )
-    _verify_neg_runs_and_cross_bindings(
-        checked_common, sbx_payload, prov_payload, sbx_limits=sbx_limits, sbx_digest=sbx_digest,
-        actual_whl_digest=actual_whl_digest, floor_us=max(issued_us, built_us), from_us=from_us, until_us=until_us,
-    )
+    sbx_payload, sbx_limits, sbx_digest, issued_us, from_us, until_us = _extract_sandbox_payload_for_mode(sandbox_profile, mode=mode, expected_bind=raw_payload[sbx_key])
+    prov_payload, actual_whl_digest, built_us = _extract_provenance_for_mode(wheel_provenance, mode=mode, expected_bind=raw_payload[prov_key], wheel_bytes=wheel_bytes)
+    _verify_neg_runs_and_cross_bindings(checked_common, sbx_payload, prov_payload, sbx_limits=sbx_limits, sbx_digest=sbx_digest, actual_whl_digest=actual_whl_digest, floor_us=max(issued_us, built_us), from_us=from_us, until_us=until_us)
     return {
         "mode": mode, "schema": NEGATIVE_SECURITY_REPORT_SCHEMA, "wheel_digest": actual_whl_digest,
         "schema_bundle_digest": checked_common["schema_bundle_digest"], "executed_at_utc": checked_common["executed_at_utc"],

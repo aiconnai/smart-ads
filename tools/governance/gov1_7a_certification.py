@@ -19,8 +19,9 @@ from tools.governance.gov1_7a_negative import (
     verify_negative_security_test_report,
 )
 from tools.governance.gov1_7a_replay_helpers import (
-    DEFAULT_PIPEBOARD_TRANSPORT_LIMITS, _SOURCE_METRIC_RE, build_canonical_regression_fixture,
-    derive_resource_ref, parse_utc6_micros, recompute_collection_completeness_dict, recompute_fixture_7a_admission,
+    DEFAULT_PIPEBOARD_TRANSPORT_LIMITS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS, _SOURCE_METRIC_RE,
+    build_canonical_regression_fixture, derive_resource_ref, parse_utc6_micros,
+    recompute_collection_completeness_dict, recompute_fixture_7a_admission,
     transform_pipeboard_response_to_batch_dict, validate_provider_observation_batch_dict,
 )
 from tools.governance.gov1_7a_runner import (
@@ -182,14 +183,14 @@ def _validate_capability_and_evidence(cap_raw: object, ev_raw: object, certified
     validate_locator(dict(cap["driver_contract_locator"]), PIPEBOARD_CONTRACT_SCHEMA)
     validate_locator(dict(cap["registry_snapshot_locator"]), PRIVATE_REGISTRY_SNAPSHOT_SCHEMA)
     _exact_str(cap["driver_contract_digest"], cap["driver_contract_locator"]["content_digest"], "driver_contract_digest")
-    if cap["required_metrics"] != list(_PHASE1_METRICS):
+    if type(cap["required_metrics"]) is not list or any(type(m) is not str for m in cap["required_metrics"]) or cap["required_metrics"] != list(_PHASE1_METRICS):
         raise ValueError("capability.required_metrics: expected exact Phase 1 sorted metrics")
     ev = dict(ev_raw) if isinstance(ev_raw, Mapping) else {}
     exact_fields(ev, {"corpus_git_locator", "corpus_digest", "regression_fixture", "cases"}, "fixture_evidence")
     validate_locator(dict(ev["corpus_git_locator"]), GIT_ARTIFACT_PROVENANCE_SCHEMA)
     _sha256_str(ev["corpus_digest"], "corpus_digest")
     exp_reg_fix = build_canonical_regression_fixture(cap["registry_snapshot_locator"]["content_digest"])
-    if ev["regression_fixture"] != exp_reg_fix or type(ev["cases"]) is not list or not ev["cases"]:
+    if not isinstance(ev["regression_fixture"], Mapping) or canonicalize(dict(ev["regression_fixture"])) != canonicalize(exp_reg_fix) or type(ev["cases"]) is not list or not ev["cases"]:
         raise ValueError("fixture_evidence: regression_fixture or cases invalid")
     cases = [_validate_7a_case_dict(c, f"cases[{i}]") for i, c in enumerate(ev["cases"])]
     ids = [c["case_id"].encode("utf-8") for c in cases]
@@ -212,7 +213,7 @@ def _build_cert_common_payload(**kw: Any) -> dict[str, Any]:
     for k in ("build_backend_digest", "schema_bundle_digest", "wheel_digest", "resource_mapping_contract_digest", "parser_code_digest", "adapter_code_digest", "mapping_rules_digest"):
         _sha256_str(kw[k], k)
     p_locs, a_locs, m_locs = sort_git_provenance_locators(kw["parser_artifact_locators"]), sort_git_provenance_locators(kw["adapter_artifact_locators"]), sort_git_provenance_locators(kw["mapping_artifact_locators"])
-    if (len(p_locs), len(a_locs), len(m_locs)) != (len(PARSER_ARTIFACT_PATHS), len(ADAPTER_ARTIFACT_PATHS), len(MAPPING_ARTIFACT_PATHS)) or [dict(x) for x in kw["parser_artifact_locators"]] != p_locs or [dict(x) for x in kw["adapter_artifact_locators"]] != a_locs or [dict(x) for x in kw["mapping_artifact_locators"]] != m_locs:
+    if (len(p_locs), len(a_locs), len(m_locs)) != (len(PARSER_ARTIFACT_PATHS), len(ADAPTER_ARTIFACT_PATHS), len(MAPPING_ARTIFACT_PATHS)) or [canonicalize(dict(x)) for x in kw["parser_artifact_locators"]] != [canonicalize(x) for x in p_locs] or [canonicalize(dict(x)) for x in kw["adapter_artifact_locators"]] != [canonicalize(x) for x in a_locs] or [canonicalize(dict(x)) for x in kw["mapping_artifact_locators"]] != [canonicalize(x) for x in m_locs]:
         raise ValueError("certification_7a_record: git provenance locator arrays must be pre-sorted with exact arity")
     cap, ev = _validate_capability_and_evidence(kw["capability"], kw["fixture_evidence"], cert_us)
     return {
@@ -312,10 +313,18 @@ def _verify_registry_and_contract_from_store(store: Store, cap: Mapping[str, Any
     exact_fields(drv, {"$schema", "contract_id", "driver_id", "legacy_source_packet", "upstream_reference", "transport_limits", "metric_source_mappings", "integrity"}, "pipeboard_phase1_contract")
     pkt = dict(drv["legacy_source_packet"]) if isinstance(drv["legacy_source_packet"], Mapping) else {}
     exact_fields(pkt, {"repository", "commit_sha", "members", "packet_digest"}, "legacy_source_packet")
-    if _DRV_ID_RE.fullmatch(_strict_str(drv["contract_id"], "cid")) is None or drv["driver_id"] != "pipeboard_hosted" or pkt["repository"] != PINNED_LEGACY_REPO or pkt["commit_sha"] != PINNED_LEGACY_COMMIT or pkt["packet_digest"] != json_digest({k: pkt[k] for k in ("repository", "commit_sha", "members")}) or drv["upstream_reference"] != {"repository": "pipeboard-co/meta-ads-mcp", "commit_sha": "2ef198e266ca6a37b6dc2c42335f0a0885002771", "path": "meta_ads_mcp/core/insights.py", "symbol": "get_insights", "hosted_parity_proven": False} or drv["transport_limits"] != dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS):
+    exp_up = {"repository": "pipeboard-co/meta-ads-mcp", "commit_sha": "2ef198e266ca6a37b6dc2c42335f0a0885002771", "path": "meta_ads_mcp/core/insights.py", "symbol": "get_insights", "hosted_parity_proven": False}
+    if (
+        _DRV_ID_RE.fullmatch(_strict_str(drv["contract_id"], "cid")) is None or drv["driver_id"] != "pipeboard_hosted"
+        or pkt["repository"] != PINNED_LEGACY_REPO or pkt["commit_sha"] != PINNED_LEGACY_COMMIT
+        or pkt["packet_digest"] != json_digest({k: pkt[k] for k in ("repository", "commit_sha", "members")})
+        or not isinstance(drv["upstream_reference"], Mapping) or canonicalize(dict(drv["upstream_reference"])) != canonicalize(exp_up)
+        or not isinstance(drv["transport_limits"], Mapping) or canonicalize(dict(drv["transport_limits"])) != canonicalize(dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS))
+        or not isinstance(drv["metric_source_mappings"], Mapping) or canonicalize(dict(drv["metric_source_mappings"])) != canonicalize(dict(PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS))
+    ):
         raise ValueError("pipeboard_phase1_contract: pinned contract invariants violated")
     mc = [e for e in snap["capabilities"] if e["capability_ref"] == cap["capability_ref"] and e["resource_scope_ref"] == cap["resource_scope_ref"]]
-    if len(mc) != 1 or mc[0]["state"] != "declared" or mc[0]["driver_id"] != "pipeboard_hosted" or canonicalize(mc[0]["driver_contract_locator"]) != canonicalize(cap["driver_contract_locator"]) or mc[0]["driver_contract_digest"] != cap["driver_contract_digest"] or mc[0]["required_metrics"] != cap["required_metrics"]:
+    if len(mc) != 1 or mc[0]["state"] != "declared" or mc[0]["driver_id"] != "pipeboard_hosted" or canonicalize(mc[0]["driver_contract_locator"]) != canonicalize(cap["driver_contract_locator"]) or mc[0]["driver_contract_digest"] != cap["driver_contract_digest"] or canonicalize(mc[0]["required_metrics"]) != canonicalize(cap["required_metrics"]):
         raise ValueError("certification_7a_record.capability: snapshot capability mismatch")
     return snap, drv
 
@@ -398,6 +407,31 @@ def _resolve_store_sandbox_locator_for_candidate(store: Store, sbx_payload: Mapp
     return matches[0]
 
 
+def _resolve_envelope_stage7_from_store(
+    store: Store, raw_payload: Mapping[str, Any], *, sandbox_profile: Mapping[str, Any] | None,
+    wheel_provenance: Mapping[str, Any] | None, wheel_boundary_report: Mapping[str, Any] | None,
+    negative_security_report: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    sbx_loc = copy.deepcopy(raw_payload["sealed_sandbox_profile_locator"])
+    sbx_obj = _get_verified_store_envelope(store, sbx_loc, SANDBOX_PROFILE_SCHEMA)
+    prov_obj = _get_verified_store_envelope(store, raw_payload["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA)
+    bound_obj = _get_verified_store_envelope(store, raw_payload["wheel_boundary_report_locator"], WHEEL_BOUNDARY_REPORT_SCHEMA)
+    neg_obj = _get_verified_store_envelope(store, raw_payload["negative_security_test_report_locator"], NEGATIVE_SECURITY_REPORT_SCHEMA)
+    for caller_obj, stored_obj, lbl in (
+        (sandbox_profile, sbx_obj, "sandbox_profile"),
+        (wheel_provenance, prov_obj, "wheel_provenance"),
+        (wheel_boundary_report, bound_obj, "wheel_boundary_report"),
+        (negative_security_report, neg_obj, "negative_security_report"),
+    ):
+        if caller_obj is not None and (not isinstance(caller_obj, Mapping) or canonicalize(dict(caller_obj)) != canonicalize(stored_obj)):
+            raise ValueError(f"{lbl}: caller-supplied envelope diverges from Store locator object")
+    exact_fields(dict(bound_obj), _BOUNDARY_ENVELOPE_FIELDS, "wheel_boundary_report")
+    bound_payload = {k: bound_obj[k] for k in bound_obj if k not in {"$schema", "integrity"}}
+    if canonicalize(bound_payload["wheel_build_provenance_locator"]) != canonicalize(raw_payload["wheel_build_provenance_locator"]) or canonicalize(raw_payload["wheel_build_provenance_locator"]) != canonicalize(neg_obj["wheel_build_provenance_locator"]) or canonicalize(sbx_loc) != canonicalize(neg_obj["sealed_sandbox_profile_locator"]):
+        raise ValueError("certification_7a_record: Stage 7 envelope locator cross-binding mismatch")
+    return sbx_loc, sbx_obj, prov_obj, bound_obj, neg_obj, bound_payload
+
+
 def _verify_stage7_and_wheel_archive_passively(
     mode: str, raw_payload: Mapping[str, Any], store: Store, wheel_bytes: bytes, *,
     sandbox_profile: Mapping[str, Any] | None, wheel_provenance: Mapping[str, Any] | None,
@@ -407,16 +441,10 @@ def _verify_stage7_and_wheel_archive_passively(
     members, rec_entries, rec_digest, mods = _read_and_validate_wheel_archive(wheel_bytes)
     whl_digest = digest(wheel_bytes)
     if mode == "envelope":
-        sbx_loc = copy.deepcopy(raw_payload["sealed_sandbox_profile_locator"])
-        sbx_obj = _get_verified_store_envelope(store, sbx_loc, SANDBOX_PROFILE_SCHEMA) if sandbox_profile is None else sandbox_profile
-        prov_obj = _get_verified_store_envelope(store, raw_payload["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA) if wheel_provenance is None else wheel_provenance
-        bound_obj = _get_verified_store_envelope(store, raw_payload["wheel_boundary_report_locator"], WHEEL_BOUNDARY_REPORT_SCHEMA) if wheel_boundary_report is None else wheel_boundary_report
-        neg_obj = _get_verified_store_envelope(store, raw_payload["negative_security_test_report_locator"], NEGATIVE_SECURITY_REPORT_SCHEMA) if negative_security_report is None else negative_security_report
-        exact_fields(dict(bound_obj), _BOUNDARY_ENVELOPE_FIELDS, "wheel_boundary_report")
-        _verify_p1_integrity(bound_obj, label="wheel_boundary_report")
-        bound_payload = {k: bound_obj[k] for k in bound_obj if k not in {"$schema", "integrity"}}
-        if canonicalize(bound_payload["wheel_build_provenance_locator"]) != canonicalize(raw_payload["wheel_build_provenance_locator"]) or canonicalize(raw_payload["wheel_build_provenance_locator"]) != canonicalize(neg_obj["wheel_build_provenance_locator"]) or canonicalize(sbx_loc) != canonicalize(neg_obj["sealed_sandbox_profile_locator"]):
-            raise ValueError("certification_7a_record: Stage 7 envelope locator cross-binding mismatch")
+        sbx_loc, sbx_obj, prov_obj, bound_obj, neg_obj, bound_payload = _resolve_envelope_stage7_from_store(
+            store, raw_payload, sandbox_profile=sandbox_profile, wheel_provenance=wheel_provenance,
+            wheel_boundary_report=wheel_boundary_report, negative_security_report=negative_security_report,
+        )
     else:
         if sandbox_profile is None or wheel_provenance is None or wheel_boundary_report is None or negative_security_report is None:
             raise ValueError("candidate mode requires sandbox_profile, wheel_provenance, wheel_boundary_report, and negative_security_report")
@@ -442,8 +470,8 @@ def _check_passive_boundary_and_negative(
     checked_insp = _validate_inspection_dict({k: bound_payload[k] for k in _INSPECTION_FIELDS})
     _utc_sec_micros(bound_payload["verified_at_utc"], "bound.verified_at_utc")
     if (
-        checked_insp["wheel_digest"] != whl_digest or checked_insp["sorted_record_entries"] != rec_entries
-        or checked_insp["sorted_record_digest"] != rec_digest or checked_insp["packaged_modules"] != mods
+        checked_insp["wheel_digest"] != whl_digest or canonicalize(checked_insp["sorted_record_entries"]) != canonicalize(rec_entries)
+        or checked_insp["sorted_record_digest"] != rec_digest or canonicalize(checked_insp["packaged_modules"]) != canonicalize(mods)
         or bound_payload["repository"] != DEFAULT_REPOSITORY or raw_payload["wheel_digest"] != whl_digest
         or canonicalize(bound_payload["migration_run_context_locator"]) != canonicalize(raw_payload["migration_run_context_locator"])
         or any(raw_payload[k] != prov_p[k] or bound_payload[k] != raw_payload[k] for k in ("build_run_id", "source_commit_sha", "build_backend_digest", "schema_bundle_digest"))
@@ -535,12 +563,13 @@ def _verify_single_replayed_case(
 ) -> None:
     if (
         canonicalize(inv["registry_snapshot_locator"]) != canonicalize(adm["registry_snapshot_locator"])
-        or (inv["tenant_ref"], inv["binding_ref"], inv["account_ref"], inv["resource_scope_ref"], inv["date_range"]) != (adm["tenant_ref"], adm["binding_ref"], adm["account_ref"], adm["resource_scope_ref"], adm["computed_date_range"])
+        or (inv["tenant_ref"], inv["binding_ref"], inv["account_ref"], inv["resource_scope_ref"]) != (adm["tenant_ref"], adm["binding_ref"], adm["account_ref"], adm["resource_scope_ref"])
+        or canonicalize(inv["date_range"]) != canonicalize(adm["computed_date_range"])
         or adm["resource_scope_ref"] != checked_common["capability"]["resource_scope_ref"]
-        or adm["canonical_query_contract"]["requested_capabilities"] != [checked_common["capability"]["capability_ref"]]
-        or adm["canonical_query_contract"]["metric_semantic_refs"] != checked_common["capability"]["required_metrics"]
-        or rc["effective_resource_limits"] != ctx["sbx_limits"]
-        or any(rc["runtime_readback"][k] != ctx["sbx_p"][k] for k in _SHARED_RUNTIME_16_FIELDS)
+        or canonicalize(adm["canonical_query_contract"]["requested_capabilities"]) != canonicalize([checked_common["capability"]["capability_ref"]])
+        or canonicalize(adm["canonical_query_contract"]["metric_semantic_refs"]) != canonicalize(checked_common["capability"]["required_metrics"])
+        or canonicalize(rc["effective_resource_limits"]) != canonicalize(ctx["sbx_limits"])
+        or canonicalize({k: rc["runtime_readback"][k] for k in _SHARED_RUNTIME_16_FIELDS}) != canonicalize({k: ctx["sbx_p"][k] for k in _SHARED_RUNTIME_16_FIELDS})
     ):
         raise ValueError(f"case[{rc['case_id']}]: inventory, capability, or sandbox readback mismatch")
     s_us, e_us = _utc_sec_micros(rc["started_at_utc"], "start"), _utc_sec_micros(rc["ended_at_utc"], "end")
@@ -551,12 +580,12 @@ def _verify_single_replayed_case(
     if rc["execution_binding_digest"] != compute_7a_case_execution_binding_digest(case=rc, wheel_digest=checked_common["wheel_digest"], corpus_digest=checked_common["fixture_evidence"]["corpus_digest"], sealed_sandbox_profile_digest=ctx["sbx_digest"]):
         raise ValueError(f"case[{rc['case_id']}].execution_binding_digest: mismatch")
     priv_id = priv_map.get((adm["binding_ref"], adm["account_ref"]))
-    if priv_id is None or type(hr["headers"]) is not list or any(type(h) is not list or len(h) != 2 for h in hr["headers"]) or type(hr["body_utf8"]) is not str:
-        raise ValueError(f"case[{rc['case_id']}]: invalid private binding or corpus http_response")
+    if priv_id is None or type(hr["network_ok"]) is not bool or (hr["http_status"] is not None and type(hr["http_status"]) is not int) or type(hr["headers"]) is not list or any(type(h) is not list or len(h) != 2 for h in hr["headers"]) or type(hr["body_utf8"]) is not str or type(cc["expected_reasons"]) is not list or any(type(r) is not str for r in cc["expected_reasons"]) or (cc["expected_error_code"] is not None and type(cc["expected_error_code"]) is not str):
+        raise ValueError(f"case[{rc['case_id']}]: invalid private binding or corpus http_response/expectations")
     batch = transform_pipeboard_response_to_batch_dict(admitted=adm, private_object_id=priv_id, known_campaign_map=cmap, scoped_resource_refs=frozenset(u["resource_ref"] for u in inv["expected_resources"]), retrieval_context=cc["retrieval_context"], network_ok=hr["network_ok"], http_status=hr["http_status"], headers=[(h[0], h[1]) for h in hr["headers"]], body_chunks=[hr["body_utf8"].encode("utf-8")])
     comp = recompute_collection_completeness_dict(expected_resources=inv["expected_resources"], required_metrics=adm["canonical_query_contract"]["metric_semantic_refs"], metric_source_mappings=drv["metric_source_mappings"], batch_dict=batch, admitted_dict=adm)
     exp_errs = [] if cc["expected_error_code"] is None else [cc["expected_error_code"]]
-    if batch != rc["observation_batch"] or [e["error_code"] for e in batch["normalized_errors"]] != exp_errs or comp["status"] != rc["observed_completeness_status"] or comp["status"] != cc["expected_completeness_status"] or comp["reasons"] != cc["expected_reasons"] or comp["normalized_fact_set_digest"] != rc["normalized_fact_set_digest"]:
+    if canonicalize(batch) != canonicalize(rc["observation_batch"]) or canonicalize([e["error_code"] for e in batch["normalized_errors"]]) != canonicalize(exp_errs) or comp["status"] != rc["observed_completeness_status"] or comp["status"] != cc["expected_completeness_status"] or canonicalize(comp["reasons"]) != canonicalize(cc["expected_reasons"]) or comp["normalized_fact_set_digest"] != rc["normalized_fact_set_digest"]:
         raise ValueError(f"case[{rc['case_id']}]: deterministic offline 7A replay mismatch")
 
 

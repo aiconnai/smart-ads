@@ -30,62 +30,35 @@ FORBIDDEN_PIPEBOARD_ARGUMENTS: Final[tuple[str, ...]] = (
     "ad_id", "adset_id", "after", "breakdown", "campaign_id",
 )
 DEFAULT_PIPEBOARD_TRANSPORT_LIMITS: Final[Mapping[str, Any]] = MappingProxyType({
-    "endpoint_url": "https://meta-ads.mcp.pipeboard.co/", "http_method": "POST",
-    "connect_timeout_seconds": 5, "wall_deadline_seconds": 60,
-    "request_content_type": "application/json", "request_accept": "application/json, text/event-stream",
-    "request_accept_encoding": "identity", "read_chunk_bytes": 65536,
-    "max_streamed_bytes": 2_097_152, "max_decoded_text_bytes": 2_097_152,
-    "jsonrpc_method": "tools/call", "tool_name": "get_insights",
-    "level": "campaign", "limit": 100, "compact": True, "max_campaign_rows": 100,
-    "forbidden_arguments": list(FORBIDDEN_PIPEBOARD_ARGUMENTS),
+    "endpoint_url": "https://meta-ads.mcp.pipeboard.co/", "http_method": "POST", "connect_timeout_seconds": 5,
+    "wall_deadline_seconds": 60, "request_content_type": "application/json",
+    "request_accept": "application/json, text/event-stream", "request_accept_encoding": "identity",
+    "read_chunk_bytes": 65536, "max_streamed_bytes": 2_097_152, "max_decoded_text_bytes": 2_097_152,
+    "jsonrpc_method": "tools/call", "tool_name": "get_insights", "level": "campaign", "limit": 100,
+    "compact": True, "max_campaign_rows": 100, "forbidden_arguments": list(FORBIDDEN_PIPEBOARD_ARGUMENTS),
 })
-PINNED_PIPEBOARD_ROW_KEYS: Final[frozenset[str]] = frozenset(
-    "account_id account_name campaign_id campaign_name impressions clicks spend cpc cpm ctr reach "
-    "frequency actions action_values conversions unique_clicks cost_per_action_type date_start date_stop".split()
-)
-_CLEAN_TRANSPORT_OUTCOME: Final[Mapping[str, Any]] = MappingProxyType({
-    "network_ok": True, "http_status": 200, "media_and_encoding_valid": True, "auth_ok": True,
-    "jsonrpc_error": False, "payload_schema_valid": True, "response_date_mismatch": False,
-    "truncated_2mib": False, "non_empty_continuation": False,
-    "reducer_order_or_count_mismatch": False, "duplicate_provider_observation": False,
-})
+PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS: Final[Mapping[str, str]] = MappingProxyType({"metric:clicks_v1": "source-metric:provider:pipeboard.clicks:v1", "metric:impressions_v1": "source-metric:provider:pipeboard.impressions:v1", "metric:spend_v1": "source-metric:provider:pipeboard.spend:v1"})
+PINNED_PIPEBOARD_ROW_KEYS: Final[frozenset[str]] = frozenset("account_id account_name campaign_id campaign_name impressions clicks spend cpc cpm ctr reach frequency actions action_values conversions unique_clicks cost_per_action_type date_start date_stop".split())
+_CLEAN_TRANSPORT_OUTCOME: Final[Mapping[str, Any]] = MappingProxyType({"network_ok": True, "http_status": 200, "media_and_encoding_valid": True, "auth_ok": True, "jsonrpc_error": False, "payload_schema_valid": True, "response_date_mismatch": False, "truncated_2mib": False, "non_empty_continuation": False, "reducer_order_or_count_mismatch": False, "duplicate_provider_observation": False})
 _WIRE_REJECTION_SPECS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType({
-    "network_error": ("network", "provider transport failed before HTTP status"),
-    "missing_http_status": ("transport", "provider HTTP status code is missing"),
-    "invalid_http_status": ("transport", "provider HTTP status code is outside 100..999"),
-    "http_auth_error": ("auth", "provider rejected HTTP authentication or authorization"),
-    "http_status_not_200": ("transport", "provider returned non-200 HTTP status"),
-    "malformed_http_headers": ("transport", "provider HTTP headers violated token or CR/LF/NUL rules"),
-    "duplicate_http_header": ("transport", "provider repeated a singleton HTTP framing header"),
-    "invalid_content_type": ("transport", "provider Content-Type is not application/json UTF-8"),
-    "forbidden_content_encoding": ("transport", "provider Content-Encoding is outside identity"),
-    "invalid_content_length": ("transport", "provider Content-Length header is malformed"),
-    "declared_length_over_2mib": ("truncation", "provider Content-Length exceeds 2 MiB ceiling"),
-    "stream_over_2mib": ("truncation", "provider streamed body exceeds 2 MiB ceiling"),
-    "content_length_mismatch": ("transport", "provider streamed byte count mismatched Content-Length"),
-    "invalid_outer_json": ("schema", "provider outer body is not valid bounded UTF-8 JSON"),
-    "invalid_jsonrpc_envelope": ("schema", "provider outer JSON-RPC 2.0 envelope is invalid"),
-    "malformed_jsonrpc_error": ("schema", "provider JSON-RPC error object violated closed shape"),
-    "jsonrpc_error_response": ("jsonrpc", "provider returned sanitized JSON-RPC error response"),
-    "mcp_result_is_error": ("schema", "provider MCP result reported isError=true"),
-    "invalid_mcp_content": ("schema", "provider MCP result content envelope is invalid"),
-    "decoded_text_over_2mib": ("truncation", "provider decoded inner text exceeds 2 MiB ceiling"),
-    "invalid_inner_json": ("schema", "provider inner MCP text is not valid bounded JSON"),
-    "invalid_payload_shape": ("schema", "provider inner insights payload shape is invalid"),
-    "invalid_paging_shape": ("schema", "provider paging object violated closed shape"),
-    "non_empty_paging_next": ("pagination", "provider response carries non-empty paging.next cursor"),
-    "non_empty_paging_previous": ("pagination", "provider response carries non-empty paging.previous cursor"),
-    "too_many_campaign_rows": ("schema", "provider campaign row count exceeds 100-row ceiling"),
-    "invalid_row_shape": ("schema", "provider campaign row is not a JSON object mapping"),
-    "invalid_row_keys": ("schema", "provider campaign row contains unpinned or forbidden keys"),
-    "invalid_campaign_id": ("schema", "provider campaign_id violated closed Meta grammar"),
-    "unknown_campaign_id": ("schema", "provider campaign_id is absent from private resource directory"),
-    "unscoped_campaign_resource": ("schema", "provider campaign resource is outside admitted scope"),
-    "invalid_metric_value": ("schema", "provider campaign metric violated bounded numeric grammar"),
-    "empty_row_metrics": ("schema", "provider campaign row omitted all Phase 1 base metrics"),
-    "response_date_mismatch": ("date_mismatch", "provider row date_start/date_stop mismatched admitted day"),
-    "reducer_output_invalid": ("reducer", "pinned reducer raised or returned malformed record shape"),
-    "reducer_order_or_count_mismatch": ("reducer", "pinned reducer output order or count mismatched validated rows"),
+    "network_error": ("network", "provider transport failed before HTTP status"), "missing_http_status": ("transport", "provider HTTP status code is missing"),
+    "invalid_http_status": ("transport", "provider HTTP status code is outside 100..999"), "http_auth_error": ("auth", "provider rejected HTTP authentication or authorization"),
+    "http_status_not_200": ("transport", "provider returned non-200 HTTP status"), "malformed_http_headers": ("transport", "provider HTTP headers violated token or CR/LF/NUL rules"),
+    "duplicate_http_header": ("transport", "provider repeated a singleton HTTP framing header"), "invalid_content_type": ("transport", "provider Content-Type is not application/json UTF-8"),
+    "forbidden_content_encoding": ("transport", "provider Content-Encoding is outside identity"), "invalid_content_length": ("transport", "provider Content-Length header is malformed"),
+    "declared_length_over_2mib": ("truncation", "provider Content-Length exceeds 2 MiB ceiling"), "stream_over_2mib": ("truncation", "provider streamed body exceeds 2 MiB ceiling"),
+    "content_length_mismatch": ("transport", "provider streamed byte count mismatched Content-Length"), "invalid_outer_json": ("schema", "provider outer body is not valid bounded UTF-8 JSON"),
+    "invalid_jsonrpc_envelope": ("schema", "provider outer JSON-RPC 2.0 envelope is invalid"), "malformed_jsonrpc_error": ("schema", "provider JSON-RPC error object violated closed shape"),
+    "jsonrpc_error_response": ("jsonrpc", "provider returned sanitized JSON-RPC error response"), "mcp_result_is_error": ("schema", "provider MCP result reported isError=true"),
+    "invalid_mcp_content": ("schema", "provider MCP result content envelope is invalid"), "decoded_text_over_2mib": ("truncation", "provider decoded inner text exceeds 2 MiB ceiling"),
+    "invalid_inner_json": ("schema", "provider inner MCP text is not valid bounded JSON"), "invalid_payload_shape": ("schema", "provider inner insights payload shape is invalid"),
+    "invalid_paging_shape": ("schema", "provider paging object violated closed shape"), "non_empty_paging_next": ("pagination", "provider response carries non-empty paging.next cursor"),
+    "non_empty_paging_previous": ("pagination", "provider response carries non-empty paging.previous cursor"), "too_many_campaign_rows": ("schema", "provider campaign row count exceeds 100-row ceiling"),
+    "invalid_row_shape": ("schema", "provider campaign row is not a JSON object mapping"), "invalid_row_keys": ("schema", "provider campaign row contains unpinned or forbidden keys"),
+    "invalid_campaign_id": ("schema", "provider campaign_id violated closed Meta grammar"), "unknown_campaign_id": ("schema", "provider campaign_id is absent from private resource directory"),
+    "unscoped_campaign_resource": ("schema", "provider campaign resource is outside admitted scope"), "invalid_metric_value": ("schema", "provider campaign metric violated bounded numeric grammar"),
+    "empty_row_metrics": ("schema", "provider campaign row omitted all Phase 1 base metrics"), "response_date_mismatch": ("date_mismatch", "provider row date_start/date_stop mismatched admitted day"),
+    "reducer_output_invalid": ("reducer", "pinned reducer raised or returned malformed record shape"), "reducer_order_or_count_mismatch": ("reducer", "pinned reducer output order or count mismatched validated rows"),
     "duplicate_provider_observation": ("completeness", "provider emitted duplicate (resource_ref, day, metric) observation"),
 })
 
@@ -99,8 +72,12 @@ _CONTENT_LEN_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,18})\Z"
 _WIRE_NUM_RE: Final[re.Pattern[str]] = re.compile(r"\A-?(0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE]([+-]?[0-9]+))?\Z")
 _COUNT_STR_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,18})\Z")
 _SPEND_STR_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,16})(?:\.([0-9]{1,2}))?\Z")
+_UNSIGNED_INT_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]*)\Z")
+_RATIO6_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]*)\.[0-9]{6}\Z")
 _SOURCE_METRIC_RE: Final[re.Pattern[str]] = re.compile(r"\Asource-metric:(provider:[a-z0-9][a-z0-9._-]{0,127}:v[1-9][0-9]*|formula:sha256:[0-9a-f]{64})\Z")
 _SINGLETON_HDRS: Final[frozenset[str]] = frozenset({"content-type", "content-encoding", "content-length"})
+_PROVIDER_PRESENCE_SET: Final[frozenset[str]] = frozenset({"observed", "missing", "unproven_zero", "timeout", "not_applicable_at_level", "retracted_tombstone"})
+_ALLOWED_ERR_CATS: Final[frozenset[str]] = frozenset("admission network auth transport jsonrpc schema date_mismatch truncation pagination reducer completeness".split())
 _REDUCER_TO_METRIC: Final[Mapping[str, tuple[str, str, str, bool]]] = MappingProxyType({
     "clicks": ("metric:clicks_v1", "int64_count", "count", False),
     "impressions": ("metric:impressions_v1", "int64_count", "count", False),
@@ -121,8 +98,7 @@ class Gov1WireRejection(ValueError):
             raise ValueError(f"unknown wire rejection code {code!r}")
         cat, detail = _WIRE_REJECTION_SPECS[code]
         super().__init__(f"pipeboard_adapter[{code}]: {detail}")
-        self.code = code
-        self.category = cat
+        self.code, self.category = code, cat
         self.outcome = {**_CLEAN_TRANSPORT_OUTCOME, **outcome_overrides}
 
 
@@ -141,7 +117,6 @@ def _parse_iso_date(value: object, label: str) -> datetime.date:
 
 
 def parse_utc6_micros(value: object, label: str) -> int:
-    """Validate `YYYY-MM-DDTHH:MM:SS.ffffffZ` and return integer microseconds since Unix epoch."""
     if type(value) is not str or (m := _UTC6_RE.fullmatch(value)) is None:
         raise ValueError(f"{label}: expected YYYY-MM-DDTHH:MM:SS.ffffffZ")
     yr, mo, dy, hr, mi, sc, us = (int(m.group(i)) for i in range(1, 8))
@@ -155,7 +130,6 @@ def parse_utc6_micros(value: object, label: str) -> int:
 
 
 def validate_resource_ref_str(value: object, label: str = "resource_ref") -> str:
-    """Validate canonical 256-bit RFC 4648 lowercase unpadded Base32 `resource_ref`."""
     if type(value) is not str or "\n" in value or "\r" in value or _RESOURCE_REF_RE.fullmatch(value) is None:
         raise ValueError(f"{label}: invalid canonical resource_ref")
     body = value.split(":", 1)[1]
@@ -172,7 +146,6 @@ def derive_resource_ref(
     *, secret_bytes: bytes, mapping_version: str, domain_separator: str = "0x00",
     ad_platform_ref: str = "meta", resource_level: str = "campaign", raw_provider_id: str,
 ) -> str:
-    """Derive canonical `resource_ref` via HMAC-SHA256 over `0x00`-separated UTF-8 NFC fields."""
     if type(secret_bytes) is not bytes or len(secret_bytes) < 32:
         raise ValueError("secret_bytes: expected >= 32 bytes")
     _exact_str(domain_separator, "0x00", "domain_separator")
@@ -184,8 +157,7 @@ def derive_resource_ref(
 def build_pipeboard_insights_request(
     *, private_object_id: str, admitted_day: str, transport_limits: Mapping[str, Any] = DEFAULT_PIPEBOARD_TRANSPORT_LIMITS
 ) -> dict[str, Any]:
-    """Construct the sole in-memory JSON-RPC `get_insights` wire request (ADR-0001 §4.1)."""
-    if not isinstance(transport_limits, Mapping) or dict(transport_limits) != dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS):
+    if not isinstance(transport_limits, Mapping) or canonicalize(dict(transport_limits)) != canonicalize(dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS)):
         raise ValueError("invalid_transport_limits")
     if type(private_object_id) is not str or _META_ACCOUNT_RE.fullmatch(private_object_id) is None:
         raise ValueError("invalid_private_object_id")
@@ -200,11 +172,8 @@ def _check_json_depth_and_surrogates(raw_utf8: str, max_depth: int) -> None:
         if 0xD800 <= ord(ch) <= 0xDFFF:
             raise ValueError("invalid_wire_json")
         if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
+            esc = (not esc and ch == "\\")
+            if not esc and ch == '"':
                 in_str = False
         elif ch == '"':
             in_str = True
@@ -226,9 +195,7 @@ def _wire_pairs_hook(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _wire_parse_num(tok: str, *, is_float: bool) -> Any:
-    if len(tok) > _MAX_WIRE_NUM_LEN or (m := _WIRE_NUM_RE.fullmatch(tok)) is None:
-        raise ValueError("invalid_wire_json")
-    if m.group(2) is not None and abs(int(m.group(2), 10)) > _MAX_WIRE_EXP_ABS:
+    if len(tok) > _MAX_WIRE_NUM_LEN or (m := _WIRE_NUM_RE.fullmatch(tok)) is None or (m.group(2) is not None and abs(int(m.group(2), 10)) > _MAX_WIRE_EXP_ABS):
         raise ValueError("invalid_wire_json")
     if is_float:
         return _WireNumSentinel(tok)
@@ -237,14 +204,12 @@ def _wire_parse_num(tok: str, *, is_float: bool) -> Any:
 
 
 def loads_pipeboard_wire_json(raw_utf8: str, *, max_depth: int = 16) -> Any:
-    """Bounded RFC 8259 wire JSON parser with container depth and lexical numeric ceilings."""
     if type(raw_utf8) is not str or type(max_depth) is not int or max_depth < 1:
         raise ValueError("invalid_wire_json")
     _check_json_depth_and_surrogates(raw_utf8, max_depth)
     try:
         parsed = json.loads(
-            raw_utf8,
-            object_pairs_hook=_wire_pairs_hook,
+            raw_utf8, object_pairs_hook=_wire_pairs_hook,
             parse_int=lambda t: _wire_parse_num(t, is_float=False),
             parse_float=lambda t: _wire_parse_num(t, is_float=True),
             parse_constant=lambda _t: (_ for _ in ()).throw(ValueError("invalid_wire_json")),
@@ -345,8 +310,7 @@ def _validate_paging_dict(paging: Any) -> None:
 def parse_pipeboard_mcp_result(
     result: object, *, transport_limits: Mapping[str, Any] = DEFAULT_PIPEBOARD_TRANSPORT_LIMITS
 ) -> tuple[str, bool, tuple[Mapping[str, Any], ...]]:
-    """Validate Step 9 MCP `result` object and inner `get_insights` payload."""
-    if not isinstance(transport_limits, Mapping) or dict(transport_limits) != dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS):
+    if not isinstance(transport_limits, Mapping) or canonicalize(dict(transport_limits)) != canonicalize(dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS)):
         raise ValueError("invalid_transport_limits")
     if type(result) is not dict or set(result.keys()) not in ({"content"}, {"content", "isError"}):
         raise Gov1WireRejection("invalid_mcp_content", payload_schema_valid=False)
@@ -371,10 +335,12 @@ def parse_pipeboard_mcp_result(
         payload = loads_pipeboard_wire_json(raw_text, max_depth=16)
     except ValueError:
         raise Gov1WireRejection("invalid_inner_json", payload_schema_valid=False) from None
-    if type(payload) is not dict or "data" not in payload or not set(payload.keys()).issubset({"data", "paging"}) or type(payload["data"]) is not list:
+    if type(payload) is not dict or "data" not in payload or not set(payload.keys()).issubset({"data", "paging"}):
         raise Gov1WireRejection("invalid_payload_shape", payload_schema_valid=False)
     if "paging" in payload:
         _validate_paging_dict(payload["paging"])
+    if type(payload["data"]) is not list:
+        raise Gov1WireRejection("invalid_payload_shape", payload_schema_valid=False)
     if len(payload["data"]) > transport_limits["max_campaign_rows"]:
         raise Gov1WireRejection("too_many_campaign_rows", payload_schema_valid=False)
     return raw_text, has_is_error_false, tuple(payload["data"])
@@ -384,8 +350,7 @@ def parse_pipeboard_http_and_mcp_envelope(
     *, network_ok: bool, http_status: int | None, headers: Sequence[tuple[str, str]],
     body_chunks: Iterable[bytes], transport_limits: Mapping[str, Any] = DEFAULT_PIPEBOARD_TRANSPORT_LIMITS,
 ) -> dict[str, Any]:
-    """Validate Pipeboard HTTP status, headers, 2 MiB stream, JSON-RPC, and MCP result in exact 9-step order."""
-    if not isinstance(transport_limits, Mapping) or dict(transport_limits) != dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS):
+    if not isinstance(transport_limits, Mapping) or canonicalize(dict(transport_limits)) != canonicalize(dict(DEFAULT_PIPEBOARD_TRANSPORT_LIMITS)):
         raise ValueError("invalid_transport_limits")
     if type(network_ok) is not bool or isinstance(headers, (str, bytes, bytearray)) or not isinstance(headers, Sequence) or isinstance(body_chunks, (str, bytes, bytearray)) or not isinstance(body_chunks, Iterable):
         raise ValueError("invalid_envelope_precondition")
@@ -400,16 +365,12 @@ def parse_pipeboard_http_and_mcp_envelope(
     if http_status != 200:
         raise Gov1WireRejection("http_status_not_200", http_status=http_status)
     declared_len = _validate_http_headers(headers, max_streamed_bytes=transport_limits["max_streamed_bytes"])
-    result = _consume_body_and_outer_jsonrpc(
-        body_chunks, read_chunk_bytes=transport_limits["read_chunk_bytes"],
-        max_streamed_bytes=transport_limits["max_streamed_bytes"], declared_length=declared_len,
-    )
+    result = _consume_body_and_outer_jsonrpc(body_chunks, read_chunk_bytes=transport_limits["read_chunk_bytes"], max_streamed_bytes=transport_limits["max_streamed_bytes"], declared_length=declared_len)
     raw_text, has_err_false, rows = parse_pipeboard_mcp_result(result, transport_limits=transport_limits)
     return {"raw_inner_text": raw_text, "has_is_error_false": has_err_false, "rows": rows, "transport_outcome": dict(_CLEAN_TRANSPORT_OUTCOME)}
 
 
 def parse_campaign_row_metrics(row: Mapping[str, Any]) -> dict[str, int]:
-    """Parse bounded `impressions`, `clicks`, and BRL `spend` from one campaign row."""
     if not isinstance(row, Mapping):
         raise Gov1WireRejection("invalid_row_shape", payload_schema_valid=False)
     rec: dict[str, int] = {}
@@ -433,7 +394,6 @@ def parse_campaign_row_metrics(row: Mapping[str, Any]) -> dict[str, int]:
 
 
 def reduce_pipeboard_insights_result(mcp_result: dict[str, Any]) -> list[dict[str, int]]:
-    """Pure stdlib mirror of `reduce_pipeboard_insights_result` (`0dbdfede` parity)."""
     _, _, rows = parse_pipeboard_mcp_result(mcp_result)
     out: list[dict[str, int]] = []
     for row in rows:
@@ -487,7 +447,7 @@ def _gate3_reduce_and_pair(
         raise Gov1WireRejection("reducer_output_invalid", reducer_order_or_count_mismatch=True) from None
     if type(actual) is not list or any(type(r) is not dict or not r or not set(r.keys()).issubset(_REDUCER_TO_METRIC.keys()) or any(type(v) is not int or not (0 <= v <= MAX_INT64) for v in r.values()) for r in actual):
         raise Gov1WireRejection("reducer_output_invalid", reducer_order_or_count_mismatch=True)
-    if actual != expected_records:
+    if canonicalize(actual) != canonicalize(expected_records):
         raise Gov1WireRejection("reducer_order_or_count_mismatch", reducer_order_or_count_mismatch=True)
     seen_triples: set[tuple[str, str, str]] = set()
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -510,7 +470,6 @@ def transform_pipeboard_response_to_batch_dict(
     headers: Sequence[tuple[str, str]], body_chunks: Iterable[bytes],
     reducer: Callable[[dict[str, Any]], list[dict[str, int]]] = reduce_pipeboard_insights_result,
 ) -> dict[str, Any]:
-    """Transform Pipeboard HTTP/MCP fixture response through Gates 1–3 into a `ProviderObservationBatch` dict."""
     admitted_day = admitted["computed_date_range"]["start_date"]
     build_pipeboard_insights_request(private_object_id=private_object_id, admitted_day=admitted_day, transport_limits=transport_limits)
     zero_io = {"credential_lookups": 0, "token_decryptions": 0, "socket_creations": 0, "provider_rpc_calls": 0}
@@ -525,14 +484,42 @@ def transform_pipeboard_response_to_batch_dict(
     return {"observed_capabilities": [admitted["canonical_query_contract"]["requested_capabilities"][0]], "retrieval_context": rctx, "transport_outcome": parsed["transport_outcome"], "resource_observations": res_obs, "normalized_errors": [], "io_counters": zero_io}
 
 
+def _validate_metric_obs_dict(raw_m: object, label: str) -> None:
+    m = dict(raw_m) if isinstance(raw_m, Mapping) else {}
+    exact_fields(m, {"metric_semantic_ref", "presence_status", "value_type", "raw_numeric_value", "unit", "currency"}, label)
+    m_ref = _opaque_ref_str(m["metric_semantic_ref"], f"{label}.metric_semantic_ref", expected_prefix="metric")
+    ps = m["presence_status"]
+    if type(ps) is not str or ps not in _PROVIDER_PRESENCE_SET:
+        raise ValueError(f"{label}.presence_status: invalid {ps!r}")
+    vt, rnv, unit, cur = m["value_type"], m["raw_numeric_value"], m["unit"], m["currency"]
+    if ps != "observed":
+        if (vt, rnv, unit, cur) != (None, None, None, None):
+            raise ValueError(f"{label}: non-observed presence requires null value fields")
+        return
+    if type(vt) is not str or type(rnv) is not str or type(unit) is not str or (cur is not None and type(cur) is not str):
+        raise ValueError(f"{label}: observed metric requires str value_type, raw_numeric_value, and unit")
+    if vt == "int64_count" and (unit != "count" or cur is not None or len(rnv) > 20 or _UNSIGNED_INT_RE.fullmatch(rnv) is None or int(rnv, 10) > MAX_INT64):
+        raise ValueError(f"{label}: invalid int64_count observation")
+    elif vt == "int64_minor_currency" and (unit != "minor_currency" or cur != "BRL" or len(rnv) > 20 or _UNSIGNED_INT_RE.fullmatch(rnv) is None or int(rnv, 10) > MAX_INT64):
+        raise ValueError(f"{label}: invalid int64_minor_currency observation")
+    elif vt == "decimal_ratio" and (unit != "ratio" or cur is not None or _RATIO6_RE.fullmatch(rnv) is None):
+        raise ValueError(f"{label}: invalid decimal_ratio observation")
+    elif vt not in {"int64_count", "int64_minor_currency", "decimal_ratio"}:
+        raise ValueError(f"{label}.value_type: unsupported {vt!r}")
+    if m_ref in _METRIC_SPECS and (vt, unit, cur == "BRL") != _METRIC_SPECS[m_ref]:
+        raise ValueError(f"{label}: base metric definition mismatch for {m_ref!r}")
+
+
 def validate_provider_observation_batch_dict(raw_batch: object, *, label: str = "observation_batch") -> dict[str, Any]:
-    """Validate closed 6-key `ProviderObservationBatch` dict for offline 7A (`io_counters == 0`)."""
-    if not isinstance(raw_batch, Mapping):
-        raise ValueError(f"{label}: expected Mapping")
-    b = copy.deepcopy(dict(raw_batch))
+    b = copy.deepcopy(dict(raw_batch)) if isinstance(raw_batch, Mapping) else {}
     exact_fields(b, {"observed_capabilities", "retrieval_context", "transport_outcome", "resource_observations", "normalized_errors", "io_counters"}, label)
-    if type(b["observed_capabilities"]) is not list or any(type(c) is not str for c in b["observed_capabilities"]):
+    caps = b["observed_capabilities"]
+    if type(caps) is not list or any(type(c) is not str for c in caps):
         raise ValueError(f"{label}.observed_capabilities: expected list[str]")
+    for c in caps:
+        _opaque_ref_str(c, f"{label}.observed_capabilities", expected_prefix="cap")
+    if len(set(caps)) != len(caps) or [c.encode("utf-8") for c in caps] != sorted(c.encode("utf-8") for c in caps):
+        raise ValueError(f"{label}.observed_capabilities: must be unique and sorted by UTF-8 bytes")
     rctx = dict(b["retrieval_context"]) if isinstance(b["retrieval_context"], Mapping) else {}
     exact_fields(rctx, {"retrieved_at_utc", "source_observation_ref", "adapter_version", "semantic_version"}, f"{label}.retrieval_context")
     parse_utc6_micros(rctx["retrieved_at_utc"], f"{label}.retrieved_at_utc")
@@ -541,21 +528,40 @@ def validate_provider_observation_batch_dict(raw_batch: object, *, label: str = 
     _strict_str(rctx["semantic_version"], f"{label}.semantic_version")
     to_d = dict(b["transport_outcome"]) if isinstance(b["transport_outcome"], Mapping) else {}
     exact_fields(to_d, set(_CLEAN_TRANSPORT_OUTCOME.keys()), f"{label}.transport_outcome")
-    if b["io_counters"] != {"credential_lookups": 0, "token_decryptions": 0, "socket_creations": 0, "provider_rpc_calls": 0}:
-        raise ValueError(f"{label}.io_counters: must be all zero in offline 7A")
-    if type(b["resource_observations"]) is not list or type(b["normalized_errors"]) is not list:
-        raise ValueError(f"{label}: expected list observations and errors")
+    if to_d["http_status"] is not None and (type(to_d["http_status"]) is not int or not (100 <= to_d["http_status"] <= 999)):
+        raise ValueError(f"{label}.transport_outcome.http_status: expected 100..999 int or None")
+    if any(type(to_d[k]) is not bool for k in _CLEAN_TRANSPORT_OUTCOME if k != "http_status"):
+        raise ValueError(f"{label}.transport_outcome: boolean flags must have strict bool type")
+    io_d = dict(b["io_counters"]) if isinstance(b["io_counters"], Mapping) else {}
+    exact_fields(io_d, {"credential_lookups", "token_decryptions", "socket_creations", "provider_rpc_calls"}, f"{label}.io_counters")
+    if any(type(v) is not int or v != 0 for v in io_d.values()) or type(b["resource_observations"]) is not list or type(b["normalized_errors"]) is not list:
+        raise ValueError(f"{label}: invalid io_counters or observation/error lists")
+    for ro in b["resource_observations"]:
+        rd = dict(ro) if isinstance(ro, Mapping) else {}
+        exact_fields(rd, {"resource_ref", "metric_date", "metric_observations"}, f"{label}.resource_obs")
+        validate_resource_ref_str(rd["resource_ref"], f"{label}.resource_ref")
+        _parse_iso_date(rd["metric_date"], f"{label}.metric_date")
+        if type(rd["metric_observations"]) is not list:
+            raise ValueError(f"{label}.metric_observations: expected list")
+        for mo in rd["metric_observations"]:
+            _validate_metric_obs_dict(mo, f"{label}.metric_obs")
+    for err in b["normalized_errors"]:
+        ed = dict(err) if isinstance(err, Mapping) else {}
+        exact_fields(ed, {"error_code", "category", "sanitized_detail"}, f"{label}.error")
+        _strict_str(ed["error_code"], f"{label}.error_code")
+        if type(ed["category"]) is not str or ed["category"] not in _ALLOWED_ERR_CATS:
+            raise ValueError(f"{label}.category: invalid {ed['category']!r}")
+        _strict_str(ed["sanitized_detail"], f"{label}.sanitized_detail")
     return b
 
 
 def build_canonical_regression_fixture(registry_snapshot_digest: str) -> dict[str, Any]:
-    """Build the canonical `65x23` `smart_ads/regression_fixture/v1` object for `registry_snapshot_digest`."""
     _sha256_str(registry_snapshot_digest, "registry_snapshot_digest")
     return {
         "$schema": "smart_ads/regression_fixture/v1", "fixture_id": "fixture:semantic-metric-65x23-v1",
-        "fixture_role": "regression_only", "provider_provenance": "synthetic",
-        "registry_transition": "none", "capability_promotion": "none",
-        "before_registry_snapshot_digest": registry_snapshot_digest, "after_registry_snapshot_digest": registry_snapshot_digest,
+        "fixture_role": "regression_only", "provider_provenance": "synthetic", "registry_transition": "none",
+        "capability_promotion": "none", "before_registry_snapshot_digest": registry_snapshot_digest,
+        "after_registry_snapshot_digest": registry_snapshot_digest,
         "truth_vectors": [{"aggregate_conversions": "65", "canonical_leads": "unknown"}, {"aggregate_conversions": "0", "canonical_leads": "23"}, {"aggregate_conversions": "unknown", "canonical_leads": "unknown"}],
         "semantic_refs": {"aggregate_conversions": "metric:aggregate_conversions_v1", "canonical_leads": "metric:canonical_leads_v1"},
     }
@@ -615,8 +621,7 @@ def _resolve_caps_and_cqc(
     bnd: Mapping[str, Any], snap: Mapping[str, Any], drv: Mapping[str, Any], drv_loc: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cap_map = {(c["capability_ref"], c["resource_scope_ref"]): c for c in snap["capabilities"]}
-    resolved_caps: list[dict[str, Any]] = []
-    metrics_set: set[str] = set()
+    resolved_caps, metrics_set = [], set()
     for cap_ref in req_caps:
         cap = cap_map.get((cap_ref, req["resource_scope_ref"]))
         if cap is None or cap["driver_id"] != bnd["driver_id"] or canonicalize(cap["driver_contract_locator"]) != canonicalize(dict(drv_loc)) or cap["state"] not in {"declared", "fixture_certified"}:
@@ -627,15 +632,12 @@ def _resolve_caps_and_cqc(
     if any(m not in drv["metric_source_mappings"] for m in req_metrics):
         raise ValueError("admission: unmapped required metric")
     cqc = {
-        "$schema": "smart_ads/canonical_query_contract/v1", "tenant_ref": req["tenant_ref"],
-        "binding_ref": req["binding_ref"], "account_ref": bnd["account_ref"],
-        "resource_scope_ref": req["resource_scope_ref"], "ad_platform_ref": "meta",
+        "$schema": "smart_ads/canonical_query_contract/v1", "tenant_ref": req["tenant_ref"], "binding_ref": req["binding_ref"],
+        "account_ref": bnd["account_ref"], "resource_scope_ref": req["resource_scope_ref"], "ad_platform_ref": "meta",
         "date_rule": "previous_local_day", "date_range": {"start_date": prev_day, "end_date": prev_day, "inclusive": True},
-        "reporting_timezone": "America/Sao_Paulo", "tzdb_version": tzdb_version,
-        "resource_level": "campaign", "metric_semantic_refs": req_metrics,
-        "requested_capabilities": req_caps, "breakdowns": [], "currency": "BRL",
-        "attribution_semantics": "not_applicable_to_selected_metrics",
-        "pagination_semantics": "complete_result_required",
+        "reporting_timezone": "America/Sao_Paulo", "tzdb_version": tzdb_version, "resource_level": "campaign",
+        "metric_semantic_refs": req_metrics, "requested_capabilities": req_caps, "breakdowns": [], "currency": "BRL",
+        "attribution_semantics": "not_applicable_to_selected_metrics", "pagination_semantics": "complete_result_required",
         "aggregation_semantics": "per_campaign_rows_no_cross_campaign_aggregation",
     }
     return resolved_caps, cqc
@@ -648,12 +650,11 @@ def recompute_fixture_7a_admission(
     driver_contract_locator: Mapping[str, Any], driver_contract: Mapping[str, Any],
     sealed_sandbox_profile_locator: Mapping[str, Any], regression_fixture_locator: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Recompute deterministic `AdmittedCollection` dict and `ArtifactLocator` dict for `fixture_7a`."""
     _opaque_ref_str(admission_id, "admission_id", expected_prefix="admission")
     req = dict(collection_request)
     exact_fields(req, {"request_id", "collection_purpose", "tenant_ref", "binding_ref", "resource_scope_ref", "date_rule", "resource_level", "requested_capabilities", "breakdowns"}, "collection_request")
     _strict_str(req["request_id"], "request_id")
-    if req["collection_purpose"] != "fixture_7a" or req["date_rule"] != "previous_local_day" or req["resource_level"] != "campaign" or req["breakdowns"] != [] or type(req["requested_capabilities"]) is not list or not req["requested_capabilities"]:
+    if req["collection_purpose"] != "fixture_7a" or req["date_rule"] != "previous_local_day" or req["resource_level"] != "campaign" or type(req["breakdowns"]) is not list or len(req["breakdowns"]) != 0 or type(req["requested_capabilities"]) is not list or not req["requested_capabilities"]:
         raise ValueError("collection_request: invalid fixture_7a request fields")
     req_caps = sorted({_opaque_ref_str(c, "cap", expected_prefix="cap") for c in req["requested_capabilities"]}, key=lambda s: s.encode("utf-8"))
     if len(req_caps) != len(req["requested_capabilities"]):
@@ -685,9 +686,7 @@ def recompute_fixture_7a_admission(
 def _project_batch_facts(
     batch_dict: Mapping[str, Any], admitted_dict: Mapping[str, Any], metric_source_mappings: Mapping[str, str]
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    admitted_day = admitted_dict["computed_date_range"]["start_date"]
-    to_dict = dict(batch_dict["transport_outcome"])
-    facts: list[dict[str, Any]] = []
+    admitted_day, to_dict, facts = admitted_dict["computed_date_range"]["start_date"], dict(batch_dict["transport_outcome"]), []
     for r_obs in batch_dict["resource_observations"]:
         if r_obs["metric_date"] != admitted_day:
             to_dict["response_date_mismatch"] = True
@@ -705,7 +704,6 @@ def recompute_collection_completeness_dict(
     *, expected_resources: Sequence[Mapping[str, Any]], required_metrics: Sequence[str],
     metric_source_mappings: Mapping[str, str], batch_dict: Mapping[str, Any], admitted_dict: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Evaluate `U × M` completeness strictly in order `failed -> partial -> complete`."""
     to_d, facts = _project_batch_facts(batch_dict, admitted_dict, metric_source_mappings)
     failed = [r for flag, r in ((not to_d["network_ok"], "network_failed"), (not to_d["auth_ok"], "auth_failed"), (not to_d["media_and_encoding_valid"], "media_or_encoding_invalid"), (to_d["jsonrpc_error"], "jsonrpc_error")) if flag]
     if to_d["http_status"] is None:
@@ -730,8 +728,7 @@ def _evaluate_partial_or_complete(
     to_d: Mapping[str, Any], facts: Sequence[Mapping[str, Any]], expected_fks: set[bytes]
 ) -> dict[str, Any]:
     partial = [r for flag, r in ((not to_d["payload_schema_valid"], "payload_schema_invalid"), (to_d["response_date_mismatch"], "response_date_mismatch"), (to_d["truncated_2mib"], "truncated_2mib"), (to_d["non_empty_continuation"], "non_empty_continuation"), (to_d["reducer_order_or_count_mismatch"], "reducer_order_or_count_mismatch"), (to_d["duplicate_provider_observation"], "duplicate_provider_observation")) if flag]
-    seen_fks, seen_ids, non_comp = set(), set(), []
-    has_dup = False
+    seen_fks, seen_ids, non_comp, has_dup = set(), set(), [], False
     for f in facts:
         fk = f["fact_key"]
         fk_b, id_b = canonicalize(fk), canonicalize([fk["resource_ref"], fk["metric_date"], fk["resource_level"], fk["breakdown_signature"], fk["metric_semantic_ref"]])
