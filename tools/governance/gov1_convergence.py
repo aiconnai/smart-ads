@@ -628,8 +628,8 @@ def _validate_mcp_envelope_structure(envelope: object) -> dict[str, Any]:
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from tools.governance import gov1_7a_runner
 from tools.governance.gov1_7a_negative import _NEG_ENVELOPE_16_KEYS
-from tools.governance.gov1_7a_runner import resolve_pinned_pipeboard_d26_blobs
 from tools.governance.gov1_d4_helpers import (
     Gov1InstallationPins,
     SnapshotStore,
@@ -970,40 +970,91 @@ def build_gov1_convergence_record_envelope(
     return envelope
 
 
-def _verify_envelope_pr3_preflight_inputs(
-    pr3_verifier: Pr3SevenAConstituentVerifier,
+def _capture_envelope_pr3_preflight_inputs(
+    pr3_verifier: Pr3SevenAConstituentVerifier | None,
     *,
     wheel_bytes: bytes,
-    prov_payload: Mapping[str, Any],
     repo_dir: Path,
     source_commit_sha: str,
     corpus_path: Path | None,
     legacy_repo: Path | None,
     legacy_blobs_dir: Path | None,
-) -> None:
+    require_external: bool = False,
+) -> tuple[bytes, Mapping[str, bytes], Mapping[str, bytes]] | None:
     cert7a = _cert7a_mod()
-    has_ext_flags = corpus_path is not None or legacy_repo is not None or legacy_blobs_dir is not None
-    if has_ext_flags:
+    has_ext = require_external or corpus_path is not None or legacy_repo is not None or legacy_blobs_dir is not None
+    if has_ext:
         if corpus_path is None or (legacy_repo is None) == (legacy_blobs_dir is None):
             raise ValueError("verify_gov1_convergence_record: require corpus_path and (legacy_repo XOR legacy_blobs_dir)")
         _, corpus_bytes = _read_nonempty_regular_file(corpus_path, "corpus_path")
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
-        d26_blobs = resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
+        d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
         if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
-            pr3_verifier.verify_bound_preflight_inputs(
-                wheel_bytes=wheel_bytes, corpus_bytes=corpus_bytes,
-                stripped_provenance_payload=prov_payload, resolved_git_blobs=git_blobs, resolved_d26_blobs=d26_blobs,
-            )
-        return
+            if wheel_bytes != pr3_verifier._wheel_bytes or corpus_bytes != pr3_verifier._corpus_bytes or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs) or dict(d26_blobs) != dict(pr3_verifier._resolved_d26_blobs):
+                raise ValueError("verify_gov1_convergence_record: preflight inputs diverged from bound SevenAConstituentVerifier")
+        return corpus_bytes, git_blobs, d26_blobs
     if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
-        pr3_verifier.verify_bound_preflight_inputs(
-            wheel_bytes=wheel_bytes,
-            corpus_bytes=pr3_verifier._corpus_bytes,
-            stripped_provenance_payload=prov_payload,
-            resolved_git_blobs=git_blobs,
-            resolved_d26_blobs=pr3_verifier._resolved_d26_blobs,
+        if wheel_bytes != pr3_verifier._wheel_bytes or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs):
+            raise ValueError("verify_gov1_convergence_record: wheel_bytes or git_blobs diverged from bound SevenAConstituentVerifier")
+        return pr3_verifier._corpus_bytes, git_blobs, pr3_verifier._resolved_d26_blobs
+    return None
+
+
+def _parse_convergence_envelope_header(envelope: object) -> dict[str, Any]:
+    if not isinstance(envelope, dict) or "artifact_kind" in envelope:
+        raise ValueError("verify_gov1_convergence_record: expected gov1_convergence_record/v1 P1 envelope")
+    exact_fields(envelope, _GOV1_CONVERGENCE_ENVELOPE_FIELDS, "gov1_convergence_record_envelope")
+    _require_exact_str(envelope["$schema"], GOV1_CONVERGENCE_SCHEMA, "gov1_convergence_record.$schema")
+    _verify_envelope_integrity(envelope, label="gov1_convergence_record")
+    payload = {k: copy.deepcopy(v) for k, v in envelope.items() if k not in {"$schema", "integrity"}}
+    _validate_gov1_convergence_structural_fields(payload, store=None)
+    return payload
+
+
+def _verify_convergence_envelope_core(
+    envelope: dict[str, Any], *, store: Store | None, seccomp_profile: dict[str, Any] | None,
+    wheel_path: Path | None, corpus_path: Path | None, repo_root: Path | None,
+    legacy_repo: Path | None, legacy_blobs_dir: Path | None, backend_wheel_dir: Path | None,
+    site_packages_dir: Path | None, pr3_verifier: Pr3SevenAConstituentVerifier | None,
+    probe_runner: IsolatedWheelProbeRunner | None, cli_auto_pr3: bool = False,
+) -> dict[str, Any]:
+    payload = _parse_convergence_envelope_header(envelope)
+    if not cli_auto_pr3:
+        if pr3_verifier is None:
+            raise ValueError("gov1_convergence_record/v1: fail-closed in Etapa 8; Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent")
+        if not isinstance(pr3_verifier, Pr3SevenAConstituentVerifier):
+            raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier does not satisfy Pr3SevenAConstituentVerifier")
+    if not isinstance(store, Store) or not isinstance(seccomp_profile, dict):
+        raise ValueError("verify_gov1_convergence_record: Store and seccomp_profile are required")
+    _, wheel_bytes = _read_nonempty_regular_file(_require_path(wheel_path, "wheel_path"), "wheel_path")
+    repo_dir = _require_path(repo_root, "repo_root")
+    validated = _validate_gov1_convergence_structural_fields(payload, store=store)
+    sbx_obj, prov_obj, bound_obj, mcp_obj, _, _ = _load_six_convergence_constituents(store, validated)
+    preflight = _capture_envelope_pr3_preflight_inputs(
+        pr3_verifier, wheel_bytes=wheel_bytes, repo_dir=repo_dir, source_commit_sha=validated["source_commit_sha"],
+        corpus_path=corpus_path, legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir, require_external=cli_auto_pr3,
+    )
+    _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
+        wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sbx_obj, prov_obj=prov_obj,
+        bound_obj=bound_obj, mcp_obj=mcp_obj, repo_dir=repo_dir,
+        backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=probe_runner,
+    )
+    cert7a = _cert7a_mod()
+    active_pr3 = (
+        cert7a.SevenAConstituentVerifier(
+            wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],  # type: ignore[index]
+            resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],  # type: ignore[index]
         )
+        if cli_auto_pr3 else pr3_verifier
+    )
+    if preflight is not None and isinstance(active_pr3, cert7a.SevenAConstituentVerifier):
+        active_pr3.verify_bound_preflight_inputs(
+            wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
+            resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
+        )
+    _enforce_pr3_verifier_gate(payload=validated, store=store, pr3_verifier=active_pr3)
+    return {"schema": GOV1_CONVERGENCE_SCHEMA, "convergence_status": "PASS", "authority": "none", "wheel_digest": validated["wheel_digest"], "payload": validated}
 
 
 def verify_gov1_convergence_record(
@@ -1021,39 +1072,13 @@ def verify_gov1_convergence_record(
     pr3_verifier: Pr3SevenAConstituentVerifier | None = None,
     probe_runner: IsolatedWheelProbeRunner | None = None,
 ) -> dict[str, Any]:
-    """Verify `smart_ads/gov1_convergence_record/v1` with Stage-7 material handoff before 7A replay."""
-    if not isinstance(envelope, dict) or "artifact_kind" in envelope:
-        raise ValueError("verify_gov1_convergence_record: expected gov1_convergence_record/v1 P1 envelope")
-    exact_fields(envelope, _GOV1_CONVERGENCE_ENVELOPE_FIELDS, "gov1_convergence_record_envelope")
-    _require_exact_str(envelope["$schema"], GOV1_CONVERGENCE_SCHEMA, "gov1_convergence_record.$schema")
-    _verify_envelope_integrity(envelope, label="gov1_convergence_record")
-    payload = {k: copy.deepcopy(v) for k, v in envelope.items() if k not in {"$schema", "integrity"}}
-    _validate_gov1_convergence_structural_fields(payload, store=None)
-    if pr3_verifier is None:
-        raise ValueError("gov1_convergence_record/v1: fail-closed in Etapa 8; Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent")
-    if not isinstance(pr3_verifier, Pr3SevenAConstituentVerifier):
-        raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier does not satisfy Pr3SevenAConstituentVerifier")
-    if not isinstance(store, Store) or not isinstance(seccomp_profile, dict):
-        raise ValueError("verify_gov1_convergence_record: Store and seccomp_profile are required")
-    _, wheel_bytes = _read_nonempty_regular_file(_require_path(wheel_path, "wheel_path"), "wheel_path")
-    repo_dir = _require_path(repo_root, "repo_root")
-    validated = _validate_gov1_convergence_structural_fields(payload, store=store)
-    sbx_obj, prov_obj, bound_obj, mcp_obj, _, _ = _load_six_convergence_constituents(store, validated)
-    _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
-        wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sbx_obj,
-        prov_obj=prov_obj, bound_obj=bound_obj, mcp_obj=mcp_obj, repo_dir=repo_dir,
-        backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=probe_runner,
+    """Verify `smart_ads/gov1_convergence_record/v1` with preflight -> Stage-7 -> passive 7A replay."""
+    return _verify_convergence_envelope_core(
+        envelope, store=store, seccomp_profile=seccomp_profile, wheel_path=wheel_path, corpus_path=corpus_path,
+        repo_root=repo_root, legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir,
+        backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir,
+        pr3_verifier=pr3_verifier, probe_runner=probe_runner, cli_auto_pr3=False,
     )
-    _verify_envelope_pr3_preflight_inputs(
-        pr3_verifier, wheel_bytes=wheel_bytes, prov_payload=prov_res["payload"], repo_dir=repo_dir,
-        source_commit_sha=validated["source_commit_sha"], corpus_path=corpus_path,
-        legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir,
-    )
-    _enforce_pr3_verifier_gate(payload=validated, store=store, pr3_verifier=pr3_verifier)
-    return {
-        "schema": GOV1_CONVERGENCE_SCHEMA, "convergence_status": "PASS",
-        "wheel_digest": validated["wheel_digest"], "payload": validated,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1486,7 +1511,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             envelope, validated, auth, (signer, GOV1_CONVERGENCE_SCHEMA, action), artifact_locator
         )
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, validated["source_commit_sha"])
-        d26_blobs = resolve_pinned_pipeboard_d26_blobs(legacy_repo=self.legacy_repo, legacy_blobs_dir=self.legacy_blobs_dir)
+        d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=self.legacy_repo, legacy_blobs_dir=self.legacy_blobs_dir)
         _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
             wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sbx_env, prov_obj=prov_env,  # type: ignore[arg-type]
             bound_obj=bound_env, mcp_obj=mcp_env, repo_dir=repo_dir, backend_wheel_dir=backend_wheel_dir,

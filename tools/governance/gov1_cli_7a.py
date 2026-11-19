@@ -32,7 +32,6 @@ from tools.governance.gov1_7a_negative import (
     PINNED_7A_NEGATIVE_SUITE_DIGEST,
     build_negative_security_test_report_candidate,
     build_negative_security_test_report_envelope,
-    extract_provenance_payload,
     verify_negative_security_test_report,
 )
 from tools.governance.gov1_d4_helpers import (
@@ -622,21 +621,13 @@ def _verify_gov1_convergence_record(
         return {"status": "PASS", "mode": "candidate", "signable": False, "authority": "none", "schema": res["schema"], "wheel_digest": res["wheel_digest"], "converged_at_utc": res["converged_at_utc"]}, 0
     verify_sig_fn(artifact, schema=gov1_convergence.GOV1_CONVERGENCE_SCHEMA, pubkey_b64=args.pubkey_raw_base64, cmd=cmd)
     _check_optional_conv_envelope_overrides(args, artifact, store, cmd)
-    _, whl_bytes = _read_nonempty_regular_file(Path(args.wheel), "wheel")
-    _, corpus_bytes = _read_nonempty_regular_file(Path(args.corpus), "corpus")
-    git_blobs, d26_blobs = _resolve_trusted_7a_preflights(args, source_commit_sha=artifact["source_commit_sha"], cmd=cmd)
-    bound_env = store.get(artifact["wheel_boundary_report_locator"], expected_type=gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA)
-    prov_env = store.get(bound_env["wheel_build_provenance_locator"], expected_type=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA)
-    pr3_v = SevenAConstituentVerifier(
-        wheel_bytes=whl_bytes, corpus_bytes=corpus_bytes, stripped_provenance_payload=extract_provenance_payload(prov_env),
-        resolved_git_blobs=git_blobs, resolved_d26_blobs=d26_blobs,
-    )
-    res = gov1_convergence.verify_gov1_convergence_record(
+    res = gov1_convergence._verify_convergence_envelope_core(
         artifact, store=store, seccomp_profile=seccomp, wheel_path=Path(args.wheel),
         corpus_path=Path(args.corpus), repo_root=Path(args.repo),
-        legacy_repo=leg_repo, legacy_blobs_dir=leg_blobs, pr3_verifier=pr3_v,
+        legacy_repo=leg_repo, legacy_blobs_dir=leg_blobs,
+        backend_wheel_dir=None, site_packages_dir=None, pr3_verifier=None, probe_runner=None, cli_auto_pr3=True,
     )
-    return {"status": "PASS", "mode": "envelope", "signature_verified": True, "d4_authority_verified": False, "authority": "none", "schema": res["schema"], "wheel_digest": res["wheel_digest"], "converged_at_utc": res["payload"]["converged_at_utc"]}, 0
+    return {"status": "PASS", "mode": "envelope", "signature_verified": True, "d4_authority_verified": False, "authority": res["authority"], "schema": res["schema"], "wheel_digest": res["wheel_digest"], "converged_at_utc": res["payload"]["converged_at_utc"]}, 0
 
 
 def dispatch_7a_cli_command(

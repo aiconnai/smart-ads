@@ -12,17 +12,18 @@ import tempfile
 from types import MappingProxyType
 from typing import Any, Final
 
-from tools.governance import p1
-from tools.governance.decomposition_governance import ANCHOR_PUBLIC, REPO_ROOT, verified_run_context_identity
+from tools.governance import decomposition_governance, gov1_7a_runner, p1
+from tools.governance.decomposition_governance import ANCHOR_PUBLIC, REPO_ROOT
 from tools.governance.decomposition_runtime import (
-    HEAD, REGISTRY, STATE, ClockInterval, InstallationPins, load_object, public_key, registry, require, validity,
+    CONFIG, HEAD, INVENTORY, REGISTRY, STATE, ClockInterval, InstallationPins,
+    load_object, public_key, registry, require, validity,
 )
 from tools.governance.gov1_7a_negative import (
     NEGATIVE_SECURITY_REPORT_SCHEMA, extract_provenance_payload, verify_negative_security_test_report,
 )
 from tools.governance.gov1_7a_runner import (
     EXPECTED_RESOURCE_INVENTORY_SCHEMA, GIT_ARTIFACT_PROVENANCE_SCHEMA, PINNED_PIPEBOARD_D26_SPECS,
-    PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, resolve_pinned_pipeboard_d26_blobs,
+    PRIVATE_REGISTRY_SNAPSHOT_SCHEMA,
     verify_expected_resource_inventory_envelope, verify_git_artifact_provenance_envelope,
 )
 from tools.governance.gov1_mcp import MCP_REJECTION_REPORT_SCHEMA, verify_mcp_rejection_matrix_report
@@ -154,6 +155,56 @@ class SnapshotStore(Store):
         return copy.deepcopy(value)
 
 
+def _resolve_repo_pins_identity(
+    *,
+    configuration_digest: str | None,
+    runtime_config: Mapping[str, Any] | bytes | None,
+    installation_authority: str | None,
+    cell_id: str | None,
+    head_register: str | None,
+    checkpoint_register: str | None,
+) -> tuple[str, str, str, str, str]:
+    if (configuration_digest is None) == (runtime_config is None):
+        raise ValueError(
+            "Gov1InstallationPins.from_repo_prerequisites: specify exactly one of configuration_digest or runtime_config"
+        )
+    if runtime_config is not None:
+        if type(runtime_config) is bytes:
+            raw_cfg = runtime_config
+            loaded = loads_strict(raw_cfg.decode("utf-8"))
+            if not isinstance(loaded, dict):
+                raise ValueError("runtime_config: expected JSON object bytes")
+            cfg_d = loaded
+        elif isinstance(runtime_config, Mapping):
+            cfg_d = dict(runtime_config)
+            raw_cfg = canonicalize(cfg_d)
+            loads_strict(raw_cfg.decode("utf-8"))
+        else:
+            raise ValueError("runtime_config: expected Mapping or canonical UTF-8 bytes")
+        exact_fields(cfg_d, CONFIG, "protected configuration")
+        require(cfg_d["$schema"] == "smart_ads/cell_trust_anchor_config/v1", "configuration schema mismatch")
+        public_key(cfg_d)
+        require(cfg_d["public_key_base64"] == decomposition_governance.ANCHOR_PUBLIC, "runtime_config anchor mismatch")
+        require(cfg_d["allowed_registry_artifact_types"] == [REGISTRY, INVENTORY], "bootstrap allowlist mismatch")
+        resolved: list[str] = []
+        for name, val in (
+            ("installation_authority", installation_authority), ("cell_id", cell_id),
+            ("head_register", head_register), ("checkpoint_register", checkpoint_register),
+        ):
+            cfg_str = _strict_str(cfg_d[name], f"runtime_config.{name}")
+            if val is not None and val != cfg_str:
+                raise ValueError(f"Gov1InstallationPins: {name} mismatch against runtime_config")
+            resolved.append(cfg_str)
+        return digest(raw_cfg), resolved[0], resolved[1], resolved[2], resolved[3]
+    return (
+        _sha256_str(configuration_digest, "configuration_digest"),
+        _strict_str(installation_authority, "installation_authority"),
+        _strict_str(cell_id, "cell_id"),
+        _strict_str(head_register, "head_register"),
+        _strict_str(checkpoint_register, "checkpoint_register"),
+    )
+
+
 @dataclass(frozen=True)
 class Gov1InstallationPins(InstallationPins):
     """Out-of-band installation pins binding run context and pre-head D4 registry lineage."""
@@ -162,6 +213,9 @@ class Gov1InstallationPins(InstallationPins):
     pinned_pre_head_registry_locators: tuple[dict[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
+        _sha256_str(self.configuration_digest, "Gov1InstallationPins.configuration_digest")
+        for attr in ("installation_authority", "cell_id", "head_register", "checkpoint_register", "owner_principal", "owner_tenant"):
+            _strict_str(getattr(self, attr), f"Gov1InstallationPins.{attr}")
         if not isinstance(self.pinned_run_context_locator, Mapping):
             raise ValueError("Gov1InstallationPins: pinned_run_context_locator must be a Mapping")
         run_ctx = copy.deepcopy(dict(self.pinned_run_context_locator))
@@ -181,41 +235,26 @@ class Gov1InstallationPins(InstallationPins):
 
     @classmethod
     def from_repo_prerequisites(
-        cls,
-        root: Path = REPO_ROOT,
-        *,
-        configuration_digest: str | None = None,
-        installation_authority: str = "smart-ads-installation",
-        cell_id: str = "smart-ads-cell",
-        head_register: str = "head:smart-ads",
-        checkpoint_register: str = "checkpoint:smart-ads",
-        owner_principal: str = "principal:ronaldo",
-        owner_tenant: str = "mbras",
+        cls, root: Path = REPO_ROOT, *, configuration_digest: str | None = None,
+        runtime_config: Mapping[str, Any] | bytes | None = None, installation_authority: str | None = None,
+        cell_id: str | None = None, head_register: str | None = None, checkpoint_register: str | None = None,
+        owner_principal: str = "principal:ronaldo", owner_tenant: str = "mbras",
         extra_pre_head_registry_locators: Sequence[dict[str, Any]] = (),
     ) -> Gov1InstallationPins:
-        repo_path = Path(root)
-        ident = verified_run_context_identity(repo_path)
-        cfg_digest = (
-            configuration_digest
-            if configuration_digest is not None
-            else digest((repo_path / "docs/governance/trust-anchor/cell_trust_anchor_config.json").read_bytes())
+        cfg_dig, inst_auth, c_id, h_reg, ck_reg = _resolve_repo_pins_identity(
+            configuration_digest=configuration_digest, runtime_config=runtime_config,
+            installation_authority=installation_authority, cell_id=cell_id,
+            head_register=head_register, checkpoint_register=checkpoint_register,
         )
+        ident = decomposition_governance.verified_run_context_identity(Path(root))
         pre_locs = (
-            ident["gate2_registry_locator"],
-            ident["run_registry_locator"],
-            ident["prerequisite_epoch3_registry_locator"],
+            ident["gate2_registry_locator"], ident["run_registry_locator"], ident["prerequisite_epoch3_registry_locator"],
             *(copy.deepcopy(dict(x)) for x in extra_pre_head_registry_locators),
         )
         return cls(
-            configuration_digest=cfg_digest,
-            installation_authority=installation_authority,
-            cell_id=cell_id,
-            head_register=head_register,
-            checkpoint_register=checkpoint_register,
-            owner_principal=owner_principal,
-            owner_tenant=owner_tenant,
-            pinned_run_context_locator=ident["run_context_locator"],
-            pinned_pre_head_registry_locators=pre_locs,
+            configuration_digest=cfg_dig, installation_authority=inst_auth, cell_id=c_id,
+            head_register=h_reg, checkpoint_register=ck_reg, owner_principal=owner_principal, owner_tenant=owner_tenant,
+            pinned_run_context_locator=ident["run_context_locator"], pinned_pre_head_registry_locators=pre_locs,
         )
 
 
@@ -242,14 +281,16 @@ def _resolve_d4_pins(
             tuple(copy.deepcopy(loc) for loc in pins.pinned_pre_head_registry_locators),
         )
     require(
-        isinstance(config, Mapping) and config.get("public_key_base64") == ANCHOR_PUBLIC,
+        isinstance(config, Mapping) and config.get("public_key_base64") == decomposition_governance.ANCHOR_PUBLIC,
         "base InstallationPins fallback requires ANCHOR_PUBLIC",
     )
     require(
         h1_epoch <= 4,
         "base InstallationPins fallback requires head_1_reg epoch <= 4",
     )
-    ident = verified_run_context_identity(Path(repo_root) if repo_root is not None else REPO_ROOT)
+    ident = decomposition_governance.verified_run_context_identity(
+        Path(repo_root) if repo_root is not None else REPO_ROOT
+    )
     base_3 = (
         ident["gate2_registry_locator"],
         ident["run_registry_locator"],
@@ -389,7 +430,10 @@ def _reconstruct_d4_registry_chain(
             bytes_by_epoch[ep] = raw_b
     tip_epoch = head_regs[-1]["epoch"]
     require(
-        set(regs_by_epoch.keys()) == set(range(1, tip_epoch + 1)),
+        type(tip_epoch) is int
+        and tip_epoch >= 1
+        and len(regs_by_epoch) == tip_epoch
+        and all(1 <= ep <= tip_epoch for ep in regs_by_epoch),
         "non-contiguous D4 registry epoch sequence in 1..tip_reg",
     )
     for ep in range(1, tip_epoch):
@@ -673,7 +717,7 @@ def verify_gov1_convergence_candidate(
     )
     cert7a = _cert7a_mod()
     resolved_git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, conv_p["source_commit_sha"])
-    resolved_d26_blobs = resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
+    resolved_d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
     _, _, prov_res, _, _ = _run_disposable_stage7_material_handoff(
         wheel_bytes=wheel_bytes, seccomp_profile=seccomp_profile, sandbox_obj=sandbox_profile,
         prov_obj=wheel_provenance, bound_obj=wheel_boundary_report, mcp_obj=mcp_rejection_report,
@@ -711,7 +755,7 @@ def _reload_and_verify_d4_external_7a_inputs(
     require(reloaded_corpus == expected_corpus_bytes, "corpus_path bytes mutated during admission")
     reloaded_git = _cert7a_mod().resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
     require(dict(reloaded_git) == dict(expected_git_blobs), "smart_ads Git blobs mutated during admission")
-    reloaded_d26 = resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
+    reloaded_d26 = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
     require(dict(reloaded_d26) == dict(expected_d26_blobs), "pinned d26 legacy blobs mutated during admission")
 
 
