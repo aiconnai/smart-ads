@@ -1,12 +1,13 @@
 """Closed P1 `smart_ads/certification_7a_record/v1`, digests, corpus parser, and replay (ADR-0001 §§3.2, 4.1, 5.1)."""
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-import functools
 import hashlib
 import re
 from typing import Any, ClassVar, Final
+import zlib
 
 from smart_ads.adapters.pipeboard import PipeboardFixtureAdapter, PrivatePipeboardBindingBoundary
 from smart_ads.analytics.lattice import RegressionFixtureV1
@@ -14,11 +15,7 @@ from smart_ads.application.admission import AdmittedCollectionBundle, admit_coll
 from smart_ads.application.collection import evaluate_fixture_collection
 from smart_ads.contracts.git_provenance import GitArtifactProvenance, sort_git_provenance_locators, verify_git_provenance_against_bytes
 from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, MAX_JCS_SAFE_INT, ArtifactLocator, P1Integrity, canonicalize_jcs, jcs_sha256, loads_strict_json, p1_content_digest, sort_utf8_strings
-from smart_ads.contracts.negative_security import (
-    _RUN_CONTEXT_SCHEMA, _SANDBOX_PROFILE_SCHEMA, _SHARED_RUNTIME_16_FIELDS, _SPEC_17_FIELDS, _WHEEL_PROVENANCE_SCHEMA,
-    NegativeSecurityTestReport, SandboxResourceLimits, SandboxRuntimeReadback, SandboxTermination, SandboxUsageCounters,
-    _exact_str, _reparse, _require_typed_locator, _strict_bool, _strict_str, _utc_sec_micros, evaluate_breach_predicates, verify_negative_security_report_against_profile,
-)
+from smart_ads.contracts.negative_security import _RUN_CONTEXT_SCHEMA, _SANDBOX_PROFILE_SCHEMA, _SHARED_RUNTIME_16_FIELDS, _SPEC_17_FIELDS, _WHEEL_PROVENANCE_SCHEMA, NegativeSecurityTestReport, SandboxResourceLimits, SandboxRuntimeReadback, SandboxTermination, SandboxUsageCounters, _exact_str, _reparse, _require_typed_locator, _strict_bool, _strict_str, _utc_sec_micros, evaluate_breach_predicates, verify_negative_security_report_against_profile
 from smart_ads.contracts.scalars import ClosedValidationError, parse_timestamp_utc_micros, require_exact_keys, require_mapping, validate_hex40, validate_opaque_ref, validate_sha256_prefixed
 from smart_ads.contracts.schemas import CollectionRequest, PurposePrerequisiteLocators, RetrievalContext, validate_source_metric_ref
 from smart_ads.domain.pipeboard_contract import PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO, PINNED_PIPEBOARD_D26_SPECS, PipeboardPhase1Contract
@@ -29,20 +26,9 @@ from smart_ads.ports.provider import ProviderObservationBatch
 
 CERTIFICATION_7A_RECORD_SCHEMA: Final[str] = "smart_ads/certification_7a_record/v1"
 PIPEBOARD_7A_CORPUS_SCHEMA: Final[str] = "smart_ads/pipeboard_7a_corpus/v1"
-PARSER_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (
-    ("mbras-tech/mbras-campaigns", "scripts/operator/meta_daily_contract.py"),
-    ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/reducer.py"),
-    ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/wire.py"),
-)
-ADAPTER_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (
-    ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/__init__.py"),
-    ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/adapter.py"),
-)
-MAPPING_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (
-    ("aiconnai/smart-ads", "src/smart_ads/application/collection.py"),
-    ("aiconnai/smart-ads", "src/smart_ads/domain/pipeboard_contract.py"),
-    ("aiconnai/smart-ads", "src/smart_ads/domain/resource_ref.py"),
-)
+PARSER_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (("mbras-tech/mbras-campaigns", "scripts/operator/meta_daily_contract.py"), ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/reducer.py"), ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/wire.py"))
+ADAPTER_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/__init__.py"), ("aiconnai/smart-ads", "src/smart_ads/adapters/pipeboard/adapter.py"))
+MAPPING_ARTIFACT_PATHS: Final[tuple[tuple[str, str], ...]] = (("aiconnai/smart-ads", "src/smart_ads/application/collection.py"), ("aiconnai/smart-ads", "src/smart_ads/domain/pipeboard_contract.py"), ("aiconnai/smart-ads", "src/smart_ads/domain/resource_ref.py"))
 CORPUS_GIT_PATH: Final[tuple[str, str]] = ("aiconnai/smart-ads", "tests/certification_7a/fixtures/pipeboard_7a_corpus_v1.json")
 
 # Closed deterministic JSON corpus structure shared with `tools/governance/gov1_7a_certification.py`:
@@ -55,32 +41,17 @@ CORPUS_CASE_KEYS: Final[frozenset[str]] = frozenset("case_id admission_id clock_
 
 _WHEEL_BOUNDARY_SCHEMA: Final[str] = "smart_ads/wheel_boundary_report/v1"
 _WHEEL_RECORD_MEMBER: Final[str] = "smart_ads-0.1.0.dist-info/RECORD"
+_MAX_WHEEL_MEMBER_BYTES: Final[int] = 8_388_608
+_NONNEG_DEC_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]*)\Z")
 _PHASE1_REQUIRED_METRICS: Final[tuple[str, ...]] = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
 _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed"})
 _SOURCE_CONTRACT_REF_RE: Final[re.Pattern[str]] = re.compile(r"\Aopaque-driver-contract:sha256:[0-9a-f]{64}\Z")
 _HEX64_RE: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{64}\Z")
-_WHEEL_BOUNDARY_ENVELOPE_17_KEYS: Final[frozenset[str]] = frozenset(
-    "$schema integrity migration_run_context_locator build_run_id verified_at_utc repository source_commit_sha wheel_digest "
-    "build_backend_digest schema_bundle_digest sorted_record_entries sorted_record_digest archive_allowlist_passed "
-    "ast_boundary_scan_passed isolated_venv_import_passed packaged_modules wheel_build_provenance_locator".split()
-)
-_CASE_SUBOBJ_TYPES: Final[tuple[tuple[str, type[Any]], ...]] = (
-    ("runtime_readback", SandboxRuntimeReadback), ("effective_resource_limits", SandboxResourceLimits),
-    ("usage", SandboxUsageCounters), ("termination", SandboxTermination), ("observation_batch", ProviderObservationBatch),
-)
-_CASE_SCALAR_KEYS: Final[tuple[str, ...]] = (
-    "case_id", "admitted_collection_digest", "source_contract_ref", "sandbox_instance_ref", "execution_binding_digest",
-    "started_at_utc", "ended_at_utc", "expected_completeness_status", "observed_completeness_status", "normalized_fact_set_digest",
-)
-_RECORD_LOCATOR_SPECS: Final[tuple[tuple[str, str], ...]] = (
-    ("migration_run_context_locator", _RUN_CONTEXT_SCHEMA), ("sealed_sandbox_profile_locator", _SANDBOX_PROFILE_SCHEMA),
-    ("wheel_build_provenance_locator", _WHEEL_PROVENANCE_SCHEMA), ("wheel_boundary_report_locator", _WHEEL_BOUNDARY_SCHEMA),
-    ("negative_security_test_report_locator", NegativeSecurityTestReport.SCHEMA),
-)
-_RECORD_SCALAR_KEYS: Final[tuple[str, ...]] = (
-    "build_run_id", "certified_at_utc", "certified_state", "source_commit_sha", "build_backend_digest", "schema_bundle_digest",
-    "wheel_digest", "resource_mapping_contract_digest", "parser_code_digest", "adapter_code_digest", "mapping_rules_digest",
-)
+_WHEEL_BOUNDARY_ENVELOPE_17_KEYS: Final[frozenset[str]] = frozenset("$schema integrity migration_run_context_locator build_run_id verified_at_utc repository source_commit_sha wheel_digest build_backend_digest schema_bundle_digest sorted_record_entries sorted_record_digest archive_allowlist_passed ast_boundary_scan_passed isolated_venv_import_passed packaged_modules wheel_build_provenance_locator".split())
+_CASE_SUBOBJ_TYPES: Final[tuple[tuple[str, type[Any]], ...]] = (("runtime_readback", SandboxRuntimeReadback), ("effective_resource_limits", SandboxResourceLimits), ("usage", SandboxUsageCounters), ("termination", SandboxTermination), ("observation_batch", ProviderObservationBatch))
+_CASE_SCALAR_KEYS: Final[tuple[str, ...]] = ("case_id", "admitted_collection_digest", "source_contract_ref", "sandbox_instance_ref", "execution_binding_digest", "started_at_utc", "ended_at_utc", "expected_completeness_status", "observed_completeness_status", "normalized_fact_set_digest")
+_RECORD_LOCATOR_SPECS: Final[tuple[tuple[str, str], ...]] = (("migration_run_context_locator", _RUN_CONTEXT_SCHEMA), ("sealed_sandbox_profile_locator", _SANDBOX_PROFILE_SCHEMA), ("wheel_build_provenance_locator", _WHEEL_PROVENANCE_SCHEMA), ("wheel_boundary_report_locator", _WHEEL_BOUNDARY_SCHEMA), ("negative_security_test_report_locator", NegativeSecurityTestReport.SCHEMA))
+_RECORD_SCALAR_KEYS: Final[tuple[str, ...]] = ("build_run_id", "certified_at_utc", "certified_state", "source_commit_sha", "build_backend_digest", "schema_bundle_digest", "wheel_digest", "resource_mapping_contract_digest", "parser_code_digest", "adapter_code_digest", "mapping_rules_digest")
 
 
 def _u16(buf: bytes, off: int) -> int:
@@ -89,41 +60,42 @@ def _u16(buf: bytes, off: int) -> int:
 def _u32(buf: bytes, off: int) -> int:
     return int.from_bytes(buf[off : off + 4], "little")
 
-@functools.lru_cache(maxsize=1)
-def _crc32_table() -> tuple[int, ...]:
-    table: list[int] = []
-    for i in range(256):
-        c = i
-        for _ in range(8):
-            c = (0xEDB88320 ^ (c >> 1)) if (c & 1) else (c >> 1)
-        table.append(c)
-    return tuple(table)
-
-def _crc32_ieee(data: bytes) -> int:
-    tbl = _crc32_table()
-    crc = 0xFFFFFFFF
-    for b in data:
-        crc = tbl[(crc ^ b) & 0xFF] ^ (crc >> 8)
-    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
-
 def _validate_wheel_member_path(raw_name: bytes) -> str:
     try:
         name = raw_name.decode("utf-8")
     except UnicodeDecodeError:
         raise ClosedValidationError("wheel_bytes: non-UTF-8 member path in central directory") from None
-    if not name or "\x00" in name or "\\" in name or name.startswith("/") or name.endswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")):
+    if not name or any(ch in name for ch in ("\x00", "\\", ",", '"', "\r", "\n")) or name.startswith("/") or name.endswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")):
         raise ClosedValidationError(f"wheel_bytes: invalid, directory, or traversal member path {name!r}")
     return name
 
-def _parse_cd_entry_and_lfh(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_offset: int) -> tuple[str, tuple[int, int, int, int], tuple[int, int], int]:
+def _decompress_wheel_member(comp_slice: bytes, *, method: int, uncomp_size: int, exp_crc: int, name: str) -> bytes:
+    if uncomp_size > _MAX_WHEEL_MEMBER_BYTES:
+        raise ClosedValidationError(f"wheel_bytes[{name!r}]: uncompressed size {uncomp_size} exceeds ceiling")
+    if method == 0:
+        if len(comp_slice) != uncomp_size:
+            raise ClosedValidationError(f"wheel_bytes[{name!r}]: stored size mismatch")
+        raw = comp_slice
+    else:
+        try:
+            decomp = zlib.decompressobj(-15)
+            raw = decomp.decompress(comp_slice, uncomp_size + 1) + decomp.flush(1)
+        except zlib.error:
+            raise ClosedValidationError(f"wheel_bytes[{name!r}]: corrupt DEFLATE stream") from None
+        if not decomp.eof or decomp.unused_data != b"" or decomp.unconsumed_tail != b"":
+            raise ClosedValidationError(f"wheel_bytes[{name!r}]: incomplete or trailing DEFLATE stream")
+    if len(raw) != uncomp_size or (zlib.crc32(raw) & 0xFFFFFFFF) != exp_crc:
+        raise ClosedValidationError(f"wheel_bytes[{name!r}]: size or CRC-32 mismatch after decompression")
+    return raw
+
+def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_offset: int) -> tuple[str, bytes, tuple[int, int], int]:
     if cd_cursor + 46 > cd_end or wheel_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
         raise ClosedValidationError("wheel_bytes: corrupt ZIP central directory file header")
     cd_flags, cd_method = _u16(wheel_bytes, cd_cursor + 8), _u16(wheel_bytes, cd_cursor + 10)
     cd_crc, cd_comp, cd_uncomp = _u32(wheel_bytes, cd_cursor + 16), _u32(wheel_bytes, cd_cursor + 20), _u32(wheel_bytes, cd_cursor + 24)
     fn_len, ex_len, cm_len = _u16(wheel_bytes, cd_cursor + 28), _u16(wheel_bytes, cd_cursor + 30), _u16(wheel_bytes, cd_cursor + 32)
     ext_attr, lfh_off = _u32(wheel_bytes, cd_cursor + 38), _u32(wheel_bytes, cd_cursor + 42)
-    next_cd = cd_cursor + 46 + fn_len + ex_len + cm_len
-    unix_type = (ext_attr >> 16) & 0o170000
+    next_cd, unix_type = cd_cursor + 46 + fn_len + ex_len + cm_len, (ext_attr >> 16) & 0o170000
     if next_cd > cd_end or (cd_flags & 0x09) != 0 or cd_method not in (0, 8) or 0xFFFFFFFF in (cd_comp, cd_uncomp, lfh_off) or unix_type not in (0, 0o100000):
         raise ClosedValidationError("wheel_bytes: forbidden ZIP flags, compression method, Zip64 sentinel, or special mode")
     raw_name = wheel_bytes[cd_cursor + 46 : cd_cursor + 46 + fn_len]
@@ -131,17 +103,38 @@ def _parse_cd_entry_and_lfh(wheel_bytes: bytes, cd_cursor: int, cd_end: int, cd_
     if lfh_off + 30 > cd_offset or wheel_bytes[lfh_off : lfh_off + 4] != b"PK\x03\x04":
         raise ClosedValidationError(f"wheel_bytes: invalid local file header for {name!r}")
     lfh_fn, lfh_ex = _u16(wheel_bytes, lfh_off + 26), _u16(wheel_bytes, lfh_off + 28)
-    data_off = lfh_off + 30 + lfh_fn + lfh_ex
-    lfh_end = data_off + cd_comp
-    if (
-        (_u16(wheel_bytes, lfh_off + 6) & 0x09) != 0 or lfh_end > cd_offset
-        or (_u16(wheel_bytes, lfh_off + 8), _u32(wheel_bytes, lfh_off + 14), _u32(wheel_bytes, lfh_off + 18), _u32(wheel_bytes, lfh_off + 22)) != (cd_method, cd_crc, cd_comp, cd_uncomp)
-        or wheel_bytes[lfh_off + 30 : lfh_off + 30 + lfh_fn] != raw_name
-    ):
+    data_off, lfh_end = lfh_off + 30 + lfh_fn + lfh_ex, lfh_off + 30 + lfh_fn + lfh_ex + cd_comp
+    if ((_u16(wheel_bytes, lfh_off + 6) & 0x09) != 0 or lfh_end > cd_offset or (_u16(wheel_bytes, lfh_off + 8), _u32(wheel_bytes, lfh_off + 14), _u32(wheel_bytes, lfh_off + 18), _u32(wheel_bytes, lfh_off + 22)) != (cd_method, cd_crc, cd_comp, cd_uncomp) or wheel_bytes[lfh_off + 30 : lfh_off + 30 + lfh_fn] != raw_name):
         raise ClosedValidationError(f"wheel_bytes: local header mismatch or overflow on {name!r}")
-    return name, (cd_uncomp, cd_crc, cd_method, data_off), (lfh_off, lfh_end), next_cd
+    raw = _decompress_wheel_member(wheel_bytes[data_off:lfh_end], method=cd_method, uncomp_size=cd_uncomp, exp_crc=cd_crc, name=name)
+    return name, raw, (lfh_off, lfh_end), next_cd
 
-def _parse_wheel_central_directory(wheel_bytes: bytes) -> dict[str, tuple[int, int, int, int]]:
+def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
+    try:
+        record_text = members[_WHEEL_RECORD_MEMBER].decode("utf-8")
+    except UnicodeDecodeError:
+        raise ClosedValidationError("wheel RECORD: invalid UTF-8") from None
+    lines = record_text.splitlines()
+    if not lines or "\x00" in record_text or any(not ln or ln.count(",") != 2 or '"' in ln for ln in lines):
+        raise ClosedValidationError("wheel RECORD: empty, blank, or malformed CSV row")
+    seen: set[str] = set()
+    for ln in lines:
+        rec_path, rec_hash, rec_size = ln.split(",")
+        if rec_path in seen or rec_path not in members:
+            raise ClosedValidationError(f"wheel RECORD: duplicate or unknown member {rec_path!r}")
+        seen.add(rec_path)
+        if rec_path == _WHEEL_RECORD_MEMBER:
+            if rec_hash != "" or rec_size != "":
+                raise ClosedValidationError("wheel RECORD: self row must have empty hash and size")
+            continue
+        raw = members[rec_path]
+        exp_hash = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=").decode("ascii")
+        if rec_hash != exp_hash or _NONNEG_DEC_RE.fullmatch(rec_size) is None or int(rec_size) != len(raw):
+            raise ClosedValidationError(f"wheel RECORD: SHA-256 or size mismatch for {rec_path!r}")
+    if seen != set(members.keys()):
+        raise ClosedValidationError("wheel RECORD: archive members omitted from RECORD")
+
+def _extract_verified_wheel_members(wheel_bytes: bytes) -> dict[str, bytes]:
     if len(wheel_bytes) < 22 or (len(wheel_bytes) >= 42 and wheel_bytes[-42:-38] == b"PK\x06\x07") or wheel_bytes[-22:-18] != b"PK\x05\x06":
         raise ClosedValidationError("wheel_bytes: missing standard 22-byte ZIP EOCD or forbidden Zip64 locator")
     eocd = wheel_bytes[-22:]
@@ -149,33 +142,24 @@ def _parse_wheel_central_directory(wheel_bytes: bytes) -> dict[str, tuple[int, i
     cd_size, cd_offset, comment_len = _u32(eocd, 12), _u32(eocd, 16), _u16(eocd, 20)
     if comment_len != 0 or disk_no != 0 or cd_disk != 0 or disk_cnt != cd_cnt or cd_cnt in (0, 0xFFFF) or 0xFFFFFFFF in (cd_size, cd_offset) or cd_offset + cd_size + 22 != len(wheel_bytes):
         raise ClosedValidationError("wheel_bytes: invalid or non-contiguous ZIP EOCD header")
-    cd_entries: dict[str, tuple[int, int, int, int]] = {}
+    members: dict[str, bytes] = {}
     lfh_spans: list[tuple[int, int]] = []
     cd_cursor, cd_end = cd_offset, cd_offset + cd_size
     for _ in range(cd_cnt):
-        name, meta, span, cd_cursor = _parse_cd_entry_and_lfh(wheel_bytes, cd_cursor, cd_end, cd_offset)
-        if name in cd_entries:
+        name, raw, span, cd_cursor = _parse_cd_entry_and_extract(wheel_bytes, cd_cursor, cd_end, cd_offset)
+        if name in members:
             raise ClosedValidationError(f"wheel_bytes: duplicate central directory entry {name!r}")
-        cd_entries[name] = meta
+        members[name] = raw
         lfh_spans.append(span)
     lfh_cursor = 0
     for span_start, span_end in sorted(lfh_spans):
         if span_start != lfh_cursor:
             raise ClosedValidationError("wheel_bytes: non-contiguous local file spans in wheel archive")
         lfh_cursor = span_end
-    if cd_cursor != cd_end or lfh_cursor != cd_offset or _WHEEL_RECORD_MEMBER not in cd_entries:
+    if cd_cursor != cd_end or lfh_cursor != cd_offset or _WHEEL_RECORD_MEMBER not in members:
         raise ClosedValidationError(f"wheel_bytes: central directory span mismatch or missing {_WHEEL_RECORD_MEMBER!r}")
-    return cd_entries
-
-def _verify_wheel_members_against_zip(wheel_bytes: bytes, wheel_members: Mapping[str, bytes]) -> None:
-    cd_entries = _parse_wheel_central_directory(wheel_bytes)
-    if set(cd_entries.keys()) != set(wheel_members.keys()):
-        raise ClosedValidationError("wheel_members: member path set mismatch against wheel central directory")
-    for member_path, member_bytes in wheel_members.items():
-        exp_size, exp_crc, method, data_off = cd_entries[member_path]
-        if (len(member_bytes), _crc32_ieee(member_bytes)) != (exp_size, exp_crc) or (method == 0 and wheel_bytes[data_off : data_off + exp_size] != member_bytes):
-            raise ClosedValidationError(f"wheel_members[{member_path!r}]: size or CRC-32 mismatch against wheel central directory")
-
+    _verify_pep427_record(members)
+    return members
 
 def _require_sorted_git_locators(locators: object, expected_len: int, *, label: str) -> tuple[ArtifactLocator, ...]:
     if isinstance(locators, (str, bytes, bytearray, memoryview)) or not isinstance(locators, (list, tuple)):
@@ -208,11 +192,7 @@ def compute_mapping_rules_digest(provs: Sequence[GitArtifactProvenance], metric_
     checked_map = require_mapping(metric_source_mappings, label="metric_source_mappings")
     if not checked_map:
         raise ClosedValidationError("metric_source_mappings: must not be empty")
-    normalized = {
-        validate_opaque_ref(_strict_str(k, label="metric_key"), field_name="metric_key", expected_prefix="metric"):
-        validate_source_metric_ref(_strict_str(v, label="source_metric_ref"), field_name="source_metric_ref")
-        for k, v in checked_map.items()
-    }
+    normalized = {validate_opaque_ref(_strict_str(k, label="metric_key"), field_name="metric_key", expected_prefix="metric"): validate_source_metric_ref(_strict_str(v, label="source_metric_ref"), field_name="source_metric_ref") for k, v in checked_map.items()}
     return jcs_sha256({"kind": "smart_ads/mapping_rules_digest/v1", "artifacts": _artifact_identities(provs, MAPPING_ARTIFACT_PATHS, label="mapping_provs"), "metric_source_mappings": normalized})
 
 
@@ -258,12 +238,7 @@ class Certification7ACapabilityBinding:
 
 
 def _validate_positive_sandbox_evidence(rb: SandboxRuntimeReadback, usage: SandboxUsageCounters, term: SandboxTermination, *, label: str) -> None:
-    if (
-        rb.seccomp_enforced_before_entry is not True or rb.effective_writable_mounts != ("/tmp",) or rb.network_absent is not True
-        or rb.loopback_absent is not True or term.supervisor_terminated_cgroup is not False or term.cause != "clean_exit"
-        or term.exit_code != 0 or term.signal is not None or term.force_kill_used is not False
-        or term.whole_cgroup_empty is not True or any(evaluate_breach_predicates(usage, term).values())
-    ):
+    if (rb.seccomp_enforced_before_entry is not True or rb.effective_writable_mounts != ("/tmp",) or rb.network_absent is not True or rb.loopback_absent is not True or term.supervisor_terminated_cgroup is not False or term.cause != "clean_exit" or term.exit_code != 0 or term.signal is not None or term.force_kill_used is not False or term.whole_cgroup_empty is not True or any(evaluate_breach_predicates(usage, term).values())):
         raise ClosedValidationError(f"{label}: positive 7A sandbox run violated clean-exit/seccomp/ceiling invariants")
 
 
@@ -321,7 +296,6 @@ class Certification7AFixtureCase:
         m = require_exact_keys(data, cls.KEYS, label="certification_7a_fixture_case")
         return cls(expected_resource_inventory_locator=ArtifactLocator.from_dict(m["expected_resource_inventory_locator"], expected_type=ExpectedResourceInventory.SCHEMA), **{attr: cls_t.from_dict(m[attr]) for attr, cls_t in _CASE_SUBOBJ_TYPES}, **{s_key: m[s_key] for s_key in _CASE_SCALAR_KEYS})
 
-
 def compute_7a_case_execution_binding_digest(*, case: Certification7AFixtureCase, wheel_digest: str, corpus_digest: str, sealed_sandbox_profile_digest: str) -> str:
     """Compute canonical JCS SHA-256 execution binding digest for one 7A fixture case."""
     c = _reparse(case, Certification7AFixtureCase, label="case")
@@ -367,15 +341,13 @@ class Certification7AFixtureEvidence:
             raise ClosedValidationError("certification_7a_fixture_evidence.cases: expected JSON array list")
         return cls(ArtifactLocator.from_dict(m["corpus_git_locator"], expected_type=GitArtifactProvenance.SCHEMA), m["corpus_digest"], RegressionFixtureV1.from_dict(m["regression_fixture"]), tuple(Certification7AFixtureCase.from_dict(c) for c in m["cases"]))
 
-
 def _validate_record_internal_bindings(record: Certification7ARecord, certified_us: int) -> None:
     if record.fixture_evidence.regression_fixture != RegressionFixtureV1.canonical(record.capability.registry_snapshot_locator.content_digest):
         raise ClosedValidationError("certification_7a_record.fixture_evidence.regression_fixture: canonical 65x23 mismatch")
     expected_src_ref = f"opaque-driver-contract:{record.capability.driver_contract_digest}"
     for c in record.fixture_evidence.cases:
-        start_us = _utc_sec_micros(c.started_at_utc, label="case.started_at_utc")
+        start_us, end_us = _utc_sec_micros(c.started_at_utc, label="case.started_at_utc"), _utc_sec_micros(c.ended_at_utc, label="case.ended_at_utc")
         ret_us = parse_timestamp_utc_micros(c.observation_batch.retrieval_context.retrieved_at_utc, field_name="case.retrieved_at_utc")
-        end_us = _utc_sec_micros(c.ended_at_utc, label="case.ended_at_utc")
         if c.source_contract_ref != expected_src_ref or not (start_us <= ret_us <= end_us <= certified_us):
             raise ClosedValidationError("certification_7a_record.cases: source_contract_ref or chronology mismatch")
 
@@ -434,14 +406,7 @@ class Certification7ARecord:
             raise ClosedValidationError(f"{lbl}.integrity.content_digest: mismatch against P1 preimage")
 
     def to_dict(self) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "$schema": self.SCHEMA, "capability": self.capability.to_dict(), "fixture_evidence": self.fixture_evidence.to_dict(),
-            "parser_artifact_locators": [loc.to_dict() for loc in self.parser_artifact_locators],
-            "adapter_artifact_locators": [loc.to_dict() for loc in self.adapter_artifact_locators],
-            "mapping_artifact_locators": [loc.to_dict() for loc in self.mapping_artifact_locators],
-            **{attr: getattr(self, attr).to_dict() for attr, _ in _RECORD_LOCATOR_SPECS},
-            **{s_attr: getattr(self, s_attr) for s_attr in _RECORD_SCALAR_KEYS},
-        }
+        out: dict[str, Any] = {"$schema": self.SCHEMA, "capability": self.capability.to_dict(), "fixture_evidence": self.fixture_evidence.to_dict(), "parser_artifact_locators": [loc.to_dict() for loc in self.parser_artifact_locators], "adapter_artifact_locators": [loc.to_dict() for loc in self.adapter_artifact_locators], "mapping_artifact_locators": [loc.to_dict() for loc in self.mapping_artifact_locators], **{attr: getattr(self, attr).to_dict() for attr, _ in _RECORD_LOCATOR_SPECS}, **{s_attr: getattr(self, s_attr) for s_attr in _RECORD_SCALAR_KEYS}}
         if self.integrity is not None:
             out["integrity"] = self.integrity.to_dict()
         return out
@@ -461,14 +426,7 @@ class Certification7ARecord:
             if type(m[seq_k]) is not list:
                 raise ClosedValidationError(f"certification_7a_record.{seq_k}: expected JSON array list")
         locs = {attr: ArtifactLocator.from_dict(m[attr], expected_type=exp_t) for attr, exp_t in _RECORD_LOCATOR_SPECS}
-        return cls(
-            capability=Certification7ACapabilityBinding.from_dict(m["capability"]),
-            parser_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["parser_artifact_locators"]),
-            adapter_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["adapter_artifact_locators"]),
-            mapping_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["mapping_artifact_locators"]),
-            fixture_evidence=Certification7AFixtureEvidence.from_dict(m["fixture_evidence"]),
-            integrity=integrity, **locs, **{k: m[k] for k in _RECORD_SCALAR_KEYS},
-        )
+        return cls(capability=Certification7ACapabilityBinding.from_dict(m["capability"]), parser_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["parser_artifact_locators"]), adapter_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["adapter_artifact_locators"]), mapping_artifact_locators=tuple(ArtifactLocator.from_dict(x, expected_type=GitArtifactProvenance.SCHEMA) for x in m["mapping_artifact_locators"]), fixture_evidence=Certification7AFixtureEvidence.from_dict(m["fixture_evidence"]), integrity=integrity, **locs, **{k: m[k] for k in _RECORD_SCALAR_KEYS})
 
 
 def _parse_corpus_case(raw_case: object, *, idx: int) -> dict[str, Any]:
@@ -553,7 +511,6 @@ class _Stage7VerifiedContext:
     sandbox_until_us: int
     provenance_built_us: int
 
-
 def _verify_stage7_and_negative_report(record: Certification7ARecord, resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, boundary_prov_loc: ArtifactLocator | None, certified_us: int) -> _Stage7VerifiedContext:
     sbx_env = _resolve_verified_object(resolver, record.sealed_sandbox_profile_locator, label="sealed_sandbox_profile")
     prov_env = _resolve_verified_object(resolver, record.wheel_build_provenance_locator, label="wheel_build_provenance")
@@ -588,11 +545,7 @@ def _verify_registry_and_contract(record: Certification7ARecord, resolver: Calla
     snapshot = PrivateRegistrySnapshot.from_dict(_resolve_verified_object(resolver, record.capability.registry_snapshot_locator, label="registry_snapshot"))
     driver_contract = PipeboardPhase1Contract.from_dict(_resolve_verified_object(resolver, record.capability.driver_contract_locator, label="driver_contract"))
     entry = snapshot.get_capability(record.capability.capability_ref, record.capability.resource_scope_ref)
-    if (
-        entry.state != "declared" or entry.driver_id != record.capability.driver_id or entry.driver_contract_locator != record.capability.driver_contract_locator
-        or entry.driver_contract_digest != record.capability.driver_contract_digest or entry.required_metrics != record.capability.required_metrics
-        or record.resource_mapping_contract_digest != snapshot.resource_mapping_contract_digest
-    ):
+    if (entry.state != "declared" or entry.driver_id != record.capability.driver_id or entry.driver_contract_locator != record.capability.driver_contract_locator or entry.driver_contract_digest != record.capability.driver_contract_digest or entry.required_metrics != record.capability.required_metrics or record.resource_mapping_contract_digest != snapshot.resource_mapping_contract_digest):
         raise ClosedValidationError("certification_7a_record.capability: snapshot capability/contract mismatch")
     return ResolvedRegistryState(record.capability.registry_snapshot_locator, snapshot, record.capability.driver_contract_locator, driver_contract)
 
@@ -665,7 +618,6 @@ class _StaticCaseRuntimePorts:
     def get_active_registry(self, *, tenant_ref: str) -> ResolvedRegistryState: return self.resolved_registry
     def resolve_prerequisites(self, **kw: Any) -> ResolvedPrerequisiteBundle: return self.prereq_bundle
 
-
 def _build_verified_boundary_and_inventories(record: Certification7ARecord, corpus: Mapping[str, Any], resolved_registry: ResolvedRegistryState, resolver: Callable[[ArtifactLocator], Mapping[str, Any]]) -> tuple[PrivatePipeboardBindingBoundary, dict[ArtifactLocator, ExpectedResourceInventory]]:
     snap = resolved_registry.snapshot
     if corpus["tenant_ref"] != snap.tenant_ref or corpus["key_identity"] != snap.key_identity:
@@ -736,29 +688,23 @@ def _verify_and_replay_single_case(record: Certification7ARecord, corpus: Mappin
     ev = evaluate_fixture_collection(corpus_case["collection_request"], admission_id=corpus_case["admission_id"], cell_ports=cell_ports, fixture_port=adapter, inventory_port=boundary)
     recorded_batch = adapter.get_recorded_batch(ev.admitted_locator)
     exp_errs = () if corpus_case["expected_error_code"] is None else (corpus_case["expected_error_code"],)
-    if (
-        reg_loc != adm_bundle.locator or ev.admitted_locator != adm_bundle.locator or recorded_batch != rec_case.observation_batch
-        or tuple(e.error_code for e in recorded_batch.normalized_errors) != exp_errs or ev.completeness.status != rec_case.observed_completeness_status
-        or ev.completeness.status != corpus_case["expected_completeness_status"] or ev.completeness.reasons != corpus_case["expected_reasons"]
-        or ev.completeness.normalized_fact_set_digest != rec_case.normalized_fact_set_digest
-    ):
+    if (reg_loc != adm_bundle.locator or ev.admitted_locator != adm_bundle.locator or recorded_batch != rec_case.observation_batch or tuple(e.error_code for e in recorded_batch.normalized_errors) != exp_errs or ev.completeness.status != rec_case.observed_completeness_status or ev.completeness.status != corpus_case["expected_completeness_status"] or ev.completeness.reasons != corpus_case["expected_reasons"] or ev.completeness.normalized_fact_set_digest != rec_case.normalized_fact_set_digest):
         raise ClosedValidationError(f"case[{rec_case.case_id}]: deterministic offline 7A replay mismatch")
 
 
-def verify_certification_7a_record(record: Certification7ARecord, *, object_resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, wheel_members: Mapping[str, bytes], corpus_bytes: bytes, resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes], boundary_report_wheel_provenance_locator: ArtifactLocator | None = None) -> None:
-    """Materially verify `record` against Store envelopes, wheel ZIP members, Git/d26 blobs, and offline 7A replay."""
+def verify_certification_7a_record(record: Certification7ARecord, *, object_resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, corpus_bytes: bytes, resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes], boundary_report_wheel_provenance_locator: ArtifactLocator | None = None) -> None:
+    """Materially verify `record` against Store envelopes, decompressed wheel ZIP members, Git/d26 blobs, and offline 7A replay."""
     checked = _reparse(record, Certification7ARecord, label="record")
     if not callable(object_resolver) or type(wheel_bytes) is not bytes or len(wheel_bytes) == 0 or type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
         raise ClosedValidationError("verify_certification_7a_record: invalid resolver or empty wheel/corpus bytes")
-    checked_wheel_members = _check_blob_map(wheel_members, label="wheel_members")
     git_blobs, d26_blobs = _check_blob_map(resolved_git_blobs, label="resolved_git_blobs"), _check_blob_map(resolved_d26_blobs, label="resolved_d26_blobs")
     if boundary_report_wheel_provenance_locator is not None:
         _require_typed_locator(boundary_report_wheel_provenance_locator, _WHEEL_PROVENANCE_SCHEMA, label="boundary_report_wheel_provenance_locator")
     certified_us = _utc_sec_micros(checked.certified_at_utc, label="record.certified_at_utc")
     stage7 = _verify_stage7_and_negative_report(checked, object_resolver, wheel_bytes, boundary_report_wheel_provenance_locator, certified_us)
-    _verify_wheel_members_against_zip(wheel_bytes, checked_wheel_members)
+    wheel_members = _extract_verified_wheel_members(wheel_bytes)
     resolved_registry = _verify_registry_and_contract(checked, object_resolver)
-    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, wheel_members=checked_wheel_members, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
+    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, wheel_members=wheel_members, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
     expected_reg_loc = ArtifactLocator.for_canonical_bytes(RegressionFixtureV1.SCHEMA, canonicalize_jcs(checked.fixture_evidence.regression_fixture.to_dict()))
     corpus = _parse_pipeboard_7a_corpus(corpus_bytes)
     if [c["case_id"] for c in corpus["cases"]] != [c.case_id for c in checked.fixture_evidence.cases]:

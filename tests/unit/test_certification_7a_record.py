@@ -94,7 +94,6 @@ class Valid7AWorld:
     negative_report: NegativeSecurityTestReport
     store: dict[ArtifactLocator, dict[str, Any]]
     wheel_bytes: bytes
-    wheel_members: dict[str, bytes]
     corpus_bytes: bytes
     resolved_git_blobs: dict[str, bytes]
     resolved_d26_blobs: dict[str, bytes]
@@ -102,30 +101,33 @@ class Valid7AWorld:
     bound_prov_locator: ArtifactLocator
 
 
-def _build_deterministic_wheel_archive(
+def _build_deterministic_wheel_bytes(
     git_blobs: Mapping[str, bytes],
     *,
     overrides: Mapping[str, bytes] | None = None,
     include_record: bool = True,
+    corrupt_record_hash_for: str | None = None,
     patch_cd_flag_bits: int = 0,
-) -> tuple[bytes, dict[str, bytes]]:
+    compress_type: int = zipfile.ZIP_DEFLATED,
+) -> bytes:
     members: dict[str, bytes] = {
         src_path[4:]: raw for src_path, raw in sorted(git_blobs.items()) if src_path.startswith("src/")
     }
     if overrides:
         members.update(overrides)
     if include_record:
-        rec_lines = [
-            f"{rel},sha256={base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b'=').decode('ascii')},{len(raw)}"
-            for rel, raw in sorted(members.items())
-        ]
+        rec_lines: list[str] = []
+        for rel, raw in sorted(members.items()):
+            digest = b"\xee" * 32 if rel == corrupt_record_hash_for else hashlib.sha256(raw).digest()
+            b64_nopad = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            rec_lines.append(f"{rel},sha256={b64_nopad},{len(raw)}")
         rec_lines.append(f"{_RECORD_REL_PATH},,")
         members[_RECORD_REL_PATH] = ("\n".join(rec_lines) + "\n").encode("utf-8")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w") as zf:
         for rel_path, raw in sorted(members.items()):
             info = zipfile.ZipInfo(filename=rel_path, date_time=(2026, 9, 7, 10, 0, 5))
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = compress_type
             info.external_attr = 0o100644 << 16
             zf.writestr(info, raw)
     raw_whl = bytearray(buf.getvalue())
@@ -133,7 +135,7 @@ def _build_deterministic_wheel_archive(
         cd_off = int.from_bytes(raw_whl[-6:-2], "little")
         cur_flags = int.from_bytes(raw_whl[cd_off + 8 : cd_off + 10], "little")
         raw_whl[cd_off + 8 : cd_off + 10] = (cur_flags | patch_cd_flag_bits).to_bytes(2, "little")
-    return bytes(raw_whl), members
+    return bytes(raw_whl)
 
 
 def _sign_env(unsigned: dict[str, Any]) -> dict[str, Any]:
@@ -359,15 +361,12 @@ def _build_fixture_cases_from_corpus(
 
 
 def build_valid_7a_world(
-    *, wheel_bytes: bytes | None = None, wheel_members: Mapping[str, bytes] | None = None,
-    build_run_id: str = _BUILD_RUN_ID,
+    *, wheel_bytes: bytes | None = None, build_run_id: str = _BUILD_RUN_ID,
     neg_executed_at_utc: str = "2026-09-07T10:00:15Z", certified_at_utc: str = "2026-09-07T10:00:16Z",
 ) -> Valid7AWorld:
     store: dict[ArtifactLocator, dict[str, Any]] = {}
     corpus_bytes, git_blobs, d26_blobs = _load_d26_and_git_blobs()
-    built_whl_bytes, built_whl_members = _build_deterministic_wheel_archive(git_blobs)
-    eff_whl_bytes = built_whl_bytes if wheel_bytes is None else wheel_bytes
-    eff_whl_members = dict(built_whl_members if wheel_members is None else wheel_members)
+    eff_whl_bytes = _build_deterministic_wheel_bytes(git_blobs) if wheel_bytes is None else wheel_bytes
     corpus_doc = loads_strict_json(corpus_bytes)
     corpus_digest = "sha256:" + hashlib.sha256(corpus_bytes).hexdigest()
     sbx_loc, prov_loc, bound_loc, sbx_spec_digest, whl_digest, schema_digest = _stage_sandbox_and_wheel_envelopes(
@@ -405,14 +404,13 @@ def build_valid_7a_world(
         compute_mapping_rules_digest([prov_map[k][1] for k in MAPPING_ARTIFACT_PATHS], reg_state.driver_contract.metric_source_mappings),
         ev,
     )
-    return Valid7AWorld(rec, neg_rep, store, eff_whl_bytes, eff_whl_members, corpus_bytes, git_blobs, d26_blobs, sbx_spec_digest, prov_loc)
+    return Valid7AWorld(rec, neg_rep, store, eff_whl_bytes, corpus_bytes, git_blobs, d26_blobs, sbx_spec_digest, prov_loc)
 
 
 def _verify_world(w: Valid7AWorld, **overrides: Any) -> None:
     kw: dict[str, Any] = {
         "object_resolver": w.store.__getitem__,
         "wheel_bytes": w.wheel_bytes,
-        "wheel_members": w.wheel_members,
         "corpus_bytes": w.corpus_bytes,
         "resolved_git_blobs": w.resolved_git_blobs,
         "resolved_d26_blobs": w.resolved_d26_blobs,
@@ -502,6 +500,10 @@ def test_subobject_invariants_reject_malformed_cases_and_evidence() -> None:
 def test_positive_replay_c1_build_run_id_and_reconciliation_reexports() -> None:
     w = build_valid_7a_world()
     _verify_world(w, boundary_report_wheel_provenance_locator=w.bound_prov_locator)
+    w_stored = build_valid_7a_world(
+        wheel_bytes=_build_deterministic_wheel_bytes(w.resolved_git_blobs, compress_type=zipfile.ZIP_STORED)
+    )
+    _verify_world(w_stored)
     w_c1 = build_valid_7a_world(build_run_id="build\x80run-7a")
     _verify_world(w_c1)
     for sym in (
@@ -512,47 +514,41 @@ def test_positive_replay_c1_build_run_id_and_reconciliation_reexports() -> None:
         assert hasattr(reconciliation_pkg, sym) and sym in reconciliation_pkg.__all__
 
 
-def test_verifier_enforces_wheel_zip_central_directory_and_member_binding() -> None:
+def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None:
     # (a) Non-ZIP wheel_bytes rejected even when wheel_digest matches across all Stage 7/7A envelopes
     w_nonzip = build_valid_7a_world(wheel_bytes=b"PK\x03\x04non-zip-payload-without-eocd")
     with pytest.raises(ClosedValidationError, match="wheel"):
         _verify_world(w_nonzip)
 
-    # (b) wheel_members forged to disagree with wheel_bytes central-directory CRC-32/size or key set
     w = build_valid_7a_world()
     wire_rel = "smart_ads/adapters/pipeboard/wire.py"
-    orig_wire = w.wheel_members[wire_rel]
-    same_len_flip = bytes([orig_wire[0] ^ 0x01]) + orig_wire[1:]
-    for bad_members in (
-        {**w.wheel_members, wire_rel: orig_wire + b"\n"},
-        {**w.wheel_members, wire_rel: same_len_flip},
-        {k: v for k, v in w.wheel_members.items() if k != wire_rel},
-        {**w.wheel_members, "smart_ads/extra.py": b"# extra\n"},
-    ):
-        with pytest.raises(ClosedValidationError, match="wheel_members"):
-            _verify_world(w, wheel_members=bad_members)
+    orig_wire = w.resolved_git_blobs["src/" + wire_rel]
 
-    # Missing dist-info/RECORD, forbidden ZIP bitflags (bit 0 / bit 3), or traversal/dir member names
-    no_rec_bytes, no_rec_members = _build_deterministic_wheel_archive(w.resolved_git_blobs, include_record=False)
+    # (b) DEFLATE-compressed .whl with valid wheel_digest and valid RECORD whose wire.py != git_blobs
+    divergent_whl = _build_deterministic_wheel_bytes(
+        w.resolved_git_blobs, overrides={wire_rel: orig_wire + b"\n# tampered inside deflated wheel\n"}
+    )
+    with pytest.raises(ClosedValidationError, match="wheel_members"):
+        _verify_world(build_valid_7a_world(wheel_bytes=divergent_whl))
+
+    # (c) .whl whose PEP 427 RECORD SHA-256 disagrees with a member (or omits RECORD)
+    bad_rec_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, corrupt_record_hash_for=wire_rel)
     with pytest.raises(ClosedValidationError, match="RECORD"):
-        _verify_world(build_valid_7a_world(wheel_bytes=no_rec_bytes, wheel_members=no_rec_members))
+        _verify_world(build_valid_7a_world(wheel_bytes=bad_rec_whl))
+    no_rec_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, include_record=False)
+    with pytest.raises(ClosedValidationError, match="RECORD"):
+        _verify_world(build_valid_7a_world(wheel_bytes=no_rec_whl))
+
+    # Forbidden ZIP bitflags (bit 0 / bit 3) or traversal/directory member paths
     for bad_kw in (
         {"patch_cd_flag_bits": 0x01},
         {"patch_cd_flag_bits": 0x08},
         {"overrides": {"../evil.py": b"x"}},
         {"overrides": {"smart_ads/dir/": b""}},
     ):
-        bad_b, bad_m = _build_deterministic_wheel_archive(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
+        bad_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
         with pytest.raises(ClosedValidationError, match="wheel"):
-            _verify_world(build_valid_7a_world(wheel_bytes=bad_b, wheel_members=bad_m))
-
-    # (c) Real .whl archive (matching wheel_digest + matching wheel_members) whose Python member != git_blobs
-    tampered_whl, tampered_members = _build_deterministic_wheel_archive(
-        w.resolved_git_blobs, overrides={wire_rel: orig_wire + b"\n# tampered inside wheel\n"}
-    )
-    w_divergent = build_valid_7a_world(wheel_bytes=tampered_whl, wheel_members=tampered_members)
-    with pytest.raises(ClosedValidationError, match="wheel_members"):
-        _verify_world(w_divergent)
+            _verify_world(build_valid_7a_world(wheel_bytes=bad_whl))
 
 
 def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:

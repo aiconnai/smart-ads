@@ -249,6 +249,7 @@ _PURE_LAYER_ALLOWED_TOP_IMPORTS: Final[frozenset[str]] = frozenset(
         "types",
         "typing",
         "unicodedata",
+        "zlib",
         "smart_ads",
     }
 )
