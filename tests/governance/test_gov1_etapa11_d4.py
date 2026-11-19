@@ -354,7 +354,10 @@ def _assert_from_repo_prerequisites_d4_bootstrap(
     }
     for bad_cfg, bad_match in (
         ({**deployed_cfg, "trust_anchor_id": "   "}, "trust_anchor_id"),
+        ({**deployed_cfg, "trust_anchor_id": "anchor:other"}, "trust_anchor_id|anchor"),
         ({**deployed_cfg, "validity": {"from": "2028-01-01T00:00:00Z", "until": "2027-01-01T00:00:00Z"}}, "validity"),
+        ({**deployed_cfg, "validity": {"from": "2026-09-04T00:00:00Z", "until": "2027-09-02T00:00:00Z"}}, "validity"),
+        ({**deployed_cfg, "validity": {"from": "2026-09-03T00:00:00Z", "until": "2026-09-07T00:00:00Z"}}, "validity"),
         ({**deployed_cfg, "inventory_bootstrap_profile": {**world.profiles[INVENTORY], "domain_prefix": "WRONG\n"}}, "protected profile mismatch"),
         ({**deployed_cfg, "anti_rollback_checkpoint_profile": {**world.profiles[CHECKPOINT], "domain_prefix": "WRONG\n"}}, "protected profile mismatch"),
     ):

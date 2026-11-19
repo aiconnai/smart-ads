@@ -158,7 +158,7 @@ class SnapshotStore(Store):
 
 def _validate_deployed_runtime_config(
     runtime_config: Mapping[str, Any] | bytes, repo_path: Path
-) -> tuple[bytes, dict[str, Any]]:
+) -> tuple[bytes, dict[str, Any], dict[str, Any]]:
     if type(runtime_config) is bytes:
         raw_cfg, loaded = runtime_config, loads_strict(runtime_config.decode("utf-8"))
         if not isinstance(loaded, dict):
@@ -191,31 +191,57 @@ def _validate_deployed_runtime_config(
             isinstance(cfg_d[fld], Mapping) and canonicalize(dict(cfg_d[fld])) == canonicalize(profiles[sch]),
             "protected profile mismatch",
         )
-    return raw_cfg, cfg_d
+    return raw_cfg, cfg_d, profiles
 
 
 def _resolve_repo_pins_identity(
     *, repo_path: Path, configuration_digest: str | None, runtime_config: Mapping[str, Any] | bytes | None,
     installation_authority: str | None, cell_id: str | None, head_register: str | None, checkpoint_register: str | None,
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str, str, dict[str, Any] | None, dict[str, Any] | None]:
     if (configuration_digest is None) == (runtime_config is None):
         raise ValueError("Gov1InstallationPins.from_repo_prerequisites: specify exactly one of configuration_digest or runtime_config")
     if runtime_config is not None:
-        raw_cfg, cfg_d = _validate_deployed_runtime_config(runtime_config, repo_path)
+        raw_cfg, cfg_d, profiles = _validate_deployed_runtime_config(runtime_config, repo_path)
         resolved: list[str] = []
         for name, val in (("installation_authority", installation_authority), ("cell_id", cell_id), ("head_register", head_register), ("checkpoint_register", checkpoint_register)):
             cfg_str = _strict_str(cfg_d[name], f"runtime_config.{name}")
             if val is not None and val != cfg_str:
                 raise ValueError(f"Gov1InstallationPins: {name} mismatch against runtime_config")
             resolved.append(cfg_str)
-        return digest(raw_cfg), resolved[0], resolved[1], resolved[2], resolved[3]
+        return digest(raw_cfg), resolved[0], resolved[1], resolved[2], resolved[3], cfg_d, profiles
     return (
         _sha256_str(configuration_digest, "configuration_digest"),
         _strict_str(installation_authority, "installation_authority"),
         _strict_str(cell_id, "cell_id"),
         _strict_str(head_register, "head_register"),
         _strict_str(checkpoint_register, "checkpoint_register"),
+        None, None,
     )
+
+
+def _verify_repo_pre_head_registries(
+    repo_path: Path, pre_locs: Sequence[dict[str, Any]], *,
+    cfg_d: dict[str, Any] | None, profiles: dict[str, Any] | None, has_extra: bool,
+) -> None:
+    if cfg_d is None and not has_extra:
+        return
+    cell_store = Store(repo_path / "docs/governance/cell-objects")
+    if cfg_d is None or profiles is None:
+        anchor_obj = loads_strict((repo_path / "docs/governance/trust-anchor/cell_trust_anchor_config.json").read_text(encoding="utf-8"))
+        if not isinstance(anchor_obj, dict):
+            raise ValueError("cell_trust_anchor_config.json: expected JSON object")
+        cfg_d = anchor_obj
+        profiles = {p["schema"]: p for p in profile_proposals((repo_path / "docs/adr/ADR-0001-smart-ads-read-gateway.md").read_bytes())}
+        start_ep, check_locs = 3, pre_locs[2:]
+    else:
+        start_ep, check_locs = 1, pre_locs
+    prev_reg: dict[str, Any] | None = None
+    for expected_ep, loc in enumerate(check_locs, start=start_ep):
+        reg_obj = registry(cell_store, loc, cfg_d, profiles)
+        require(reg_obj["epoch"] == expected_ep, f"pre-head registry expected epoch {expected_ep}")
+        if prev_reg is not None:
+            _verify_d4_registry_lineage_step(prev_reg, reg_obj, cfg_d)
+        prev_reg = reg_obj
 
 
 @dataclass(frozen=True)
@@ -254,22 +280,29 @@ class Gov1InstallationPins(InstallationPins):
         owner_principal: str = "principal:ronaldo", owner_tenant: str = "mbras",
         extra_pre_head_registry_locators: Sequence[dict[str, Any]] = (),
     ) -> Gov1InstallationPins:
+        if isinstance(extra_pre_head_registry_locators, (str, bytes, bytearray)) or not isinstance(extra_pre_head_registry_locators, Sequence):
+            raise ValueError("Gov1InstallationPins: extra_pre_head_registry_locators must be a Sequence")
         repo_path = Path(root)
-        cfg_dig, inst_auth, c_id, h_reg, ck_reg = _resolve_repo_pins_identity(
+        cfg_dig, inst_auth, c_id, h_reg, ck_reg, cfg_d, profiles = _resolve_repo_pins_identity(
             repo_path=repo_path, configuration_digest=configuration_digest, runtime_config=runtime_config,
             installation_authority=installation_authority, cell_id=cell_id,
             head_register=head_register, checkpoint_register=checkpoint_register,
         )
         ident = decomposition_governance.verified_run_context_identity(repo_path)
         pre_locs = (
-            ident["gate2_registry_locator"], ident["run_registry_locator"], ident["prerequisite_epoch3_registry_locator"],
-            *(copy.deepcopy(dict(x)) for x in extra_pre_head_registry_locators),
+            ident["gate2_registry_locator"], ident["run_registry_locator"],
+            ident["prerequisite_epoch3_registry_locator"], *extra_pre_head_registry_locators,
         )
-        return cls(
+        pins_obj = cls(
             configuration_digest=cfg_dig, installation_authority=inst_auth, cell_id=c_id,
             head_register=h_reg, checkpoint_register=ck_reg, owner_principal=owner_principal, owner_tenant=owner_tenant,
             pinned_run_context_locator=ident["run_context_locator"], pinned_pre_head_registry_locators=pre_locs,
         )
+        _verify_repo_pre_head_registries(
+            repo_path, pins_obj.pinned_pre_head_registry_locators,
+            cfg_d=cfg_d, profiles=profiles, has_extra=len(extra_pre_head_registry_locators) > 0,
+        )
+        return pins_obj
 
 
 def _resolve_d4_pins(
