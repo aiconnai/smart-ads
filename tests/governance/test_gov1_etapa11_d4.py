@@ -22,7 +22,7 @@ from tests.governance.test_gov1_convergence import (
     baseline_artifacts, synthetic_gov1_keys,
 )
 from tools.governance import cli, decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_convergence, gov1_mcp, gov1_sandbox, gov1_wheel, p1
-from tools.governance.decomposition_runtime import CHECKPOINT, INVENTORY, REGISTRY, InstallationPins
+from tools.governance.decomposition_runtime import CHECKPOINT, HEAD, INVENTORY, REGISTRY, STATE, InstallationPins
 from tools.governance.gov1_d4_helpers import (
     Gov1InstallationPins, SnapshotStore, _resolve_d4_pins, _verify_d4_registry_lineage_step,
     _verify_d4_registry_membership, build_gov1_convergence_record_candidate, verify_gov1_convergence_candidate,
@@ -376,6 +376,8 @@ def _assert_from_repo_prerequisites_d4_bootstrap(
     pins_narrow = Gov1InstallationPins.from_repo_prerequisites(REPO_ROOT, runtime_config=narrow_cfg)
     rt_narrow = MemoryProtectedRuntime(narrow_cfg, world.head_loc, world.checkpoint_loc)
     assert canonicalize(gov1_convergence.Gov1AdmissionVerifier(rt_narrow, pins_narrow, Store(REPO_ROOT / "docs/governance/cell-objects"), world.adr)._configuration(rt_narrow.authenticated_clock())) == canonicalize(narrow_cfg)
+    with pytest.raises(ValueError, match="anchor"):
+        Gov1InstallationPins.from_repo_prerequisites(REPO_ROOT, runtime_config=deployed_cfg, extra_pre_head_registry_locators=(world.registry_loc,), store=world.store)
     _assert_e2e_admission_via_repo_pins(tmp_path, world, keys, baseline, monkeypatch)
 
 
@@ -390,6 +392,17 @@ def _assert_e2e_admission_via_repo_pins(
     v_e2e = gov1_convergence.Gov1AdmissionVerifier(world.runtime, pins_e2e, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=world.make_pr3_verifier(), isolated_probe_runner=world.probe_runner, corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir)
     assert v_e2e.verify_artifact(conv_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)["verification_status"] == "VERIFIED"
     assert world.runtime.cas_calls == 1
+    epoch4_loc = world.registry_loc
+    reg5_s = p1.sign_envelope({**copy.deepcopy(world.objects["registry"]), "epoch": 5}, world.profiles[REGISTRY]["domain_prefix"], keys["trust_anchor"][0])
+    reg5_loc = world.store.put(reg5_s)
+    st5_s = p1.sign_envelope({**copy.deepcopy(world.objects["state"]), "registry_locator": reg5_loc, "integrity": {"key_id": keys["trust_anchor"][2], "key_registry_snapshot_locator": reg5_loc}}, world.profiles[STATE]["domain_prefix"], keys["trust_anchor"][0])
+    st5_loc = world.store.put(st5_s)
+    hd5_s = p1.sign_envelope({**copy.deepcopy(world.objects["head"]), "current_state_locator": st5_loc, "current_state_digest": st5_loc["content_digest"], "integrity": {"key_id": keys["trust_anchor"][2], "key_registry_snapshot_locator": reg5_loc}}, world.profiles[HEAD]["domain_prefix"], keys["trust_anchor"][0])
+    rt_ep5 = MemoryProtectedRuntime(world.config, world.store.put(hd5_s), world.checkpoint_loc)
+    pins_ep5 = Gov1InstallationPins.from_repo_prerequisites(syn_root, configuration_digest=digest(rt_ep5.config), installation_authority="synthetic-gov1-installation", cell_id="synthetic-gov1-cell", head_register="head:gov1-synthetic", checkpoint_register="checkpoint:gov1-synthetic", owner_tenant="synthetic-tenant", extra_pre_head_registry_locators=(epoch4_loc,))
+    v_ep5 = gov1_convergence.Gov1AdmissionVerifier(rt_ep5, pins_ep5, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=world.make_pr3_verifier(), isolated_probe_runner=world.probe_runner, corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir)
+    res_ep5 = v_ep5.verify_artifact(conv_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
+    assert res_ep5["verification_status"] == "VERIFIED" and len(pins_ep5.pinned_pre_head_registry_locators) == 4 and rt_ep5.cas_calls == 1
 
 
 def test_d4_lineage_permits_unused_action_withdrawal_and_rejects_gaps_and_resurrection(

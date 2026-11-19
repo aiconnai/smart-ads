@@ -221,23 +221,18 @@ def _resolve_repo_pins_identity(
 
 def _verify_repo_pre_head_registries(
     repo_path: Path, pre_locs: Sequence[dict[str, Any]], *,
-    cfg_d: dict[str, Any] | None, profiles: dict[str, Any] | None, has_extra: bool,
+    cfg_d: dict[str, Any] | None, profiles: dict[str, Any] | None, store: Store | None,
 ) -> None:
-    if cfg_d is None and not has_extra:
+    if store is not None:
+        require(isinstance(store, Store), "invalid immutable object store")
+    if cfg_d is None or profiles is None:
         return
     cell_store = Store(repo_path / "docs/governance/cell-objects")
-    if cfg_d is None or profiles is None:
-        anchor_obj = loads_strict((repo_path / "docs/governance/trust-anchor/cell_trust_anchor_config.json").read_text(encoding="utf-8"))
-        if not isinstance(anchor_obj, dict):
-            raise ValueError("cell_trust_anchor_config.json: expected JSON object")
-        cfg_d = anchor_obj
-        profiles = {p["schema"]: p for p in profile_proposals((repo_path / "docs/adr/ADR-0001-smart-ads-read-gateway.md").read_bytes())}
-        start_ep, check_locs = 3, pre_locs[2:]
-    else:
-        start_ep, check_locs = 1, pre_locs
+    extra_store = store if store is not None else cell_store
     prev_reg: dict[str, Any] | None = None
-    for expected_ep, loc in enumerate(check_locs, start=start_ep):
-        reg_obj = registry(cell_store, loc, cfg_d, profiles)
+    for expected_ep, loc in enumerate(pre_locs, start=1):
+        target_store = cell_store if expected_ep <= 3 else extra_store
+        reg_obj = registry(target_store, loc, cfg_d, profiles)
         require(reg_obj["epoch"] == expected_ep, f"pre-head registry expected epoch {expected_ep}")
         if prev_reg is not None:
             _verify_d4_registry_lineage_step(prev_reg, reg_obj, cfg_d)
@@ -278,7 +273,7 @@ class Gov1InstallationPins(InstallationPins):
         runtime_config: Mapping[str, Any] | bytes | None = None, installation_authority: str | None = None,
         cell_id: str | None = None, head_register: str | None = None, checkpoint_register: str | None = None,
         owner_principal: str = "principal:ronaldo", owner_tenant: str = "mbras",
-        extra_pre_head_registry_locators: Sequence[dict[str, Any]] = (),
+        extra_pre_head_registry_locators: Sequence[dict[str, Any]] = (), store: Store | None = None,
     ) -> Gov1InstallationPins:
         if isinstance(extra_pre_head_registry_locators, (str, bytes, bytearray)) or not isinstance(extra_pre_head_registry_locators, Sequence):
             raise ValueError("Gov1InstallationPins: extra_pre_head_registry_locators must be a Sequence")
@@ -299,8 +294,7 @@ class Gov1InstallationPins(InstallationPins):
             pinned_run_context_locator=ident["run_context_locator"], pinned_pre_head_registry_locators=pre_locs,
         )
         _verify_repo_pre_head_registries(
-            repo_path, pins_obj.pinned_pre_head_registry_locators,
-            cfg_d=cfg_d, profiles=profiles, has_extra=len(extra_pre_head_registry_locators) > 0,
+            repo_path, pins_obj.pinned_pre_head_registry_locators, cfg_d=cfg_d, profiles=profiles, store=store
         )
         return pins_obj
 
