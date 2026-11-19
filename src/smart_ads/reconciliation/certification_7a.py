@@ -44,6 +44,8 @@ _WHEEL_RECORD_MEMBER: Final[str] = "smart_ads-0.1.0.dist-info/RECORD"
 _MAX_WHEEL_MEMBER_BYTES: Final[int] = 8_388_608
 _MAX_WHEEL_TOTAL_UNCOMP_BYTES: Final[int] = 33_554_432
 _MAX_WHEEL_ENTRIES: Final[int] = 512
+_MAX_WHEEL_RECORD_BYTES: Final[int] = 262_144
+_MAX_WHEEL_RECORD_LINE_CHARS: Final[int] = 4096
 _NONNEG_DEC_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,17})\Z")
 _PHASE1_REQUIRED_METRICS: Final[tuple[str, ...]] = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
 _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed"})
@@ -117,23 +119,24 @@ def _parse_record_csv_line(line: str) -> tuple[str, str, str]:
     fields: list[str] = []
     i, n = 0, len(line)
     while True:
+        if len(fields) == 3:
+            raise ClosedValidationError("wheel RECORD: expected exact 3 CSV columns")
         if i < n and line[i] == '"':
-            i, buf = i + 1, []
-            while i < n:
-                if line[i] == '"':
-                    if i + 1 < n and line[i + 1] == '"':
-                        buf.append('"')
-                        i += 2
-                        continue
-                    i += 1
-                    break
-                buf.append(line[i])
-                i += 1
-            else:
-                raise ClosedValidationError("wheel RECORD: unclosed quoted CSV field")
+            start, parts = i + 1, []
+            while True:
+                q = line.find('"', start)
+                if q == -1:
+                    raise ClosedValidationError("wheel RECORD: unclosed quoted CSV field")
+                parts.append(line[start:q])
+                if q + 1 < n and line[q + 1] == '"':
+                    parts.append('"')
+                    start = q + 2
+                    continue
+                i = q + 1
+                break
             if i < n and line[i] != ",":
                 raise ClosedValidationError("wheel RECORD: trailing characters after quoted CSV field")
-            fields.append("".join(buf))
+            fields.append("".join(parts))
         else:
             comma = line.find(",", i)
             seg = line[i:] if comma == -1 else line[i:comma]
@@ -149,13 +152,16 @@ def _parse_record_csv_line(line: str) -> tuple[str, str, str]:
     return fields[0], fields[1], fields[2]
 
 def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
+    raw_rec = members[_WHEEL_RECORD_MEMBER]
+    if len(raw_rec) > _MAX_WHEEL_RECORD_BYTES:
+        raise ClosedValidationError("wheel RECORD: exceeds 256 KiB ceiling")
     try:
-        record_text = members[_WHEEL_RECORD_MEMBER].decode("utf-8")
+        record_text = raw_rec.decode("utf-8")
     except UnicodeDecodeError:
         raise ClosedValidationError("wheel RECORD: invalid UTF-8") from None
     lines = record_text.splitlines()
-    if not lines or "\x00" in record_text or any(not ln for ln in lines):
-        raise ClosedValidationError("wheel RECORD: empty or blank CSV row")
+    if not lines or len(lines) > _MAX_WHEEL_ENTRIES or "\x00" in record_text or any(not ln or len(ln) > _MAX_WHEEL_RECORD_LINE_CHARS for ln in lines):
+        raise ClosedValidationError("wheel RECORD: empty, blank, or oversized CSV row")
     seen: set[str] = set()
     for ln in lines:
         rec_path, rec_hash, rec_size = _parse_record_csv_line(ln)

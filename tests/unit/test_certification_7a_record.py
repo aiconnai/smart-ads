@@ -17,53 +17,19 @@ import pytest
 from smart_ads.adapters.pipeboard import PipeboardFixtureAdapter, PrivatePipeboardBindingBoundary
 from smart_ads.analytics.lattice import RegressionFixtureV1
 from smart_ads.application import admit_collection, evaluate_fixture_collection
-from smart_ads.contracts.git_provenance import (
-    GitArtifactProvenance, compute_git_blob_oid, sort_git_provenance_locators,
-)
-from smart_ads.contracts.jcs import (
-    ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, canonicalize_jcs,
-    jcs_sha256, loads_strict_json, p1_content_digest,
-)
-from smart_ads.contracts.negative_security import (
-    MANDATORY_7A_NEGATIVE_CASES, PINNED_7A_NEGATIVE_SUITE_DIGEST,
-    NegativeSecurityCase, NegativeSecurityRun, NegativeSecurityTestReport,
-    SandboxResourceLimits, SandboxRuntimeReadback, SandboxTermination,
-    SandboxUsageCounters, compute_negative_run_execution_binding_digest,
-)
+from smart_ads.contracts.git_provenance import GitArtifactProvenance, compute_git_blob_oid, sort_git_provenance_locators
+from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, canonicalize_jcs, jcs_sha256, loads_strict_json, p1_content_digest
+from smart_ads.contracts.negative_security import MANDATORY_7A_NEGATIVE_CASES, PINNED_7A_NEGATIVE_SUITE_DIGEST, NegativeSecurityCase, NegativeSecurityRun, NegativeSecurityTestReport, SandboxResourceLimits, SandboxRuntimeReadback, SandboxTermination, SandboxUsageCounters, compute_negative_run_execution_binding_digest
 from smart_ads.contracts.scalars import ClosedValidationError
-from smart_ads.contracts.schemas import (
-    CollectionRequest, DateRange, PurposePrerequisiteLocators,
-    RetrievalContext, compute_schema_bundle_digest,
-)
-from smart_ads.domain.pipeboard_contract import (
-    FORBIDDEN_PIPEBOARD_ARGUMENTS, PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO,
-    PINNED_PIPEBOARD_D26_SPECS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS,
-    LegacySourcePacket, PinnedGitArtifactMember, PinnedUpstreamReference,
-    PipeboardPhase1Contract, PipeboardTransportLimits,
-)
-from smart_ads.domain.registry import (
-    AuthorizedScopeRelation, DriverCapabilityEntry, ExpectedResourceInventory,
-    ExpectedResourceKey, PrivateRegistrySnapshot, RegistryBinding,
-)
+from smart_ads.contracts.schemas import CollectionRequest, DateRange, PurposePrerequisiteLocators, RetrievalContext, compute_schema_bundle_digest
+from smart_ads.domain.pipeboard_contract import FORBIDDEN_PIPEBOARD_ARGUMENTS, PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO, PINNED_PIPEBOARD_D26_SPECS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS, LegacySourcePacket, PinnedGitArtifactMember, PinnedUpstreamReference, PipeboardPhase1Contract, PipeboardTransportLimits
+from smart_ads.domain.registry import AuthorizedScopeRelation, DriverCapabilityEntry, ExpectedResourceInventory, ExpectedResourceKey, PrivateRegistrySnapshot, RegistryBinding
 from smart_ads.domain.resource_ref import TenantResourceKeyHandle
-from smart_ads.ports.cell_runtime import (
-    CellRuntimePorts, ClockAttestation, ResolvedClockState,
-    ResolvedPrerequisiteBundle, ResolvedRegistryState, TimezoneRuleSnapshot,
-)
+from smart_ads.ports.cell_runtime import CellRuntimePorts, ClockAttestation, ResolvedClockState, ResolvedPrerequisiteBundle, ResolvedRegistryState, TimezoneRuleSnapshot
 from smart_ads.ports.provider import ExternalIOCounters
 import smart_ads.reconciliation as reconciliation_pkg
-from smart_ads.reconciliation.certification_7a import (
-    ADAPTER_ARTIFACT_PATHS, CERTIFICATION_7A_RECORD_SCHEMA, CORPUS_GIT_PATH,
-    MAPPING_ARTIFACT_PATHS, PARSER_ARTIFACT_PATHS, PIPEBOARD_7A_CORPUS_SCHEMA,
-    Certification7ACapabilityBinding, Certification7AFixtureCase,
-    Certification7AFixtureEvidence, Certification7ARecord,
-    compute_7a_case_execution_binding_digest, compute_adapter_code_digest,
-    compute_mapping_rules_digest, compute_parser_code_digest,
-    verify_certification_7a_record,
-)
-from tests.unit.test_negative_security_7a import (
-    _DENIAL_OBSERVATIONS, _SPEC_17_KEYS, _make_readback, _resource_run_specs,
-)
+from smart_ads.reconciliation.certification_7a import ADAPTER_ARTIFACT_PATHS, CERTIFICATION_7A_RECORD_SCHEMA, CORPUS_GIT_PATH, MAPPING_ARTIFACT_PATHS, PARSER_ARTIFACT_PATHS, PIPEBOARD_7A_CORPUS_SCHEMA, Certification7ACapabilityBinding, Certification7AFixtureCase, Certification7AFixtureEvidence, Certification7ARecord, compute_7a_case_execution_binding_digest, compute_adapter_code_digest, compute_mapping_rules_digest, compute_parser_code_digest, verify_certification_7a_record
+from tests.unit.test_negative_security_7a import _DENIAL_OBSERVATIONS, _SPEC_17_KEYS, _make_readback, _resource_run_specs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "tests" / "certification_7a" / "fixtures"
@@ -72,12 +38,8 @@ CORPUS_PATH = FIXTURES_DIR / "pipeboard_7a_corpus_v1.json"
 
 _SIG_B64 = base64.b64encode(b"\x22" * 64).decode("ascii")
 _KEY_ID = "key:ed25519:" + ("a" * 64)
-_KEY_REG_LOC = ArtifactLocator.from_digest(
-    "smart_ads/key_authorization_registry/v1", "sha256:" + ("b" * 64)
-)
-_RUN_CTX_LOC = ArtifactLocator.from_digest(
-    "smart_ads/migration_run_context/v1", "sha256:" + ("c" * 64)
-)
+_KEY_REG_LOC = ArtifactLocator.from_digest("smart_ads/key_authorization_registry/v1", "sha256:" + ("b" * 64))
+_RUN_CTX_LOC = ArtifactLocator.from_digest("smart_ads/migration_run_context/v1", "sha256:" + ("c" * 64))
 _OCI_DIGEST = "sha256:" + ("1" * 64)
 _RUNNER_DIGEST = "sha256:" + ("2" * 64)
 _BACKEND_DIGEST = "sha256:" + ("4" * 64)
@@ -595,12 +557,21 @@ def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None
     with pytest.raises(ClosedValidationError, match="ceiling|total"):
         _verify_world(build_valid_7a_world(wheel_bytes=over_total_whl))
 
-    # (c) Valid RFC 4180 quoted RECORD fields accepted; malformed unclosed/extra-column CSV rejected
+    # (c) Valid RFC 4180 quoted RECORD fields accepted; oversized/malformed/extra-column CSV rejected
     quoted_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, quote_record=True)
     _verify_world(build_valid_7a_world(wheel_bytes=quoted_whl))
-    for bad_csv in (b'"unclosed,sha256=abc,1\n', b'a,b,c,d\n'):
+    over_256k_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=b"\xff" * 270_000)
+    with pytest.raises(ClosedValidationError, match="256 KiB"):
+        _verify_world(build_valid_7a_world(wheel_bytes=over_256k_whl))
+    for bad_csv, exp_pat in (
+        (b'"unclosed,sha256=abc,1\n', "unclosed"),
+        (b'"a""b",sha256=abc,1\n', "unknown member"),
+        (b"a,b,c," + (b"x," * 1000) + b"\n", "3 CSV columns"),
+        (("a" * 4097 + ",sha256=abc,1\n").encode("utf-8"), "oversized"),
+        (b"a,b,1\n" * 513, "oversized"),
+    ):
         bad_csv_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=bad_csv)
-        with pytest.raises(ClosedValidationError, match="RECORD"):
+        with pytest.raises(ClosedValidationError, match=exp_pat):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_csv_whl))
 
     # (d) 5000-digit RECORD size rejected with ClosedValidationError (never ValueError)
