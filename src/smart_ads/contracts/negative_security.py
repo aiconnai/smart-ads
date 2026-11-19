@@ -104,7 +104,7 @@ def _strict_str(value: object, *, label: str) -> str:
     if type(value) is not str:
         raise ClosedValidationError(f"{label}: expected str, got {type(value).__name__}")
     checked = validate_non_empty_str(value, field_name=label)
-    if checked != checked.strip() or any(ord(c) <= 0x1F or 0x7F <= ord(c) <= 0x9F for c in checked):
+    if checked != checked.strip() or any(ord(c) < 32 or ord(c) == 127 for c in checked):
         raise ClosedValidationError(f"{label}: leading/trailing whitespace or control char")
     return checked
 
@@ -116,7 +116,7 @@ def _exact_str(value: object, expected: str, *, label: str) -> str:
 def _exact_str_seq(value: object, expected: tuple[str, ...], *, label: str, list_only: bool = False) -> tuple[str, ...]:
     if list_only and type(value) is not list:
         raise ClosedValidationError(f"{label}: expected JSON array list")
-    if type(value) not in (list, tuple) or any(type(i) is not str for i in value) or tuple(value) != expected:
+    if not isinstance(value, (list, tuple)) or any(type(i) is not str for i in value) or tuple(value) != expected:
         raise ClosedValidationError(f"{label}: expected exact {list(expected)!r}")
     return expected
 

@@ -641,6 +641,25 @@ def test_verifier_rejects_zero_length_wheel_bytes() -> None:
         )
 
 
+def test_build_run_id_accepts_c1_while_git_provenance_rejects_c1() -> None:
+    report, sbx_env, _ = _build_valid_world()
+    c1_prov = _make_wheel_provenance_payload()
+    c1_prov["build_run_id"] = "build\x80run"
+    c1_prov_env = _sign_envelope_dict({"$schema": "smart_ads/wheel_build_provenance/v1", **c1_prov})
+    c1_prov_loc = ArtifactLocator.for_canonical_bytes(
+        "smart_ads/wheel_build_provenance/v1", canonicalize_jcs(c1_prov_env)
+    )
+    rep_dict = {**report.to_dict(), "build_run_id": "build\x80run", "wheel_build_provenance_locator": c1_prov_loc.to_dict()}
+    parsed = NegativeSecurityTestReport.from_dict(rep_dict)
+    assert parsed.build_run_id == "build\x80run"
+    verify_negative_security_report_against_profile(
+        parsed, sandbox_profile=sbx_env, wheel_provenance_payload=c1_prov_env, wheel_bytes=_WHEEL_BYTES
+    )
+    for repo, path in (("aiconnai/smart\x80ads", "a.py"), ("aiconnai/smart-ads", "src/smart\x80ads.py")):
+        with pytest.raises(ClosedValidationError):
+            GitArtifactProvenance(repo, _COMMIT_SHA, path, _TREE_OID, _OCI_DIGEST, "2026-11-12T12:00:00Z")
+
+
 def test_contracts_package_reexports_all_task1_symbols() -> None:
     expected = (
         "GitArtifactProvenance", "MANDATORY_7A_NEGATIVE_CASES", "NegativeSecurityCase",
