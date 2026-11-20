@@ -2295,7 +2295,7 @@ def _validate_wheel_record(
     if any(not (1 <= len(raw_line) <= 4096) for raw_line in lines):
         raise ValueError("wheel RECORD: blank or > 4096-char line in RECORD")
     try:
-        record_rows = list(csv.reader(lines))
+        record_rows = [row for ln in lines for row in csv.reader((ln,), strict=True)]
     except csv.Error as exc:
         raise ValueError(f"wheel RECORD: invalid CSV syntax: {exc}") from exc
     if not (1 <= len(record_rows) <= 512):

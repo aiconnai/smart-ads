@@ -19,7 +19,9 @@ import zipfile
 
 import pytest
 
+from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import compute_schema_bundle_digest
+from smart_ads.reconciliation.certification_7a import _verify_pep427_record
 from tools.governance import decomposition_admission, p1
 from tools.governance.decomposition_scope import run_git_offline
 import tools.governance.gov1_sandbox as gov1_sandbox
@@ -1414,6 +1416,21 @@ def test_wheel_archive_rejects_non_lf_record_separators_before_csv_and_cd_nul_na
         assert "\x00" not in zf.infolist()[0].filename
     with pytest.raises(ValueError, match="contains NUL"):
         gov1_wheel._read_and_validate_wheel_archive(nul_cd_bytes)
+
+    rec_lines = members[gov1_wheel.EXPECTED_SELF_RECORD_PATH].decode("utf-8").splitlines()
+    split_quoted = rec_lines[0].replace("smart_ads/", '"smart_ads/\n', 1).replace(",", '",', 1)
+    for bad_q in ("\n".join([split_quoted, *rec_lines[1:]]) + "\n", "\r\n".join([split_quoted.replace("\n", "\r\n"), *rec_lines[1:]]) + "\r\n"):
+        bad_m = {**members, gov1_wheel.EXPECTED_SELF_RECORD_PATH: bad_q.encode("utf-8")}
+        with pytest.raises(ValueError, match="invalid CSV syntax"):
+            gov1_wheel._validate_wheel_record(bad_m)
+        with pytest.raises(ClosedValidationError, match="RECORD"):
+            _verify_pep427_record(bad_m)
+    quoted_rows = [",".join(f'"{col}"' for col in next(csv.reader((ln,), strict=True))) for ln in rec_lines]
+    base_entries, base_digest = gov1_wheel._validate_wheel_record(members)
+    for eol in ("\n", "\r\n"):
+        q_m = {**members, gov1_wheel.EXPECTED_SELF_RECORD_PATH: (eol.join(quoted_rows) + eol).encode("utf-8")}
+        assert gov1_wheel._validate_wheel_record(q_m) == (base_entries, base_digest) and _verify_pep427_record(q_m)[:2] == (base_entries, base_digest)
+
 
 
 
