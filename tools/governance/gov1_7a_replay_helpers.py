@@ -569,7 +569,7 @@ def build_canonical_regression_fixture(registry_snapshot_digest: str) -> dict[st
 
 
 def _compute_previous_local_day(tz_snapshot: Mapping[str, Any], lower_us: int, upper_us: int) -> str:
-    d = dict(tz_snapshot)
+    d = dict(tz_snapshot) if isinstance(tz_snapshot, Mapping) else {}
     exact_fields(d, {"timezone_name", "tzdb_version", "transitions"}, "timezone_snapshot")
     _exact_str(d["timezone_name"], "America/Sao_Paulo", "timezone_snapshot.timezone_name")
     _strict_str(d["tzdb_version"], "timezone_snapshot.tzdb_version")
@@ -601,7 +601,7 @@ def _compute_previous_local_day(tz_snapshot: Mapping[str, Any], lower_us: int, u
 def _verify_clock_and_compute_day(
     clock_attestation: Mapping[str, Any], configured_max_uncertainty_ms: int, timezone_snapshot: Mapping[str, Any]
 ) -> tuple[dict[str, Any], str, str, int, int]:
-    att = dict(clock_attestation)
+    att = dict(clock_attestation) if isinstance(clock_attestation, Mapping) else {}
     exact_fields(att, {"$schema", "attestation_id", "now_utc", "uncertainty_ms", "issued_at_utc", "valid_until_utc", "maximum_age_seconds"}, "clock_attestation")
     _exact_str(att["$schema"], "smart_ads/clock_attestation/v1", "clock_attestation.$schema")
     _opaque_ref_str(att["attestation_id"], "clock_attestation.attestation_id", expected_prefix="clock")
@@ -655,9 +655,11 @@ def recompute_fixture_7a_admission(
 
     _opaque_ref_str(admission_id, "admission_id", expected_prefix="admission")
     validate_private_registry_snapshot_payload(registry_snapshot)
-    req = dict(collection_request)
+    req = dict(collection_request) if isinstance(collection_request, Mapping) else {}
     exact_fields(req, {"request_id", "collection_purpose", "tenant_ref", "binding_ref", "resource_scope_ref", "date_rule", "resource_level", "requested_capabilities", "breakdowns"}, "collection_request")
     _strict_str(req["request_id"], "request_id")
+    for pfx, k in (("tenant", "tenant_ref"), ("binding", "binding_ref"), ("scope", "resource_scope_ref")):
+        _opaque_ref_str(req[k], f"req.{k}", expected_prefix=pfx)
     if req["collection_purpose"] != "fixture_7a" or req["date_rule"] != "previous_local_day" or req["resource_level"] != "campaign" or type(req["breakdowns"]) is not list or len(req["breakdowns"]) != 0 or type(req["requested_capabilities"]) is not list or not req["requested_capabilities"]:
         raise ValueError("collection_request: invalid fixture_7a request fields")
     req_caps = sorted({_opaque_ref_str(c, "cap", expected_prefix="cap") for c in req["requested_capabilities"]}, key=lambda s: s.encode("utf-8"))

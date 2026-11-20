@@ -15,7 +15,7 @@ import pytest
 
 from smart_ads.domain.pipeboard_contract import PINNED_LEGACY_COMMIT, PINNED_PIPEBOARD_D26_SPECS
 from smart_ads.reconciliation.certification_7a import CORPUS_GIT_PATH
-from tests.governance.test_gov1_convergence import ALT_RUN_CONTEXT_LOCATOR, BUILD_RUN_ID, CONVERGED_AT_UTC, EXECUTED_AT_UTC, ISSUED_AT_UTC, REPO_ROOT, RUN_CONTEXT_LOCATOR, FakeOsIsolatedWheelProbeRunner, Gov1D4World, MemoryProtectedRuntime, _StructuralFakePr3Verifier, _build_padded_v1_d4_conv_and_verifier, _make_conv_base_kwargs, _recompute_candidate_digest, baseline_artifacts, synthetic_gov1_keys
+from tests.governance.test_gov1_convergence import ALT_RUN_CONTEXT_LOCATOR, BUILD_RUN_ID, CONVERGED_AT_UTC, EXECUTED_AT_UTC, ISSUED_AT_UTC, REPO_ROOT, RUN_CONTEXT_LOCATOR, FakeOsIsolatedWheelProbeRunner, Gov1D4World, MemoryProtectedRuntime, _StructuralFakePr3Verifier, _build_padded_v1_d4_conv_and_verifier, _make_conv_base_kwargs, _recompute_candidate_digest, _stage_mutated_corpus_for_d4_and_cli, baseline_artifacts, synthetic_gov1_keys
 from tools.governance import cli, decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_replay_helpers, gov1_7a_runner, gov1_convergence, gov1_mcp, gov1_sandbox, gov1_wheel, p1
 from tools.governance.decomposition_runtime import CHECKPOINT, HEAD, INVENTORY, REGISTRY, STATE, InstallationPins
 from tools.governance.gov1_d4_helpers import Gov1InstallationPins, SnapshotStore, _resolve_d4_pins, _verify_d4_registry_lineage_step, _verify_d4_registry_membership, build_gov1_convergence_record_candidate, verify_gov1_convergence_candidate
@@ -190,11 +190,11 @@ def test_d4_rejects_protocol_fakes_stale_preflights_and_enforces_snapshot_store(
         gov1_convergence.Gov1AdmissionVerifier(world.runtime, world.pins, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=_StructuralFakePr3Verifier(), isolated_probe_runner=world.probe_runner, corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir)
     assert world.runtime.cas_calls == 0
     _assert_d4_rejects_all_5_divergent_preflight_inputs(world, baseline_artifacts, conv_loc)
-    _assert_d4_rejects_malformed_snapshot_before_cas(world, synthetic_gov1_keys, baseline_artifacts)
+    _assert_d4_rejects_malformed_snapshot_before_cas(world, synthetic_gov1_keys, baseline_artifacts, monkeypatch)
     _assert_d4_passes_only_snapshot_store(world, baseline_artifacts, conv_loc, monkeypatch)
 
 
-def _assert_d4_rejects_malformed_snapshot_before_cas(world: Gov1D4World, keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any]) -> None:
+def _assert_d4_rejects_malformed_snapshot_before_cas(world: Gov1D4World, keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
     snap0 = copy.deepcopy(world.store.get(world.cert7a_env["capability"]["registry_snapshot_locator"]))
     b0, c0 = snap0["bindings"][0], snap0["capabilities"][0]
     fake_pr3 = _StructuralFakePr3Verifier(neg_ts=EXECUTED_AT_UTC, cert_ts=EXECUTED_AT_UTC)
@@ -213,6 +213,15 @@ def _assert_d4_rejects_malformed_snapshot_before_cas(world: Gov1D4World, keys: d
         with pytest.raises(ValueError, match="private_registry_snapshot"):
             world.make_verifier(pr3_verifier=world.make_pr3_verifier()).verify_artifact(_conv_for_snap(bad_mut), seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
         assert world.runtime.cas_calls == 0
+    cd0 = json.loads(baseline["corpus_bytes"].decode("utf-8"))
+    bad_cid = " 120210000000000099 "
+    bad_pair = {"raw_campaign_id": bad_cid, "resource_ref": gov1_7a_replay_helpers.derive_resource_ref(secret_bytes=bytes.fromhex(cd0["tenant_hmac_key_hex"]), mapping_version=snap0["resource_ref_mapping_version"], raw_provider_id=bad_cid)}
+    _, conv_bad_c, v_bad_c, git_bad_c = _stage_mutated_corpus_for_d4_and_cli(world, baseline, {"verified_campaign_pairs": [*cd0["verified_campaign_pairs"], bad_pair]}, world.store.root.parent / "bad_cid_corpus.json")
+    with monkeypatch.context() as mp:
+        mp.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda _r, _sha: git_bad_c)
+        with pytest.raises(ValueError, match="campaign_id"):
+            v_bad_c.verify_artifact(conv_bad_c, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
+    assert world.runtime.cas_calls == 0
 
 
 def _assert_d4_rejects_all_5_divergent_preflight_inputs(world: Gov1D4World, baseline: Mapping[str, Any], conv_loc: dict[str, Any]) -> None:
@@ -742,6 +751,14 @@ def test_cli_four_7a_and_convergence_commands_fail_exit_1_on_git_or_legacy_tampe
             assert cli.main(build_argv(["--legacy-repo", str(fake_leg)], repo_dir=REPO_ROOT, tag=f"fl{idx}")) == 1
     assert len(seen) >= 4
     orig_git = gov1_7a_certification.resolve_7a_smart_ads_git_blobs
+    cd0 = json.loads(baseline_artifacts["corpus_bytes"].decode("utf-8"))
+    for idx_m, mut_c in enumerate([*[{"private_account_bindings": [{**cd0["private_account_bindings"][0], "binding_ref": b}]} for b in ([], {})], *[{"cases": [{**cd0["cases"][0], "collection_request": {**cd0["cases"][0]["collection_request"], "binding_ref": b}}, *cd0["cases"][1:]]} for b in ([], {})]]):
+        cp_m = tmp_path / f"unhashable_c_{idx_m}.json"
+        cert_m, _, _, git_m = _stage_mutated_corpus_for_d4_and_cli(world, baseline_artifacts, mut_c, cp_m)
+        cert_m_p = _write_cli_json(d / f"cert_unhash_{idx_m}.json", cert_m)
+        with monkeypatch.context() as mp:
+            mp.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda _r, _sha, gm=git_m: gm)
+            assert cli.main(["verify-certification-7a-record", "--in", str(cert_m_p), "--store-root", str(world.store.root), "--wheel", str(baseline_artifacts["wheel_path"]), "--corpus", str(cp_m), "--repo", str(REPO_ROOT), "--legacy-blobs-dir", str(good_blobs), "--pubkey-raw-base64", base64.b64encode(synthetic_gov1_keys["independent_7a_verifier"][1]).decode("ascii")]) == 1
     monkeypatch.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda r, sha: {**dict(orig_git(r, sha)), "src/smart_ads/adapters/pipeboard/wire.py": b"# tampered git blob\n"})
     for idx, build_argv in enumerate(cmds):
         assert cli.main(build_argv(["--legacy-blobs-dir", str(good_blobs)], repo_dir=REPO_ROOT, tag=f"gt{idx}")) == 1

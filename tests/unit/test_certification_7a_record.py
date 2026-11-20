@@ -547,6 +547,12 @@ def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None
     bad_b_loc, _ = _put_signed(store_b, bad_b)
     with pytest.raises(ClosedValidationError, match="wheel_boundary_report"):
         _verify_world(w, record=_mut_rec(w.record, wheel_boundary_report_locator=bad_b_loc), object_resolver=store_b.__getitem__)
+    ex_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, overrides={"docs/extra.txt": b"extra"})
+    w_ex = build_valid_7a_world(wheel_bytes=ex_whl)
+    ex_ent = sorted([*copy.deepcopy(w.store[w.record.wheel_boundary_report_locator]["sorted_record_entries"]), {"path": "docs/extra.txt", "record_hash": "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(b"extra").digest()).rstrip(b"=").decode("ascii"), "record_size": 5}], key=lambda e: e["path"].encode("utf-8"))
+    ex_b_loc, _ = _put_signed(w_ex.store, {**copy.deepcopy(w_ex.store[w_ex.record.wheel_boundary_report_locator]), "sorted_record_entries": ex_ent, "sorted_record_digest": jcs_sha256(ex_ent)})
+    with pytest.raises(ClosedValidationError, match="unallowlisted|member"):
+        _verify_world(w_ex, record=_mut_rec(w_ex.record, wheel_boundary_report_locator=ex_b_loc))
 
 
 def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None:
@@ -555,7 +561,7 @@ def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None
 
     # (a) 12 MiB DEFLATE zero-bomb with spoofed header uncomp_size=64 stops immediately without inflating 12 MiB
     bomb_raw = _build_deterministic_wheel_bytes(
-        w.resolved_git_blobs, overrides={"00_bomb.py": b"\x00" * (12 * 1024 * 1024)}
+        w.resolved_git_blobs, overrides={"smart_ads-0.1.0.dist-info/METADATA": b"\x00" * (12 * 1024 * 1024)}
     )
     w_bomb = build_valid_7a_world(wheel_bytes=_spoof_first_zip_entry_uncomp_size(bomb_raw, 64))
     tracemalloc.start()
@@ -581,13 +587,7 @@ def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None
     over_256k_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=b"\xff" * 270_000)
     with pytest.raises(ClosedValidationError, match="256 KiB"):
         _verify_world(build_valid_7a_world(wheel_bytes=over_256k_whl))
-    for bad_csv, exp_pat in (
-        (b'"unclosed,sha256=abc,1\n', "unclosed"),
-        (b'"a""b",sha256=abc,1\n', "unknown member"),
-        (b"a,b,c," + (b"x," * 1000) + b"\n", "3 CSV columns"),
-        (("a" * 4097 + ",sha256=abc,1\n").encode("utf-8"), "oversized"),
-        (b"a,b,1\n" * 513, "oversized"),
-    ):
+    for bad_csv, exp_pat in ((b'"unclosed,sha256=abc,1\n', "unclosed"), (b'"a""b",sha256=abc,1\n', "unallowlisted|unknown member"), (b"a,b,c," + (b"x," * 1000) + b"\n", "3 CSV columns"), (("a" * 4097 + ",sha256=abc,1\n").encode("utf-8"), "oversized"), (b"a,b,1\n" * 513, "oversized")):
         bad_csv_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=bad_csv)
         with pytest.raises(ClosedValidationError, match=exp_pat):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_csv_whl))
@@ -653,25 +653,20 @@ def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> No
 
 def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
     w = build_valid_7a_world()
-    for field_mut in ("scope", "hmac"):
+    for field_mut in ("scope", "hmac", "dup_bnd"):
         corpus_doc = loads_strict_json(w.corpus_bytes)
         if field_mut == "scope":
             corpus_doc["cases"][0]["collection_request"]["resource_scope_ref"] = "scope:other-scope"
-        else:
+        elif field_mut == "hmac":
             corpus_doc["tenant_hmac_key_hex"] = "ff" * 32
-        bad_bytes = canonicalize_jcs(corpus_doc)
-        store2 = dict(w.store)
-        p = GitArtifactProvenance(
-            CORPUS_GIT_PATH[0], _COMMIT_SHA, CORPUS_GIT_PATH[1], compute_git_blob_oid(bad_bytes),
-            "sha256:" + hashlib.sha256(bad_bytes).hexdigest(), "2026-09-07T10:00:04Z",
-        )
+        else:
+            corpus_doc["private_account_bindings"] = [corpus_doc["private_account_bindings"][0], corpus_doc["private_account_bindings"][0]]
+        bad_bytes, store2 = canonicalize_jcs(corpus_doc), dict(w.store)
+        p = GitArtifactProvenance(CORPUS_GIT_PATH[0], _COMMIT_SHA, CORPUS_GIT_PATH[1], compute_git_blob_oid(bad_bytes), "sha256:" + hashlib.sha256(bad_bytes).hexdigest(), "2026-09-07T10:00:04Z")
         c_loc, _ = _put_signed(store2, p.to_dict())
         bad_ev = replace(w.record.fixture_evidence, corpus_git_locator=c_loc, corpus_digest=p.file_content_sha256)
         with pytest.raises(ClosedValidationError):
-            _verify_world(
-                w, record=_mut_rec(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__,
-                corpus_bytes=bad_bytes, resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes},
-            )
+            _verify_world(w, record=_mut_rec(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__, corpus_bytes=bad_bytes, resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes})
 
     c1 = w.record.fixture_evidence.cases[1]
     alt_draft = replace(c1, observation_batch=replace(c1.observation_batch, retrieval_context=replace(c1.observation_batch.retrieval_context, adapter_version="tampered/9.9.9")))

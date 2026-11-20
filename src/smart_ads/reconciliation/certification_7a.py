@@ -46,6 +46,7 @@ _MAX_WHEEL_TOTAL_UNCOMP_BYTES: Final[int] = 33_554_432
 _MAX_WHEEL_ENTRIES: Final[int] = 512
 _MAX_WHEEL_RECORD_BYTES: Final[int] = 262_144
 _MAX_WHEEL_RECORD_LINE_CHARS: Final[int] = 4096
+_WHEEL_ALLOWLIST_RE: Final[re.Pattern[str]] = re.compile(r"\A(smart_ads(/[a-z0-9_]+)+\.py|smart_ads-0\.1\.0\.dist-info/(METADATA|WHEEL|RECORD))\Z")
 _NONNEG_DEC_RE: Final[re.Pattern[str]] = re.compile(r"\A(0|[1-9][0-9]{0,17})\Z")
 _PHASE1_REQUIRED_METRICS: Final[tuple[str, ...]] = ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")
 _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial", "failed"})
@@ -70,8 +71,8 @@ def _validate_wheel_member_path(raw_name: bytes) -> str:
         name = raw_name.decode("utf-8")
     except UnicodeDecodeError:
         raise ClosedValidationError("wheel_bytes: non-UTF-8 member path in central directory") from None
-    if not name or any(ch in name for ch in ("\x00", "\\", ",", '"', "\r", "\n")) or name.startswith("/") or name.endswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")):
-        raise ClosedValidationError(f"wheel_bytes: invalid, directory, or traversal member path {name!r}")
+    if not name or any(ch in name for ch in ("\x00", "\\", ",", '"', "\r", "\n")) or name.startswith("/") or name.endswith("/") or any(seg in ("", ".", "..") for seg in name.split("/")) or _WHEEL_ALLOWLIST_RE.fullmatch(name) is None:
+        raise ClosedValidationError(f"wheel_bytes: invalid, unallowlisted, directory, or traversal member path {name!r}")
     return name
 
 def _decompress_wheel_member(comp_slice: bytes, *, method: int, uncomp_size: int, exp_crc: int, name: str) -> bytes:
@@ -527,6 +528,8 @@ def _parse_pipeboard_7a_corpus(corpus_bytes: bytes) -> dict[str, Any]:
     if type(m["private_account_bindings"]) is not list or len(m["private_account_bindings"]) == 0:
         raise ClosedValidationError("corpus.private_account_bindings: expected non-empty JSON list")
     bindings = tuple((_strict_str(bm["binding_ref"], label="b"), _strict_str(bm["account_ref"], label="a"), _strict_str(bm["private_object_id"], label="id")) for i, raw_b in enumerate(m["private_account_bindings"]) for bm in (require_exact_keys(raw_b, CORPUS_PRIVATE_BINDING_KEYS, label=f"corpus.bindings[{i}]"),))
+    if len({(b[0], b[1]) for b in bindings}) != len(bindings):
+        raise ClosedValidationError("corpus.private_account_bindings: duplicate (binding_ref, account_ref)")
     if type(m["verified_campaign_pairs"]) is not list or len(m["verified_campaign_pairs"]) < 2:
         raise ClosedValidationError("corpus.verified_campaign_pairs: expected JSON list of >= 2 pairs")
     pairs = tuple((_strict_str(pm["raw_campaign_id"], label="cid"), _strict_str(pm["resource_ref"], label="rref")) for i, raw_p in enumerate(m["verified_campaign_pairs"]) for pm in (require_exact_keys(raw_p, CORPUS_CAMPAIGN_PAIR_KEYS, label=f"corpus.pairs[{i}]"),))

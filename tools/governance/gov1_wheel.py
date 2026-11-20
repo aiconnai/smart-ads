@@ -2273,19 +2273,26 @@ def _parse_single_record_row(
 def _validate_wheel_record(
     members: dict[str, bytes],
 ) -> tuple[list[dict[str, Any]], str]:
+    raw_record = members[EXPECTED_SELF_RECORD_PATH]
+    if len(raw_record) > 262_144:
+        raise ValueError("wheel RECORD: exceeds 256 KiB (262144 bytes) ceiling")
     try:
-        record_text = members[EXPECTED_SELF_RECORD_PATH].decode("utf-8")
+        record_text = raw_record.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("wheel RECORD: invalid UTF-8") from exc
     if "\x00" in record_text or not record_text.strip():
         raise ValueError("wheel RECORD: empty or contains NUL byte")
-    for raw_line in record_text.splitlines():
-        if not raw_line:
-            raise ValueError("wheel RECORD: blank lines are forbidden")
+    if record_text.count("\n") > 512 or record_text.count("\r") > 512:
+        raise ValueError("wheel RECORD: exceeds 512 rows ceiling")
+    lines = record_text.splitlines()
+    if not (1 <= len(lines) <= 512) or any(not (1 <= len(raw_line) <= 4096) for raw_line in lines):
+        raise ValueError("wheel RECORD: blank, > 4096-char, or > 512 lines in RECORD")
     try:
         record_rows = list(csv.reader(io.StringIO(record_text, newline="")))
     except csv.Error as exc:
         raise ValueError(f"wheel RECORD: invalid CSV syntax: {exc}") from exc
+    if not (1 <= len(record_rows) <= 512):
+        raise ValueError("wheel RECORD: exceeds 512 CSV rows ceiling")
 
     seen_record_paths: set[str] = set()
     record_entries = [

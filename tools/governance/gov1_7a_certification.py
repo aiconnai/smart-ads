@@ -19,10 +19,10 @@ from tools.governance.gov1_7a_negative import (
     verify_negative_security_test_report,
 )
 from tools.governance.gov1_7a_replay_helpers import (
-    DEFAULT_PIPEBOARD_TRANSPORT_LIMITS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS, _SOURCE_METRIC_RE,
-    build_canonical_regression_fixture, derive_resource_ref, parse_utc6_micros,
+    DEFAULT_PIPEBOARD_TRANSPORT_LIMITS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS, _META_ACCOUNT_RE, _META_CAMPAIGN_RE,
+    _SOURCE_METRIC_RE, build_canonical_regression_fixture, derive_resource_ref, parse_utc6_micros,
     recompute_collection_completeness_dict, recompute_fixture_7a_admission,
-    transform_pipeboard_response_to_batch_dict, validate_provider_observation_batch_dict,
+    transform_pipeboard_response_to_batch_dict, validate_provider_observation_batch_dict, validate_resource_ref_str,
 )
 from tools.governance.gov1_7a_runner import (
     EXPECTED_RESOURCE_INVENTORY_SCHEMA, GIT_ARTIFACT_PROVENANCE_SCHEMA, PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO,
@@ -501,17 +501,19 @@ def _parse_corpus_and_inventories(
     for rb in m["private_account_bindings"]:
         bd = dict(rb) if isinstance(rb, Mapping) else {}
         exact_fields(bd, {"binding_ref", "account_ref", "private_object_id"}, "corpus.binding")
-        sb = snap_bnds.get(bd["binding_ref"])
-        if sb is None or sb["account_ref"] != bd["account_ref"] or sb["driver_id"] != "pipeboard_hosted" or (bd["binding_ref"], bd["account_ref"]) in priv_map:
+        br, ar, oid = _opaque_ref_str(bd["binding_ref"], "corpus.binding_ref", expected_prefix="binding"), _opaque_ref_str(bd["account_ref"], "corpus.account_ref", expected_prefix="account"), bd["private_object_id"]
+        sb = snap_bnds.get(br)
+        if type(oid) is not str or _META_ACCOUNT_RE.fullmatch(oid) is None or sb is None or sb["account_ref"] != ar or sb["driver_id"] != "pipeboard_hosted" or (br, ar) in priv_map:
             raise ValueError("corpus: invalid or duplicate private_account_binding")
-        priv_map[(bd["binding_ref"], bd["account_ref"])] = _strict_str(bd["private_object_id"], "obj_id")
+        priv_map[(br, ar)] = oid
     cmap: dict[str, str] = {}
     for rp in m["verified_campaign_pairs"]:
         pd = dict(rp) if isinstance(rp, Mapping) else {}
         exact_fields(pd, {"raw_campaign_id", "resource_ref"}, "corpus.pair")
-        if derive_resource_ref(secret_bytes=secret, mapping_version=snap["resource_ref_mapping_version"], domain_separator=snap["domain_separator"], raw_provider_id=pd["raw_campaign_id"]) != pd["resource_ref"] or pd["raw_campaign_id"] in cmap or pd["resource_ref"] in cmap.values():
-            raise ValueError("corpus: HMAC resource_ref derivation or bijection collision")
-        cmap[pd["raw_campaign_id"]] = pd["resource_ref"]
+        cid, rref = pd["raw_campaign_id"], validate_resource_ref_str(pd["resource_ref"], "corpus.resource_ref")
+        if type(cid) is not str or _META_CAMPAIGN_RE.fullmatch(cid) is None or derive_resource_ref(secret_bytes=secret, mapping_version=snap["resource_ref_mapping_version"], domain_separator=snap["domain_separator"], raw_provider_id=cid) != rref or cid in cmap or rref in cmap.values():
+            raise ValueError("corpus: invalid campaign_id, HMAC resource_ref derivation, or bijection collision")
+        cmap[cid] = rref
     return m, priv_map, cmap, _load_verified_inventories(store, snap, set(cmap.values()), cases)
 
 

@@ -297,7 +297,7 @@ def run_7a_hermetic_execution(
         raise ValueError("sandbox_profile: expected signed sealed_sandbox_profile/v1 P1 envelope")
     sbx_env = dict(sandbox_profile)
     _verify_p1_integrity(sbx_env, label="sealed_sandbox_profile", require_signed=True)
-    p1.verify_envelope(sbx_env, "SMART-ADS:SANDBOX-PROFILE:V1\n", sandbox_pubkey_raw32)
+    p1.verify_envelope(sbx_env, "SMART-ADS:SANDBOX:V1\n", sandbox_pubkey_raw32)
     sbx_payload = sbx_res["payload"]
     verified_d26 = _verify_d26_blob_map(resolved_d26_blobs)
     if supervisor is None or not isinstance(supervisor, SealedOciSupervisorPort):
@@ -307,7 +307,7 @@ def run_7a_hermetic_execution(
         checked_limits = _validate_resource_limits_dict(supervisor.readback_effective_resource_limits(), "oci_effective_resource_limits")
         if canonicalize(checked_limits) != canonicalize(sbx_payload["resource_limits"]):
             raise ValueError("oci_effective_resource_limits: canonical byte mismatch against sealed_sandbox_profile/v1")
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, NotImplementedError) as exc:
         return {"status": "BLOCKED", "reason": str(exc)}
     pinned_reducer = load_isolated_pinned_meta_reducer(verified_d26)
     exec_out = supervisor.execute_7a_corpus(

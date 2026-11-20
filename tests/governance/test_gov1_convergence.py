@@ -665,6 +665,28 @@ def _build_padded_v1_d4_conv_and_verifier(
     return conv_loc, v_d4, git_v1
 
 
+def _stage_mutated_corpus_for_d4_and_cli(
+    world: Gov1D4World, baseline: Mapping[str, Any], mut_fields: Mapping[str, Any], out_corpus: Path
+) -> tuple[dict[str, Any], dict[str, Any], gov1_convergence.Gov1AdmissionVerifier, dict[str, bytes]]:
+    corpus_doc = loads_strict_json(baseline["corpus_bytes"])
+    mb = canonicalize({**copy.deepcopy(corpus_doc), **mut_fields})
+    out_corpus.write_bytes(mb)
+    git_m = {**dict(baseline["git_blobs"]), CORPUS_GIT_PATH[1]: mb}
+    cg_u = gov1_7a_certification.build_git_artifact_provenance_envelope(repository="aiconnai/smart-ads", commit_sha=baseline["snapshot"].commit_sha, path=CORPUS_GIT_PATH[1], raw_bytes=mb, resolved_at_utc="2026-09-07T10:00:04Z", registry_locator=world.registry_loc, signer_key_id=world.keys["git_provenance_verifier"][2])
+    cg_loc = world.store.put(p1.sign_envelope(cg_u, world.profiles[gov1_7a_runner.GIT_ARTIFACT_PROVENANCE_SCHEMA]["domain_prefix"], world.keys["git_provenance_verifier"][0]))
+    cu = {k: v for k, v in copy.deepcopy(world.cert7a_env).items() if k != "integrity"}
+    cu["fixture_evidence"].update({"corpus_git_locator": cg_loc, "corpus_digest": digest(mb)})
+    cu["integrity"] = {"key_id": world.keys["independent_7a_verifier"][2], "key_registry_snapshot_locator": world.registry_loc}
+    cert_s = p1.sign_envelope(cu, world.profiles[gov1_convergence.CERTIFICATION_7A_SCHEMA]["domain_prefix"], world.keys["independent_7a_verifier"][0])
+    cert_loc = world.store.put(cert_s)
+    fake_pr3 = _StructuralFakePr3Verifier(neg_ts=EXECUTED_AT_UTC, cert_ts=EXECUTED_AT_UTC)
+    conv_u = gov1_convergence.build_gov1_convergence_record_envelope(**{**_make_conv_base_kwargs(world, world.keys, baseline), "certification_7a_record_locator": cert_loc}, store=world.store, pr3_verifier=fake_pr3)
+    conv_loc = world.store.put(p1.sign_envelope(conv_u, world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], world.keys["gov1_convergence_verifier"][0]))
+    pr3_m = gov1_7a_certification.SevenAConstituentVerifier(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=mb, stripped_provenance_payload=gov1_7a_negative.extract_provenance_payload(world.prov_env), resolved_git_blobs=git_m, resolved_d26_blobs=baseline["d26_blobs"])
+    v_d4 = gov1_convergence.Gov1AdmissionVerifier(world.runtime, world.pins, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=pr3_m, isolated_probe_runner=world.probe_runner, corpus_path=out_corpus, legacy_blobs_dir=world.legacy_blobs_dir)
+    return cert_s, conv_loc, v_d4, git_m
+
+
 def _sign_d4_etapa7_and_7a_envelopes(
     world: Gov1D4World,
     keys: dict[str, tuple[Path, bytes, str]],

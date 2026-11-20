@@ -369,8 +369,8 @@ def world_7a(built_head_wheel: dict[str, Any], tmp_path: Path) -> dict[str, Any]
     corpus_bytes, run_ctx, seccomp = git_blobs[CORPUS_GIT_PATH[1]], decomposition_governance.verified_run_context_identity(REPO_ROOT)["run_context_locator"], gov1_sandbox.build_default_7a_seccomp_profile()
     sbx_cand = gov1_sandbox.build_sealed_sandbox_profile_candidate(migration_run_context_locator=run_ctx, oci_image_digest=_OCI_DIGEST, runner_binary_digest=_RUNNER_DIGEST, seccomp_profile=seccomp, issued_at_utc="2026-09-07T10:00:00Z", valid_from_utc="2026-01-01T00:00:00Z", valid_until_utc="2027-01-01T00:00:00Z")
     sbx_u = gov1_sandbox.build_sealed_sandbox_profile_envelope(migration_run_context_locator=run_ctx, oci_image_digest=_OCI_DIGEST, runner_binary_digest=_RUNNER_DIGEST, seccomp_profile=seccomp, issued_at_utc="2026-09-07T10:00:00Z", valid_from_utc="2026-01-01T00:00:00Z", valid_until_utc="2027-01-01T00:00:00Z", registry_locator=_KEY_REG_DICT, signer_key_id=built_head_wheel["sbx_key_id"])
-    sbx_env = p1.sign_envelope(sbx_u, "SMART-ADS:SANDBOX-PROFILE:V1\n", built_head_wheel["sbx_priv_pem"])
-    return {**_assemble_world_7a_artifacts(store, run_ctx, seccomp, sbx_cand, sbx_env, store.put(sbx_env), snap, whl_bytes, insp, mcp_exec, corpus_bytes, digest(corpus_bytes), git_blobs, d26_blobs), "sbx_pub_raw32": built_head_wheel["sbx_pub_raw32"]}
+    sbx_env, sbx_wrong_dom = p1.sign_envelope(sbx_u, "SMART-ADS:SANDBOX:V1\n", built_head_wheel["sbx_priv_pem"]), p1.sign_envelope(sbx_u, "SMART-ADS:SANDBOX-PROFILE:V1\n", built_head_wheel["sbx_priv_pem"])
+    return {**_assemble_world_7a_artifacts(store, run_ctx, seccomp, sbx_cand, sbx_env, store.put(sbx_env), snap, whl_bytes, insp, mcp_exec, corpus_bytes, digest(corpus_bytes), git_blobs, d26_blobs), "sbx_pub_raw32": built_head_wheel["sbx_pub_raw32"], "sbx_wrong_dom": sbx_wrong_dom}
 
 
 def _assemble_world_7a_artifacts(store: Store, run_ctx: dict[str, Any], seccomp: dict[str, Any], sbx_cand: dict[str, Any], sbx_env: dict[str, Any], sbx_loc: dict[str, Any], snap: Any, whl_bytes: bytes, insp: dict[str, Any], mcp_exec: dict[str, Any], corpus_bytes: bytes, corpus_digest: str, git_blobs: Mapping[str, bytes], d26_blobs: Mapping[str, bytes]) -> dict[str, Any]:
@@ -405,7 +405,7 @@ def test_hermetic_execution_blocked_without_oci_and_injects_pinned_reducer_in_oc
     kw = {"wheel_bytes": world_7a["wheel_bytes"], "corpus_bytes": world_7a["corpus_bytes"], "sandbox_profile": world_7a["sbx_env"], "seccomp_profile": world_7a["seccomp"], "resolved_d26_blobs": world_7a["d26_blobs"], "sandbox_pubkey_raw32": world_7a["sbx_pub_raw32"]}
     good_sup = _FakeSealedOciSupervisorPort(sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"])
     uns_sbx = {**copy.deepcopy(world_7a["sbx_env"]), "integrity": {"key_id": world_7a["sbx_env"]["integrity"]["key_id"], "key_registry_snapshot_locator": copy.deepcopy(_KEY_REG_DICT)}}
-    for bad_over in ({"sandbox_profile": world_7a["sbx_cand"]}, {"sandbox_profile": uns_sbx}, {"sandbox_pubkey_raw32": b"\x77" * 32}, {"sandbox_pubkey_raw32": b"short"}):
+    for bad_over in ({"sandbox_profile": world_7a["sbx_cand"]}, {"sandbox_profile": uns_sbx}, {"sandbox_profile": world_7a["sbx_wrong_dom"]}, {"sandbox_pubkey_raw32": b"\x77" * 32}, {"sandbox_pubkey_raw32": b"short"}):
         with pytest.raises(ValueError):
             gov1_7a_runner.run_7a_hermetic_execution(**{**kw, **bad_over}, supervisor=good_sup)
     assert (good_sup.execute_calls, good_sup.reducer_calls) == (0, 0)
@@ -417,10 +417,10 @@ def test_hermetic_execution_blocked_without_oci_and_injects_pinned_reducer_in_oc
     for bad_val in (False, 1):
         bad_sup = _FakeSealedOciSupervisorPort(sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"], tamper_val=bad_val)
         assert gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=bad_sup)["status"] == "BLOCKED" and (bad_sup.execute_calls, bad_sup.reducer_calls) == (0, 0)
-    for bad_lim in (None, {}, {"pids_max": 65}, {"memory_max_bytes": 1_073_741_825}, {"cpu_max": {"quota_us": 100_001, "period_us": 100_000}}, OSError("cgroup pids.max unreadable")):
+    for bad_lim in (None, {}, {"pids_max": 65}, {"memory_max_bytes": 1_073_741_825}, {"cpu_max": {"quota_us": 100_001, "period_us": 100_000}}, OSError("cgroup pids.max unreadable"), NotImplementedError("pids controller unsupported")):
         lim_sup = _FakeSealedOciSupervisorPort(sbx_payload=world_7a["sbx_cand"]["payload"], reg_state=world_7a["reg_state"], inv_pair=world_7a["inv_pair"], tamper_limits=bad_lim)
         res = gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=lim_sup)
-        assert res["status"] == "BLOCKED" and (lim_sup.execute_calls, lim_sup.reducer_calls) == (0, 0) and (not isinstance(bad_lim, OSError) or "pids.max" in res["reason"])
+        assert res["status"] == "BLOCKED" and (lim_sup.execute_calls, lim_sup.reducer_calls) == (0, 0) and (not isinstance(bad_lim, (OSError, NotImplementedError)) or "pids" in res["reason"])
     executed = gov1_7a_runner.run_7a_hermetic_execution(**kw, supervisor=good_sup)
     assert executed["status"] == "EXECUTED" and good_sup.execute_calls == 1 and good_sup.reducer_calls >= 1 and executed["effective_resource_limits"] == world_7a["sbx_cand"]["payload"]["resource_limits"] and executed["execution"]["statuses"] == ["complete", "failed", "partial", "partial"]
 
@@ -631,9 +631,10 @@ def _build_malformed_wheels_for_ceils() -> tuple[tuple[bytes, str], ...]:
         ba[cd + 8 : cd + 10] = (int.from_bytes(ba[cd + 8 : cd + 10], "little") | cd_or).to_bytes(2, "little")
         return bytes(ba)
 
-    ok_zero = _zip_bytes([("smart_ads/__init__.py", b"", zipfile.ZIP_STORED), ("smart_ads-0.1.0.dist-info/METADATA", b"", zipfile.ZIP_DEFLATED), ("smart_ads-0.1.0.dist-info/WHEEL", b"w", zipfile.ZIP_STORED), (gov1_wheel.EXPECTED_SELF_RECORD_PATH, b"", zipfile.ZIP_DEFLATED)])
+    base3 = [("smart_ads/__init__.py", b"", zipfile.ZIP_STORED), ("smart_ads-0.1.0.dist-info/METADATA", b"", zipfile.ZIP_STORED), ("smart_ads-0.1.0.dist-info/WHEEL", b"w", zipfile.ZIP_STORED)]
+    ok_zero = _zip_bytes([*base3[:1], ("smart_ads-0.1.0.dist-info/METADATA", b"", zipfile.ZIP_DEFLATED), base3[2], (gov1_wheel.EXPECTED_SELF_RECORD_PATH, b"", zipfile.ZIP_DEFLATED)])
     assert gov1_wheel._extract_wheel_zip_members(ok_zero)["smart_ads/__init__.py"] == b"" and gov1_wheel._extract_wheel_zip_members(ok_zero)["smart_ads-0.1.0.dist-info/METADATA"] == b""
-    return ((_zip_bytes([("smart_ads/big.py", b"\x00" * 8_388_609, zipfile.ZIP_DEFLATED)]), "> 8 MiB"), (_zip_bytes([(f"smart_ads/m{i}.py", b"\x00" * 7_000_000, zipfile.ZIP_DEFLATED) for i in range(5)]), "32 MiB"), (_zip_bytes([(f"smart_ads/e{i}.py", b"x", zipfile.ZIP_STORED) for i in range(513)]), "> 512"), (_patch_uncomp(_zip_bytes([("smart_ads/clip.py", b"hello!", zipfile.ZIP_DEFLATED)]), b"hello"), "oversized DEFLATE stream"), (_patch_uncomp(_zip_bytes([("smart_ads/bomb.py", b"\x00" * (12 * 1024 * 1024), zipfile.ZIP_DEFLATED)]), b"\x00" * 64), "oversized DEFLATE stream"), (_patch_flags(ok_zero, 0x0001, 0x0001), "bit flags"), (_patch_flags(ok_zero, 0x0040, 0x0040), "bit flags"), (_patch_flags(ok_zero, 0x0002, 0x0002), "bit flags"), (_patch_flags(ok_zero, 0x0000, 0x0800), "bit flags"))
+    return ((_zip_bytes([("smart_ads/big.py", b"\x00" * 8_388_609, zipfile.ZIP_DEFLATED)]), "> 8 MiB"), (_zip_bytes([(f"smart_ads/m{i}.py", b"\x00" * 7_000_000, zipfile.ZIP_DEFLATED) for i in range(5)]), "32 MiB"), (_zip_bytes([(f"smart_ads/e{i}.py", b"x", zipfile.ZIP_STORED) for i in range(513)]), "> 512"), (_patch_uncomp(_zip_bytes([("smart_ads/clip.py", b"hello!", zipfile.ZIP_DEFLATED)]), b"hello"), "oversized DEFLATE stream"), (_patch_uncomp(_zip_bytes([("smart_ads/bomb.py", b"\x00" * (12 * 1024 * 1024), zipfile.ZIP_DEFLATED)]), b"\x00" * 64), "oversized DEFLATE stream"), (_patch_flags(ok_zero, 0x0001, 0x0001), "bit flags"), (_patch_flags(ok_zero, 0x0040, 0x0040), "bit flags"), (_patch_flags(ok_zero, 0x0002, 0x0002), "bit flags"), (_patch_flags(ok_zero, 0x0000, 0x0800), "bit flags"), (_zip_bytes([*base3, (gov1_wheel.EXPECTED_SELF_RECORD_PATH, b"a" * 300_000, zipfile.ZIP_DEFLATED)]), "256 KiB"), (_zip_bytes([*base3, (gov1_wheel.EXPECTED_SELF_RECORD_PATH, b"a,b,1\n" * 513, zipfile.ZIP_DEFLATED)]), "512"))
 
 
 def _assert_wheel_bomb_and_digest_gate_guards(world_7a: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -696,22 +697,30 @@ def _assert_run_ctx_registry_inventory_member_and_signed_guards(world_7a: dict[s
     for bad_c in ([{**c0, "capability_semantic_version": "   "}], [c0, bad_unused]):
         with pytest.raises(ValueError):
             PrivateRegistrySnapshot.from_dict(_fake_sign_dict({**copy.deepcopy(snap0), "capabilities": bad_c}), require_signed=True)
+    for bad_br in ([], {}):
+        with pytest.raises(ValueError):
+            gov1_7a_replay_helpers.recompute_fixture_7a_admission(**{**adm_kw, "collection_request": {**case0["collection_request"], "binding_ref": bad_br}}, registry_snapshot=snap0, registry_snapshot_locator=world_7a["cert_env"]["capability"]["registry_snapshot_locator"])
     _assert_padded_v1_mapping_version_and_sem_ver_parity(world_7a, corpus_doc)
     _assert_inventory_member_and_unsigned_store_guards(world_7a, kw)
 
 
 def _assert_padded_v1_mapping_version_and_sem_ver_parity(world_7a: dict[str, Any], corpus_doc: Mapping[str, Any]) -> None:
     store: Store = world_7a["store"]
-    sec = bytes.fromhex(corpus_doc["tenant_hmac_key_hex"])
+    sec, rs0 = bytes.fromhex(corpus_doc["tenant_hmac_key_hex"]), world_7a["reg_state"]
+    bad_cid = " 120210000000000099 "
+    bad_pair = {"raw_campaign_id": bad_cid, "resource_ref": gov1_7a_replay_helpers.derive_resource_ref(secret_bytes=sec, mapping_version=rs0.snapshot.resource_ref_mapping_version, raw_provider_id=bad_cid)}
+    for mut_c in ({"verified_campaign_pairs": [*corpus_doc["verified_campaign_pairs"], bad_pair]}, {"private_account_bindings": [{**corpus_doc["private_account_bindings"][0], "private_object_id": " 12345 "}]}, *[{"private_account_bindings": [{**corpus_doc["private_account_bindings"][0], "binding_ref": b}]} for b in ([], {})], *[{"cases": [{**corpus_doc["cases"][0], "collection_request": {**corpus_doc["cases"][0]["collection_request"], "binding_ref": b}}, *corpus_doc["cases"][1:]]} for b in ([], {})]):
+        mb = canonicalize({**copy.deepcopy(dict(corpus_doc)), **mut_c})
+        mc_loc = store.put(_fake_sign_dict(gov1_7a_certification.build_git_artifact_provenance_envelope(repository="aiconnai/smart-ads", commit_sha=world_7a["cert_env"]["source_commit_sha"], path=CORPUS_GIT_PATH[1], raw_bytes=mb, resolved_at_utc="2026-09-07T10:00:04Z", registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID)))
+        with pytest.raises(ValueError):
+            gov1_7a_certification.verify_certification_7a_record(_fake_sign_dict({**copy.deepcopy(world_7a["cert_env"]), "fixture_evidence": {**copy.deepcopy(world_7a["cert_env"]["fixture_evidence"]), "corpus_git_locator": mc_loc, "corpus_digest": digest(mb)}}), store=store, wheel_bytes=world_7a["wheel_bytes"], corpus_bytes=mb, resolved_git_blobs={**dict(world_7a["git_blobs"]), CORPUS_GIT_PATH[1]: mb}, resolved_d26_blobs=world_7a["d26_blobs"])
     kh = TenantResourceKeyHandle("tenant:ibvi", "key:7a-fixture-hmac-v1", sec)
     assert wheel_derive_resource_ref(key_handle=kh, mapping_version=" v1 ", ad_platform_ref="meta", resource_level="campaign", raw_provider_id="12021000000001") == gov1_7a_replay_helpers.derive_resource_ref(secret_bytes=sec, mapping_version=" v1 ", raw_provider_id="12021000000001")
     corpus_v1 = {**copy.deepcopy(dict(corpus_doc)), "verified_campaign_pairs": [{"raw_campaign_id": p["raw_campaign_id"], "resource_ref": gov1_7a_replay_helpers.derive_resource_ref(secret_bytes=sec, mapping_version=" v1 ", raw_provider_id=p["raw_campaign_id"])} for p in corpus_doc["verified_campaign_pairs"]]}
     c_v1_bytes = canonicalize(corpus_v1)
     git_v1 = {**dict(world_7a["git_blobs"]), CORPUS_GIT_PATH[1]: c_v1_bytes}
     c_git_loc = store.put(_fake_sign_dict(gov1_7a_certification.build_git_artifact_provenance_envelope(repository="aiconnai/smart-ads", commit_sha=world_7a["cert_env"]["source_commit_sha"], path=CORPUS_GIT_PATH[1], raw_bytes=c_v1_bytes, resolved_at_utc="2026-09-07T10:00:04Z", registry_locator=_KEY_REG_DICT, signer_key_id=_SIGNER_KEY_ID)))
-    rs0: ResolvedRegistryState = world_7a["reg_state"]
-    pad_u = PrivateRegistrySnapshot("registry-snapshot:2026-09-07-pad-v1", "tenant:ibvi", "2026-09-07T10:00:00Z", "2027-01-01T00:00:00Z", " v1 ", "key:7a-fixture-hmac-v1", rs0.snapshot.bindings, rs0.snapshot.authorized_scopes, (DriverCapabilityEntry("cap:campaign-basic-v1", " 1.0.0 ", "pipeboard_hosted", rs0.driver_contract_locator, rs0.driver_contract_locator.content_digest, "scope:campaigns-active", "declared", ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")),)).to_dict()
-    pad_s = _fake_sign_dict(pad_u)
+    pad_s = _fake_sign_dict(PrivateRegistrySnapshot("registry-snapshot:2026-09-07-pad-v1", "tenant:ibvi", "2026-09-07T10:00:00Z", "2027-01-01T00:00:00Z", " v1 ", "key:7a-fixture-hmac-v1", rs0.snapshot.bindings, rs0.snapshot.authorized_scopes, (DriverCapabilityEntry("cap:campaign-basic-v1", " 1.0.0 ", "pipeboard_hosted", rs0.driver_contract_locator, rs0.driver_contract_locator.content_digest, "scope:campaigns-active", "declared", ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")),)).to_dict())
     pad_loc = store.put(pad_s)
     pad_reg = ResolvedRegistryState(ArtifactLocator.from_dict(pad_loc), PrivateRegistrySnapshot.from_dict(pad_s, require_signed=True), rs0.driver_contract_locator, rs0.driver_contract)
     refs_v1 = sorted(p["resource_ref"] for p in corpus_v1["verified_campaign_pairs"])
@@ -738,11 +747,7 @@ def _assert_inventory_member_and_unsigned_store_guards(world_7a: dict[str, Any],
     snap_m = copy.deepcopy(store.get(world_7a["cert_env"]["capability"]["registry_snapshot_locator"]))
     snap_m["capabilities"][0].update({"driver_contract_locator": drv_m_loc, "driver_contract_digest": drv_m_loc["content_digest"]})
     snap_m_loc = store.put(_fake_sign_dict(snap_m))
-    c_mem = copy.deepcopy(world_7a["cert_env"])
-    c_mem["capability"].update({"driver_contract_locator": drv_m_loc, "driver_contract_digest": drv_m_loc["content_digest"], "registry_snapshot_locator": snap_m_loc})
-    c_mem["fixture_evidence"]["regression_fixture"] = gov1_7a_replay_helpers.build_canonical_regression_fixture(snap_m_loc["content_digest"])
-    for case_d in c_mem["fixture_evidence"]["cases"]:
-        case_d["source_contract_ref"] = f"opaque-driver-contract:{drv_m_loc['content_digest']}"
+    c_mem = {**copy.deepcopy(world_7a["cert_env"]), "capability": {**copy.deepcopy(world_7a["cert_env"]["capability"]), "driver_contract_locator": drv_m_loc, "driver_contract_digest": drv_m_loc["content_digest"], "registry_snapshot_locator": snap_m_loc}, "fixture_evidence": {**copy.deepcopy(world_7a["cert_env"]["fixture_evidence"]), "regression_fixture": gov1_7a_replay_helpers.build_canonical_regression_fixture(snap_m_loc["content_digest"]), "cases": [{**cd, "source_contract_ref": f"opaque-driver-contract:{drv_m_loc['content_digest']}"} for cd in world_7a["cert_env"]["fixture_evidence"]["cases"]]}}
     with pytest.raises(ValueError, match="legacy_source_packet.member"):
         gov1_7a_certification.verify_certification_7a_record(_fake_sign_dict(c_mem), **kw)
     uns_int = {"key_id": _SIGNER_KEY_ID, "key_registry_snapshot_locator": copy.deepcopy(_KEY_REG_DICT)}
