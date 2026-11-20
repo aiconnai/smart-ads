@@ -1430,7 +1430,3 @@ def test_wheel_archive_rejects_non_lf_record_separators_before_csv_and_cd_nul_na
     for eol in ("\n", "\r\n"):
         q_m = {**members, gov1_wheel.EXPECTED_SELF_RECORD_PATH: (eol.join(quoted_rows) + eol).encode("utf-8")}
         assert gov1_wheel._validate_wheel_record(q_m) == (base_entries, base_digest) and _verify_pep427_record(q_m)[:2] == (base_entries, base_digest)
-
-
-
-
