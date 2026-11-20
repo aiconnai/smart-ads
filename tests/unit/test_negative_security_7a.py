@@ -533,12 +533,23 @@ def test_resource_ceiling_onehot_and_subrun_rejections() -> None:
     with pytest.raises(ClosedValidationError):
         NegativeSecurityCase.from_dict(swapped)
 
-    # tmpfs_limit_enforced supports ceiling_kind="inodes" when B_tmpfs_inodes is one-hot
+    # tmpfs_limit_enforced supports ceiling_kind="inodes" when B_tmpfs_inodes is one-hot at exact ceiling
     tmpfs_inodes = copy.deepcopy(by_id["tmpfs_limit_enforced"])
     tmpfs_inodes["runs"][0]["observation"]["ceiling_kind"] = "inodes"
     tmpfs_inodes["runs"][0]["usage"]["tmpfs_peak_bytes"] = 0
     tmpfs_inodes["runs"][0]["usage"]["tmpfs_peak_inodes"] = 4096
     assert NegativeSecurityCase.from_dict(tmpfs_inodes).case_id == "tmpfs_limit_enforced"
+
+    # Above-ceiling tmpfs counters (4097 inodes or 268_435_457 bytes) fail closed even with valid binding digest
+    sbx_digest = jcs_sha256({k: _make_sandbox_payload()[k] for k in _SPEC_17_KEYS})
+    for bad_kind, bad_u in (("inodes", {"tmpfs_peak_bytes": 0, "tmpfs_peak_inodes": 4097}), ("bytes", {"tmpfs_peak_bytes": 268_435_457, "tmpfs_peak_inodes": 0})):
+        over_tmp = copy.deepcopy(by_id["tmpfs_limit_enforced"])
+        over_tmp["runs"][0]["observation"]["ceiling_kind"] = bad_kind
+        over_tmp["runs"][0]["usage"].update(bad_u)
+        rebound = compute_negative_run_execution_binding_digest(case_id="tmpfs_limit_enforced", subrun_index=0, run=NegativeSecurityRun.from_dict(over_tmp["runs"][0]), wheel_digest=_WHEEL_DIGEST, test_suite_digest=PINNED_7A_NEGATIVE_SUITE_DIGEST, sealed_sandbox_profile_digest=sbx_digest)
+        over_tmp["runs"][0]["execution_binding_digest"] = rebound
+        with pytest.raises(ClosedValidationError):
+            NegativeSecurityCase.from_dict(over_tmp)
 
     # Multiply-attributed breach (both bytes and inodes True) must fail closed
     tmpfs_both = copy.deepcopy(tmpfs_inodes)
@@ -549,6 +560,7 @@ def test_resource_ceiling_onehot_and_subrun_rejections() -> None:
 
 def test_report_envelope_and_profile_verifier_roundtrip() -> None:
     report, sbx_env, prov_env = _build_valid_world()
+    assert report.cases[0].runs[0].execution_binding_digest == "sha256:f27f717ee5698da831f753bd634fa3b6feffbc04cec0f3ac00ca38b554313698"
     assert NegativeSecurityTestReport.SCHEMA == "smart_ads/negative_security_test_report/v1"
     assert (
         ADR_P1_DOMAIN_PREFIXES[report.SCHEMA] == "SMART-ADS:NEGATIVE-SECURITY:V1\n"

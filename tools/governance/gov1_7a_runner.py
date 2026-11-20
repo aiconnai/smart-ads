@@ -20,8 +20,8 @@ import unicodedata
 from tools.governance.decomposition_scope import run_git_offline
 from tools.governance.gov1_7a_negative import (
     _KEY_REGISTRY_SCHEMA, _SHARED_RUNTIME_16_FIELDS, _exact_str, _hex40_str, _key_id_str,
-    _opaque_ref_str, _sha256_str, _strict_str, _utc_sec_micros, _validate_runtime_readback_dict,
-    _verify_p1_integrity,
+    _opaque_ref_str, _sha256_str, _strict_str, _utc_sec_micros, _validate_resource_limits_dict,
+    _validate_runtime_readback_dict, _verify_p1_integrity,
 )
 from tools.governance.gov1_7a_replay_helpers import _parse_iso_date, validate_resource_ref_str
 from tools.governance.gov1_sandbox import verify_sealed_sandbox_profile
@@ -35,71 +35,21 @@ PRIVATE_REGISTRY_SNAPSHOT_SCHEMA: Final[str] = "smart_ads/private_registry_snaps
 PINNED_LEGACY_REPO: Final[str] = "mbras-tech/mbras-campaigns"
 PINNED_LEGACY_COMMIT: Final[str] = "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d"
 PINNED_PIPEBOARD_D26_SPECS: Final[tuple[tuple[str, str, str, str], ...]] = (
-    (
-        "reducer",
-        "scripts/operator/meta_daily_contract.py",
-        "0dbdfede6c4a9eaffb35197118e80d8d72507335",
-        "sha256:9e5b2f24a05029980748a9e7a8ae40e00fedc30b9bdf07be532d8a55a7eab9c9",
-    ),
-    (
-        "frozen_config",
-        "config/operator/meta_daily_get_insights_v1.yaml",
-        "e0c86c24b0a5ac2aa761406bd6df7c4643b99af9",
-        "sha256:08591f51a13424115dc1f138753cbee140403ae8c132848e495d367ec71f480e",
-    ),
-    (
-        "generic_gate_limitations",
-        "scripts/meta_ads/pipeboard_mcp.py",
-        "434be6136972c4316a4593f3fc63250b79eb8f95",
-        "sha256:b2fd1efd242067f08a7e0d4445076179736c5cd3e8adfc3181af0778ed7b4206",
-    ),
-    (
-        "strict_transport",
-        "scripts/operator/daily_strict_transports.py",
-        "dfcaab5c2fa5c57384cfc5052acbf9aedf3d8ae1",
-        "sha256:252c078d83ccf7eb726a19aaf226882731d55389c2c8f907491f955b8535e6ac",
-    ),
-    (
-        "transport_limits",
-        "scripts/pipeboard_limits.py",
-        "306d2b1f5eae7084f5c1daca7f042e1b1d89350b",
-        "sha256:cb1b73273d1942fdc9fc334639bd74eaddcf6af3e65a02a29eb8b60f94ff0ce5",
-    ),
+    ("reducer", "scripts/operator/meta_daily_contract.py", "0dbdfede6c4a9eaffb35197118e80d8d72507335", "sha256:9e5b2f24a05029980748a9e7a8ae40e00fedc30b9bdf07be532d8a55a7eab9c9"),
+    ("frozen_config", "config/operator/meta_daily_get_insights_v1.yaml", "e0c86c24b0a5ac2aa761406bd6df7c4643b99af9", "sha256:08591f51a13424115dc1f138753cbee140403ae8c132848e495d367ec71f480e"),
+    ("generic_gate_limitations", "scripts/meta_ads/pipeboard_mcp.py", "434be6136972c4316a4593f3fc63250b79eb8f95", "sha256:b2fd1efd242067f08a7e0d4445076179736c5cd3e8adfc3181af0778ed7b4206"),
+    ("strict_transport", "scripts/operator/daily_strict_transports.py", "dfcaab5c2fa5c57384cfc5052acbf9aedf3d8ae1", "sha256:252c078d83ccf7eb726a19aaf226882731d55389c2c8f907491f955b8535e6ac"),
+    ("transport_limits", "scripts/pipeboard_limits.py", "306d2b1f5eae7084f5c1daca7f042e1b1d89350b", "sha256:cb1b73273d1942fdc9fc334639bd74eaddcf6af3e65a02a29eb8b60f94ff0ce5"),
 )
-
-_LIMITS_SPEC: Final[tuple[str, str, str]] = (
-    "scripts/pipeboard_limits.py",
-    "306d2b1f5eae7084f5c1daca7f042e1b1d89350b",
-    "sha256:cb1b73273d1942fdc9fc334639bd74eaddcf6af3e65a02a29eb8b60f94ff0ce5",
-)
-_REDUCER_SPEC: Final[tuple[str, str, str]] = (
-    "scripts/operator/meta_daily_contract.py",
-    "0dbdfede6c4a9eaffb35197118e80d8d72507335",
-    "sha256:9e5b2f24a05029980748a9e7a8ae40e00fedc30b9bdf07be532d8a55a7eab9c9",
-)
-_ALLOWED_REDUCER_ASSIGNS: Final[frozenset[str]] = frozenset(
-    {"MAX_ROWS", "_INTEGER_TEXT", "_MONEY_TEXT", "_META_CAMPAIGN_ID", "_ROW_KEYS"}
-)
-_ALLOWED_REDUCER_FUNCS: Final[frozenset[str]] = frozenset(
-    {"_load_text_payload", "_integer_metric", "_spend_minor", "normalize_meta_result"}
-)
-_RESTRICTED_REDUCER_BUILTINS: Final[Mapping[str, Any]] = MappingProxyType(
-    {
-        "__build_class__": builtins.__build_class__,
-        "Exception": Exception,
-        "ValueError": ValueError,
-        "bool": bool,
-        "dict": dict,
-        "frozenset": frozenset,
-        "int": int,
-        "isinstance": isinstance,
-        "len": len,
-        "list": list,
-        "set": set,
-        "str": str,
-        "tuple": tuple,
-    }
-)
+_LIMITS_SPEC: Final[tuple[str, str, str]] = ("scripts/pipeboard_limits.py", "306d2b1f5eae7084f5c1daca7f042e1b1d89350b", "sha256:cb1b73273d1942fdc9fc334639bd74eaddcf6af3e65a02a29eb8b60f94ff0ce5")
+_REDUCER_SPEC: Final[tuple[str, str, str]] = ("scripts/operator/meta_daily_contract.py", "0dbdfede6c4a9eaffb35197118e80d8d72507335", "sha256:9e5b2f24a05029980748a9e7a8ae40e00fedc30b9bdf07be532d8a55a7eab9c9")
+_ALLOWED_REDUCER_ASSIGNS: Final[frozenset[str]] = frozenset({"MAX_ROWS", "_INTEGER_TEXT", "_MONEY_TEXT", "_META_CAMPAIGN_ID", "_ROW_KEYS"})
+_ALLOWED_REDUCER_FUNCS: Final[frozenset[str]] = frozenset({"_load_text_payload", "_integer_metric", "_spend_minor", "normalize_meta_result"})
+_RESTRICTED_REDUCER_BUILTINS: Final[Mapping[str, Any]] = MappingProxyType({
+    "__build_class__": builtins.__build_class__, "Exception": Exception, "ValueError": ValueError, "bool": bool,
+    "dict": dict, "frozenset": frozenset, "int": int, "isinstance": isinstance, "len": len, "list": list,
+    "set": set, "str": str, "tuple": tuple,
+})
 
 
 @runtime_checkable
@@ -107,6 +57,8 @@ class SealedOciSupervisorPort(Protocol):
     """Outer Linux OCI cgroup-v2 supervisor port for hermetic 7A execution."""
 
     def readback_sandbox_environment(self) -> Mapping[str, Any]: ...
+
+    def readback_effective_resource_limits(self) -> Mapping[str, Any]: ...
 
     def execute_7a_corpus(
         self,
@@ -330,48 +282,32 @@ def _verify_oci_readback_matches_profile(
 
 
 def run_7a_hermetic_execution(
-    *,
-    wheel_bytes: bytes,
-    corpus_bytes: bytes,
-    sandbox_profile: dict[str, Any],
-    seccomp_profile: dict[str, Any],
-    resolved_d26_blobs: Mapping[str, bytes],
+    *, wheel_bytes: bytes, corpus_bytes: bytes, sandbox_profile: dict[str, Any],
+    seccomp_profile: dict[str, Any], resolved_d26_blobs: Mapping[str, bytes],
     supervisor: SealedOciSupervisorPort | None = None,
 ) -> dict[str, Any]:
     """Execute 7A corpus in a verified Linux OCI sandbox with injected `0dbdfede` reducer, or fail-closed `BLOCKED`."""
-    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
-        raise ValueError("wheel_bytes: expected non-empty bytes")
-    if type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
-        raise ValueError("corpus_bytes: expected non-empty bytes")
-    sbx_res = verify_sealed_sandbox_profile(sandbox_profile, seccomp_profile=seccomp_profile)
-    sbx_payload = sbx_res["payload"]
+    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0 or type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
+        raise ValueError("wheel_bytes and corpus_bytes: expected non-empty bytes")
+    sbx_payload = verify_sealed_sandbox_profile(sandbox_profile, seccomp_profile=seccomp_profile)["payload"]
     verified_d26 = _verify_d26_blob_map(resolved_d26_blobs)
     if supervisor is None or not isinstance(supervisor, SealedOciSupervisorPort):
-        return {
-            "status": "BLOCKED",
-            "reason": "sealed Linux amd64 OCI cgroup-v2 supervisor is unavailable",
-        }
+        return {"status": "BLOCKED", "reason": "sealed Linux amd64 OCI cgroup-v2 supervisor is unavailable"}
     try:
-        checked_rb = _verify_oci_readback_matches_profile(
-            supervisor.readback_sandbox_environment(), sbx_payload
-        )
+        checked_rb = _verify_oci_readback_matches_profile(supervisor.readback_sandbox_environment(), sbx_payload)
+        checked_limits = _validate_resource_limits_dict(supervisor.readback_effective_resource_limits(), "oci_effective_resource_limits")
+        if canonicalize(checked_limits) != canonicalize(sbx_payload["resource_limits"]):
+            raise ValueError("oci_effective_resource_limits: canonical byte mismatch against sealed_sandbox_profile/v1")
     except ValueError as exc:
         return {"status": "BLOCKED", "reason": str(exc)}
     pinned_reducer = load_isolated_pinned_meta_reducer(verified_d26)
     exec_out = supervisor.execute_7a_corpus(
-        wheel_bytes=wheel_bytes,
-        corpus_bytes=corpus_bytes,
-        sandbox_profile_payload=copy.deepcopy(sbx_payload),
-        resolved_d26_blobs=MappingProxyType(verified_d26),
-        reducer=pinned_reducer,
+        wheel_bytes=wheel_bytes, corpus_bytes=corpus_bytes, sandbox_profile_payload=copy.deepcopy(sbx_payload),
+        resolved_d26_blobs=MappingProxyType(verified_d26), reducer=pinned_reducer,
     )
     if not isinstance(exec_out, Mapping):
         raise ValueError("supervisor.execute_7a_corpus: expected Mapping result")
-    return {
-        "status": "EXECUTED",
-        "runtime_readback": checked_rb,
-        "execution": copy.deepcopy(dict(exec_out)),
-    }
+    return {"status": "EXECUTED", "runtime_readback": checked_rb, "effective_resource_limits": checked_limits, "execution": copy.deepcopy(dict(exec_out))}
 
 
 def _has_c0_or_c1_control(value: str) -> bool:
@@ -514,4 +450,82 @@ def verify_expected_resource_inventory_envelope(envelope: Mapping[str, Any], *, 
         raise ValueError("expected_resource_inventory: invalid date_range or expected_resources")
     _validate_expected_resource_items(d["expected_resources"], binding_ref=d["binding_ref"], account_ref=d["account_ref"], start_cal=s_cal, end_cal=e_cal, require_sorted=True)
     _verify_p1_integrity(d, label="expected_resource_inventory", require_signed=require_signed)
+    return d
+
+
+_CAP_STATES: Final[frozenset[str]] = frozenset({"declared", "fixture_certified", "live_certified", "unavailable", "deferred", "invalidated", "revalidation_pending"})
+
+
+def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None:
+    if type(bnds) is not list or not bnds or type(scopes) is not list or not scopes:
+        raise ValueError("private_registry_snapshot: bindings and authorized_scopes must be non-empty lists")
+    seen_b, seen_a, b_keys = set(), set(), []
+    for raw_b in bnds:
+        b = dict(raw_b) if isinstance(raw_b, Mapping) else {}
+        exact_fields(b, {"binding_ref", "account_ref", "transport_provider_ref", "ad_platform_ref", "currency", "driver_id"}, "registry_binding")
+        br = _opaque_ref_str(b["binding_ref"], "b", expected_prefix="binding")
+        ar = _opaque_ref_str(b["account_ref"], "a", expected_prefix="account")
+        _opaque_ref_str(b["transport_provider_ref"], "p", expected_prefix="provider")
+        drv_id = _strict_str(b["driver_id"], "driver_id")
+        if b["ad_platform_ref"] != "meta" or b["currency"] != "BRL" or any(ch.isspace() for ch in drv_id) or br in seen_b or ar in seen_a:
+            raise ValueError("private_registry_snapshot.bindings: invalid field or duplicate binding_ref/account_ref")
+        seen_b.add(br)
+        seen_a.add(ar)
+        b_keys.append(br.encode("utf-8"))
+    s_keys: list[bytes] = []
+    for raw_s in scopes:
+        s = dict(raw_s) if isinstance(raw_s, Mapping) else {}
+        exact_fields(s, {"front_ref", "profile_ref", "binding_ref", "resource_scope_ref"}, "authorized_scope")
+        fr = _opaque_ref_str(s["front_ref"], "f", expected_prefix="front")
+        pr = _opaque_ref_str(s["profile_ref"], "pr", expected_prefix="profile")
+        sbr = _opaque_ref_str(s["binding_ref"], "b", expected_prefix="binding")
+        sr = _opaque_ref_str(s["resource_scope_ref"], "s", expected_prefix="scope")
+        sk = canonicalize([fr, pr, sbr, sr])
+        if sbr not in seen_b or sk in s_keys:
+            raise ValueError("private_registry_snapshot.authorized_scopes: unknown binding_ref or duplicate scope")
+        s_keys.append(sk)
+    if b_keys != sorted(b_keys) or s_keys != sorted(s_keys):
+        raise ValueError("private_registry_snapshot: bindings or authorized_scopes not canonically sorted")
+
+
+def validate_private_registry_snapshot_payload(snap: Mapping[str, Any]) -> None:
+    d = dict(snap) if isinstance(snap, Mapping) else {}
+    core = {"snapshot_id", "tenant_ref", "issued_at_utc", "valid_until_utc", "resource_ref_mapping_version", "key_identity", "domain_separator", "resource_mapping_contract_digest", "bindings", "authorized_scopes", "capabilities"}
+    exact_fields(d, core | ({"$schema", "integrity"} & set(d)), "private_registry_snapshot")
+    if "$schema" in d:
+        _exact_str(d["$schema"], PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, "private_registry_snapshot.$schema")
+    if re.fullmatch(r"\Aregistry-snapshot:[A-Za-z0-9._:-]+\Z", _strict_str(d["snapshot_id"], "snap_id")) is None or d["domain_separator"] != "0x00" or _utc_sec_micros(d["issued_at_utc"], "issued") >= _utc_sec_micros(d["valid_until_utc"], "until"):
+        raise ValueError("private_registry_snapshot: invalid snapshot_id, domain_separator, or validity")
+    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(d["key_identity"], "key", expected_prefix="key"), "resource_ref_mapping_version": _strict_str(d["resource_ref_mapping_version"], "ver"), "tenant_ref": _opaque_ref_str(d["tenant_ref"], "tenant", expected_prefix="tenant")})
+    if _sha256_str(d["resource_mapping_contract_digest"], "rmc_digest") != "sha256:" + hashlib.sha256(rmc_pre).hexdigest():
+        raise ValueError("private_registry_snapshot: resource_mapping_contract_digest mismatch")
+    _validate_snapshot_bindings_and_scopes(d["bindings"], d["authorized_scopes"])
+    if type(d["capabilities"]) is not list or not d["capabilities"]:
+        raise ValueError("private_registry_snapshot.capabilities: expected non-empty list")
+    c_keys: list[bytes] = []
+    for raw_c in d["capabilities"]:
+        c = dict(raw_c) if isinstance(raw_c, Mapping) else {}
+        exact_fields(c, {"capability_ref", "capability_semantic_version", "driver_id", "driver_contract_locator", "driver_contract_digest", "resource_scope_ref", "state", "required_metrics"}, "capability_entry")
+        cr, cs = _opaque_ref_str(c["capability_ref"], "cap", expected_prefix="cap"), _opaque_ref_str(c["resource_scope_ref"], "scope", expected_prefix="scope")
+        _strict_str(c["capability_semantic_version"], "ver")
+        cd_id = _strict_str(c["driver_id"], "drv")
+        validate_locator(dict(c["driver_contract_locator"]) if isinstance(c["driver_contract_locator"], Mapping) else {})
+        rm = c["required_metrics"]
+        if any(ch.isspace() for ch in cd_id) or _sha256_str(c["driver_contract_digest"], "dcd") != c["driver_contract_locator"]["content_digest"] or c["state"] not in _CAP_STATES or type(rm) is not list or not rm:
+            raise ValueError("private_registry_snapshot.capabilities: invalid capability entry field")
+        ms = [_opaque_ref_str(m, "m", expected_prefix="metric") for m in rm]
+        ck = canonicalize([cr, cs])
+        if len(set(ms)) != len(ms) or [m.encode("utf-8") for m in ms] != sorted(m.encode("utf-8") for m in ms) or ck in c_keys:
+            raise ValueError("private_registry_snapshot.capabilities: duplicate or unsorted capability/metrics")
+        c_keys.append(ck)
+    if c_keys != sorted(c_keys):
+        raise ValueError("private_registry_snapshot.capabilities: not canonically sorted")
+
+
+def verify_private_registry_snapshot_envelope(envelope: Mapping[str, Any], *, require_signed: bool = False) -> dict[str, Any]:
+    d = copy.deepcopy(dict(envelope)) if isinstance(envelope, Mapping) else {}
+    if "$schema" not in d or "integrity" not in d:
+        raise ValueError("private_registry_snapshot: expected P1 envelope")
+    validate_private_registry_snapshot_payload(d)
+    _verify_p1_integrity(d, label="private_registry_snapshot", require_signed=require_signed)
     return d

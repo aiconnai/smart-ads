@@ -372,6 +372,9 @@ def _check_resource_case(case_id: str, runs: list[dict[str, Any]], label: str) -
             raise ValueError(f"{label}.obs.ceiling_kind: invalid {obs['ceiling_kind']!r}")
         b_k = "B_tmpfs_bytes" if obs["ceiling_kind"] == "bytes" else "B_tmpfs_inodes"
         _check_resource_common(run, label=label, breach_key=b_k, seccomp=True, signals=frozenset({"SIGTERM", "SIGKILL"}), cause="tmpfs_enospc")
+        tmp_lim = run["effective_resource_limits"]["tmpfs_limits"]["/tmp"]
+        lim_key, lim_val = ("tmpfs_peak_bytes", tmp_lim["size_bytes"]) if obs["ceiling_kind"] == "bytes" else ("tmpfs_peak_inodes", tmp_lim["inodes_max"])
+        _strict_int(u[lim_key], f"{label}.{lim_key}", minimum=lim_val, maximum=lim_val)
         return
     b_k, seccomp, sigs, cause, exp_obs = _STATIC_RESOURCE_SPECS[case_id]
     _check_resource_common(run, label=label, breach_key=b_k, seccomp=seccomp, signals=sigs, cause=cause)
@@ -525,17 +528,14 @@ def _extract_sandbox_payload_for_mode(
         if canonicalize(build_local_candidate_ref(sbx_cand)) != canonicalize(dict(expected_bind)):
             raise ValueError("sandbox_profile: candidate_ref mismatch against report")
     else:
-        if "artifact_kind" in d:
-            raise ValueError("sandbox_profile: envelope mode forbids gov1_local_candidate")
-        if "$schema" in d or "integrity" in d:
-            exact_fields(d, _SANDBOX_PAYLOAD_20_KEYS | {"$schema", "integrity"}, "sandbox_profile")
-            _exact_str(d["$schema"], SANDBOX_PROFILE_SCHEMA, "sandbox_profile.$schema")
-            _verify_p1_integrity(d, label="sandbox_profile")
-            if canonicalize(make_locator(SANDBOX_PROFILE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
-                raise ValueError("sandbox_profile: envelope locator mismatch against report")
-            payload = {k: copy.deepcopy(v) for k, v in d.items() if k not in {"$schema", "integrity"}}
-        else:
-            payload = copy.deepcopy(d)
+        if "artifact_kind" in d or "$schema" not in d or "integrity" not in d:
+            raise ValueError("sandbox_profile: envelope mode requires signed P1 envelope")
+        exact_fields(d, _SANDBOX_PAYLOAD_20_KEYS | {"$schema", "integrity"}, "sandbox_profile")
+        _exact_str(d["$schema"], SANDBOX_PROFILE_SCHEMA, "sandbox_profile.$schema")
+        _verify_p1_integrity(d, label="sandbox_profile", require_signed=True)
+        if canonicalize(make_locator(SANDBOX_PROFILE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
+            raise ValueError("sandbox_profile: envelope locator mismatch against report")
+        payload = {k: copy.deepcopy(v) for k, v in d.items() if k not in {"$schema", "integrity"}}
     exact_fields(payload, _SANDBOX_PAYLOAD_20_KEYS, "sandbox_profile_payload")
     _validate_shared_runtime_16(payload, "sandbox_profile")
     limits = _validate_resource_limits_dict(payload["resource_limits"], "sandbox_profile.resource_limits")
@@ -561,9 +561,10 @@ def _extract_provenance_for_mode(
         if canonicalize(build_local_candidate_ref(cand)) != canonicalize(dict(expected_bind)):
             raise ValueError("wheel_provenance: candidate_ref mismatch against report")
     else:
-        if "artifact_kind" in d:
-            raise ValueError("wheel_provenance: envelope mode forbids gov1_local_candidate")
-        if ("$schema" in d or "integrity" in d) and canonicalize(make_locator(WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
+        if "artifact_kind" in d or "$schema" not in d or "integrity" not in d:
+            raise ValueError("wheel_provenance: envelope mode requires signed P1 envelope")
+        _verify_p1_integrity(d, label="wheel_provenance", require_signed=True)
+        if canonicalize(make_locator(WHEEL_BUILD_PROVENANCE_SCHEMA, canonicalize(d))) != canonicalize(dict(expected_bind)):
             raise ValueError("wheel_provenance: envelope locator mismatch against report")
     verify_wheel_object_locator(dict(prov_payload["wheel"]), expected_wheel_bytes=wheel_bytes)
     actual_whl_digest = digest(wheel_bytes)
@@ -583,7 +584,7 @@ def _unwrap_neg_report(artifact: Mapping[str, Any]) -> tuple[str, dict[str, Any]
         return "candidate", payload
     if d.get("$schema") == NEGATIVE_SECURITY_REPORT_SCHEMA and "artifact_kind" not in d:
         exact_fields(d, _NEG_ENVELOPE_16_KEYS, "negative_security_envelope")
-        _verify_p1_integrity(d, label="negative_security_test_report")
+        _verify_p1_integrity(d, label="negative_security_test_report", require_signed=True)
         payload = {k: copy.deepcopy(v) for k, v in d.items() if k not in {"$schema", "integrity"}}
         exact_fields(payload, _NEG_ENVELOPE_PAYLOAD_14_KEYS, "negative_security_envelope_payload")
         validate_locator(payload["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA)

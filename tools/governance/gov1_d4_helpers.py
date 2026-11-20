@@ -1,7 +1,8 @@
 """D4 monotonic registry lineage `1..tip_reg`, `SnapshotStore`, 4 leaf auth, and candidate Etapa 11 helpers."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+import contextlib
 import copy
 from dataclasses import dataclass
 import hashlib
@@ -24,8 +25,8 @@ from tools.governance.gov1_7a_negative import (
 )
 from tools.governance.gov1_7a_runner import (
     EXPECTED_RESOURCE_INVENTORY_SCHEMA, GIT_ARTIFACT_PROVENANCE_SCHEMA, PINNED_PIPEBOARD_D26_SPECS,
-    PRIVATE_REGISTRY_SNAPSHOT_SCHEMA,
-    verify_expected_resource_inventory_envelope, verify_git_artifact_provenance_envelope,
+    PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, verify_expected_resource_inventory_envelope,
+    verify_git_artifact_provenance_envelope, verify_private_registry_snapshot_envelope,
 )
 from tools.governance.gov1_mcp import MCP_REJECTION_REPORT_SCHEMA, verify_mcp_rejection_matrix_report
 from tools.governance.gov1_sandbox import (
@@ -464,8 +465,11 @@ def _collect_13_unique_git_locators(
         type(members) is list and len(members) == len(PINNED_PIPEBOARD_D26_SPECS),
         "pipeboard_phase1_contract: expected 5 legacy_source_packet.members",
     )
+    for m in members:
+        require(isinstance(m, Mapping), "legacy_source_packet.member: expected Mapping")
+        exact_fields(dict(m), {"role", "repository", "commit_sha", "path", "git_blob_oid", "file_content_sha256", "git_artifact_provenance_locator"}, "legacy_source_packet.member")
     raw_locs: list[Any] = [
-        *(m.get("git_artifact_provenance_locator") if isinstance(m, Mapping) else None for m in members),
+        *(m["git_artifact_provenance_locator"] for m in members),
         *cert7a_env["parser_artifact_locators"],
         *cert7a_env["adapter_artifact_locators"],
         *cert7a_env["mapping_artifact_locators"],
@@ -502,8 +506,7 @@ def _authenticate_contract_and_snapshot_leaves(
     validity(drv_signer["validity"], certified_at_utc)
 
     snap_loc = cap["registry_snapshot_locator"]
-    snap_env = load_object(verifier.store, snap_loc, PRIVATE_REGISTRY_SNAPSHOT_SCHEMA)
-    require("issued_at_utc" in snap_env and "valid_until_utc" in snap_env, "private_registry_snapshot: missing validity fields")
+    snap_env = verify_private_registry_snapshot_envelope(load_object(verifier.store, snap_loc, PRIVATE_REGISTRY_SNAPSHOT_SCHEMA), require_signed=True)
     snap_signer, snap_act = verifier._verify_signer_authority(
         snap_env, schema=PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, event_time_utc=snap_env["issued_at_utc"],
         config=config, reg=reg, clock=clock, chain_registries_by_epoch=chain_registries_by_epoch,
@@ -569,20 +572,26 @@ def _authenticate_d4_7a_leaf_envelopes(
     return reqs, admitted, objs
 
 
+@contextlib.contextmanager
+def _disposable_wheel_path(wheel_bytes: bytes) -> Iterator[Path]:
+    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
+        raise ValueError("wheel_bytes: expected non-empty bytes")
+    with tempfile.TemporaryDirectory(prefix="gov1-disposable-whl-") as tmp_dir:
+        disposable_whl = Path(tmp_dir) / EXPECTED_WHEEL_FILENAME
+        disposable_whl.write_bytes(wheel_bytes)
+        os.chmod(disposable_whl, 0o444)
+        yield disposable_whl
+
+
 def _run_disposable_stage7_material_handoff(
     *, wheel_bytes: bytes, seccomp_profile: dict[str, Any], sandbox_obj: dict[str, Any],
     prov_obj: dict[str, Any], bound_obj: dict[str, Any], mcp_obj: dict[str, Any], repo_dir: Path,
     backend_wheel_dir: Path | None = None, site_packages_dir: Path | None = None,
     probe_runner: IsolatedWheelProbeRunner | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-    if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0:
-        raise ValueError("wheel_bytes: expected non-empty bytes")
     seccomp_digest = verify_seccomp_profile(seccomp_profile)
     sbx_res = verify_sealed_sandbox_profile(sandbox_obj, seccomp_profile=seccomp_profile)
-    with tempfile.TemporaryDirectory(prefix="gov1-disposable-whl-") as tmp_dir:
-        disposable_whl = Path(tmp_dir) / EXPECTED_WHEEL_FILENAME
-        disposable_whl.write_bytes(wheel_bytes)
-        os.chmod(disposable_whl, 0o444)
+    with _disposable_wheel_path(wheel_bytes) as disposable_whl:
         prov_res = verify_wheel_build_provenance(
             prov_obj, repo_root=repo_dir, wheel_path=disposable_whl,
             backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=probe_runner,
@@ -762,10 +771,4 @@ def _reload_and_verify_d4_external_7a_inputs(
     require(dict(reloaded_d26) == dict(expected_d26_blobs), "pinned d26 legacy blobs mutated during admission")
 
 
-__all__ = [
-    "Gov1InstallationPins", "SnapshotStore", "_D4_SCHEMA_ROLE_ACTION_SPECS", "_SEVEN_GOV1_RUN_CTX_SCHEMAS",
-    "_authenticate_d4_7a_leaf_envelopes", "_cert7a_mod", "_enforce_pinned_run_context_locator",
-    "_read_nonempty_regular_file", "_reconstruct_d4_registry_chain", "_reload_and_verify_d4_external_7a_inputs",
-    "_resolve_d4_pins", "_run_disposable_stage7_material_handoff", "_verify_d4_registry_lineage_step",
-    "_verify_d4_registry_membership", "build_gov1_convergence_record_candidate", "verify_gov1_convergence_candidate",
-]
+__all__ = "Gov1InstallationPins SnapshotStore _D4_SCHEMA_ROLE_ACTION_SPECS _SEVEN_GOV1_RUN_CTX_SCHEMAS _authenticate_d4_7a_leaf_envelopes _cert7a_mod _disposable_wheel_path _enforce_pinned_run_context_locator _read_nonempty_regular_file _reconstruct_d4_registry_chain _reload_and_verify_d4_external_7a_inputs _resolve_d4_pins _run_disposable_stage7_material_handoff _verify_d4_registry_lineage_step _verify_d4_registry_membership build_gov1_convergence_record_candidate verify_gov1_convergence_candidate".split()

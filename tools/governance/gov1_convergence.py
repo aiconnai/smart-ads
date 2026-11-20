@@ -636,6 +636,7 @@ from tools.governance.gov1_d4_helpers import (
     _D4_SCHEMA_ROLE_ACTION_SPECS,
     _authenticate_d4_7a_leaf_envelopes,
     _cert7a_mod,
+    _disposable_wheel_path,
     _enforce_pinned_run_context_locator,
     _read_nonempty_regular_file,
     _reconstruct_d4_registry_chain,
@@ -997,10 +998,11 @@ def _capture_envelope_pr3_preflight_inputs(
         return corpus_bytes, git_blobs, d26_blobs
     if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
         git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
-        if wheel_bytes != pr3_verifier._wheel_bytes or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs):
-            raise ValueError("verify_gov1_convergence_record: wheel_bytes or git_blobs diverged from bound SevenAConstituentVerifier")
-        return pr3_verifier._corpus_bytes, git_blobs, pr3_verifier._resolved_d26_blobs
-    return None
+        d26_blobs = gov1_7a_runner._verify_d26_blob_map(pr3_verifier._resolved_d26_blobs)
+        if wheel_bytes != pr3_verifier._wheel_bytes or pr3_verifier._corpus_bytes != git_blobs.get(cert7a.CORPUS_GIT_PATH[1]) or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs):
+            raise ValueError("verify_gov1_convergence_record: wheel_bytes, corpus_bytes, or git_blobs diverged from bound SevenAConstituentVerifier")
+        return pr3_verifier._corpus_bytes, git_blobs, d26_blobs
+    raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be concrete SevenAConstituentVerifier")
 
 
 def _parse_convergence_envelope_header(envelope: object) -> dict[str, Any]:
@@ -1022,11 +1024,12 @@ def _verify_convergence_envelope_core(
     probe_runner: IsolatedWheelProbeRunner | None, cli_auto_pr3: bool = False,
 ) -> dict[str, Any]:
     payload = _parse_convergence_envelope_header(envelope)
+    cert7a = _cert7a_mod()
     if not cli_auto_pr3:
         if pr3_verifier is None:
             raise ValueError("gov1_convergence_record/v1: fail-closed in Etapa 8; Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent")
-        if not isinstance(pr3_verifier, Pr3SevenAConstituentVerifier):
-            raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier does not satisfy Pr3SevenAConstituentVerifier")
+        if not isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
+            raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be concrete SevenAConstituentVerifier")
     if not isinstance(store, Store) or not isinstance(seccomp_profile, dict):
         raise ValueError("verify_gov1_convergence_record: Store and seccomp_profile are required")
     _, wheel_bytes = _read_nonempty_regular_file(_require_path(wheel_path, "wheel_path"), "wheel_path")
@@ -1042,15 +1045,14 @@ def _verify_convergence_envelope_core(
         bound_obj=bound_obj, mcp_obj=mcp_obj, repo_dir=repo_dir,
         backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=probe_runner,
     )
-    cert7a = _cert7a_mod()
     active_pr3 = (
         cert7a.SevenAConstituentVerifier(
-            wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],  # type: ignore[index]
-            resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],  # type: ignore[index]
+            wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
+            resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
         )
         if cli_auto_pr3 else pr3_verifier
     )
-    if preflight is not None and isinstance(active_pr3, cert7a.SevenAConstituentVerifier):
+    if isinstance(active_pr3, cert7a.SevenAConstituentVerifier):
         active_pr3.verify_bound_preflight_inputs(
             wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
             resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
@@ -1346,10 +1348,12 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             envelope, schema=WHEEL_BUILD_PROVENANCE_SCHEMA, event_time_utc=envelope["built_at_utc"],
             config=auth.config, reg=auth.reg, clock=auth.clock, chain_registries_by_epoch=auth.chain_registries_by_epoch,
         )
-        material = verify_wheel_build_provenance(
-            envelope, repo_root=repo_dir, wheel_path=whl_file,
-            backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=runner,
-        )
+        with _disposable_wheel_path(wheel_bytes) as disposable_whl:
+            material = verify_wheel_build_provenance(
+                envelope, repo_root=repo_dir, wheel_path=disposable_whl,
+                backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=runner,
+            )
+        require(material["wheel_digest"] == digest(wheel_bytes), "wheel_build_provenance wheel_digest mismatch against captured wheel_bytes")
         return (
             material,
             [(signer, WHEEL_BUILD_PROVENANCE_SCHEMA, action)],
@@ -1388,11 +1392,13 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         require(timestamp(envelope["verified_at_utc"]) >= timestamp(prov_env["built_at_utc"]), "wheel_boundary_report verified_at_utc precedes provenance built_at_utc")
         for eq_field in ("build_run_id", "repository", "source_commit_sha", "wheel_digest", "build_backend_digest", "schema_bundle_digest"):
             require(envelope[eq_field] == prov_env[eq_field], f"wheel_boundary_report {eq_field} mismatch against provenance")
-        verify_wheel_build_provenance(
-            prov_env, repo_root=repo_dir, wheel_path=whl_file,
-            backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=runner,
-        )
-        material = verify_wheel_boundary_report(envelope, wheel_path=whl_file, probe_runner=runner)
+        with _disposable_wheel_path(wheel_bytes) as disposable_whl:
+            prov_mat = verify_wheel_build_provenance(
+                prov_env, repo_root=repo_dir, wheel_path=disposable_whl,
+                backend_wheel_dir=backend_wheel_dir, site_packages_dir=site_packages_dir, probe_runner=runner,
+            )
+            material = verify_wheel_boundary_report(envelope, wheel_path=disposable_whl, probe_runner=runner)
+        require(prov_mat["wheel_digest"] == digest(wheel_bytes) and material["wheel_digest"] == digest(wheel_bytes), "wheel_boundary_report wheel_digest mismatch against captured wheel_bytes")
         return (
             material,
             [(signer, WHEEL_BOUNDARY_REPORT_SCHEMA, action), (prov_signer, WHEEL_BUILD_PROVENANCE_SCHEMA, prov_action)],
@@ -1430,7 +1436,9 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         validity(sbx_env["validity"], auth.clock.lower_utc)
         validity(sbx_env["validity"], auth.clock.upper_utc)
         verify_sealed_sandbox_profile(sbx_env, seccomp_profile=seccomp_profile)  # type: ignore[arg-type]
-        material = verify_mcp_rejection_matrix_report(envelope, wheel_path=whl_file, probe_runner=runner)
+        with _disposable_wheel_path(wheel_bytes) as disposable_whl:
+            material = verify_mcp_rejection_matrix_report(envelope, wheel_path=disposable_whl, probe_runner=runner)
+        require(material["wheel_digest"] == digest(wheel_bytes), "mcp_rejection_matrix_report wheel_digest mismatch against captured wheel_bytes")
         return (
             material,
             [(signer, MCP_REJECTION_REPORT_SCHEMA, action), (sbx_signer, SANDBOX_PROFILE_SCHEMA, sbx_action)],

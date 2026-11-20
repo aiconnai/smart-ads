@@ -35,6 +35,7 @@ from tools.governance.gov1_7a_negative import (
     verify_negative_security_test_report,
 )
 from tools.governance.gov1_d4_helpers import (
+    _disposable_wheel_path,
     _read_nonempty_regular_file,
     _run_disposable_stage7_material_handoff,
     build_gov1_convergence_record_candidate,
@@ -371,19 +372,22 @@ def _verify_negative_report(
         if sbx_v["mode"] != "candidate":
             raise ValueError(f"{cmd}: candidate report requires candidate --sandbox-profile")
         if args.repo is not None:
-            gov1_wheel.verify_wheel_build_provenance(prov_obj, repo_root=Path(args.repo), wheel_path=Path(args.wheel))
+            with _disposable_wheel_path(whl_bytes) as disp_whl:
+                gov1_wheel.verify_wheel_build_provenance(prov_obj, repo_root=Path(args.repo), wheel_path=disp_whl)
         res = verify_negative_security_test_report(artifact, sandbox_profile=sbx_obj, wheel_provenance=prov_obj, wheel_bytes=whl_bytes)
         return {"status": "PASS", "mode": "candidate", "signable": False, "authority": "none", "schema": res["schema"], "wheel_digest": res["wheel_digest"], "executed_at_utc": res["executed_at_utc"]}, 0
     verify_sig_fn(artifact, schema=NEGATIVE_SECURITY_REPORT_SCHEMA, pubkey_b64=args.pubkey_raw_base64, cmd=cmd)
-    if args.sandbox_pubkey_raw_base64 is not None:
-        verify_sig_fn(sbx_obj, schema=gov1_sandbox.SANDBOX_PROFILE_SCHEMA, pubkey_b64=args.sandbox_pubkey_raw_base64, cmd=cmd, flag_name="--sandbox-pubkey-raw-base64")
-    if args.provenance_pubkey_raw_base64 is not None:
-        verify_sig_fn(prov_obj, schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, pubkey_b64=args.provenance_pubkey_raw_base64, cmd=cmd, flag_name="--provenance-pubkey-raw-base64")
-    sbx_v = gov1_sandbox.verify_sealed_sandbox_profile(sbx_obj, seccomp_profile=seccomp)
-    if sbx_v["mode"] != "envelope" or prov_obj.get("$schema") != gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA:
+    if args.sandbox_pubkey_raw_base64 is None or args.provenance_pubkey_raw_base64 is None or args.repo is None:
+        raise ValueError(f"{cmd}: envelope verification requires --sandbox-pubkey-raw-base64, --provenance-pubkey-raw-base64, and --repo")
+    if "artifact_kind" in sbx_obj or sbx_obj.get("$schema") != gov1_sandbox.SANDBOX_PROFILE_SCHEMA or "artifact_kind" in prov_obj or prov_obj.get("$schema") != gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA:
         raise ValueError(f"{cmd}: envelope report requires P1 envelope --sandbox-profile and --provenance")
-    if args.repo is not None:
-        gov1_wheel.verify_wheel_build_provenance(prov_obj, repo_root=Path(args.repo), wheel_path=Path(args.wheel))
+    verify_sig_fn(sbx_obj, schema=gov1_sandbox.SANDBOX_PROFILE_SCHEMA, pubkey_b64=args.sandbox_pubkey_raw_base64, cmd=cmd, flag_name="--sandbox-pubkey-raw-base64")
+    verify_sig_fn(prov_obj, schema=gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA, pubkey_b64=args.provenance_pubkey_raw_base64, cmd=cmd, flag_name="--provenance-pubkey-raw-base64")
+    gov1_sandbox.verify_sealed_sandbox_profile(sbx_obj, seccomp_profile=seccomp)
+    with _disposable_wheel_path(whl_bytes) as disp_whl:
+        prov_mat = gov1_wheel.verify_wheel_build_provenance(prov_obj, repo_root=Path(args.repo), wheel_path=disp_whl)
+    if prov_mat["wheel_digest"] != digest(whl_bytes):
+        raise ValueError(f"{cmd}: provenance wheel_digest mismatch against --wheel")
     res = verify_negative_security_test_report(artifact, sandbox_profile=sbx_obj, wheel_provenance=prov_obj, wheel_bytes=whl_bytes)
     return {"status": "PASS", "mode": "envelope", "signature_verified": True, "d4_authority_verified": False, "authority": "none", "schema": res["schema"], "wheel_digest": res["wheel_digest"], "executed_at_utc": res["executed_at_utc"]}, 0
 
@@ -456,7 +460,7 @@ def _build_certification_7a_record(args: argparse.Namespace) -> tuple[dict[str, 
     )
     gov1_7a_certification.verify_certification_7a_replay_bytes(
         art, store=store, wheel_bytes=whl_bytes, corpus_bytes=corpus_bytes,
-        resolved_git_blobs=git_blobs, resolved_d26_blobs=d26_blobs,
+        resolved_git_blobs=git_blobs, resolved_d26_blobs=d26_blobs, require_signed_envelope=False,
     )
     return _write_json(args.out, art, allow_overwrite=True), 0
 

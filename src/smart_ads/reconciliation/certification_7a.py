@@ -52,6 +52,7 @@ _COMPLETENESS_STATUSES: Final[frozenset[str]] = frozenset({"complete", "partial"
 _SOURCE_CONTRACT_REF_RE: Final[re.Pattern[str]] = re.compile(r"\Aopaque-driver-contract:sha256:[0-9a-f]{64}\Z")
 _HEX64_RE: Final[re.Pattern[str]] = re.compile(r"\A[0-9a-f]{64}\Z")
 _WHEEL_BOUNDARY_ENVELOPE_17_KEYS: Final[frozenset[str]] = frozenset("$schema integrity migration_run_context_locator build_run_id verified_at_utc repository source_commit_sha wheel_digest build_backend_digest schema_bundle_digest sorted_record_entries sorted_record_digest archive_allowlist_passed ast_boundary_scan_passed isolated_venv_import_passed packaged_modules wheel_build_provenance_locator".split())
+_EXPECTED_PACKAGED_MODULES: Final[tuple[str, ...]] = tuple(sorted(("smart_ads " + " ".join(f"smart_ads.{s}" for s in "adapters adapters.pipeboard adapters.pipeboard.adapter adapters.pipeboard.reducer adapters.pipeboard.wire analytics analytics.cells analytics.certification analytics.formulas analytics.intelligence analytics.lattice analytics.policy analytics.results application application.admission application.collection application.completeness contracts contracts.git_provenance contracts.jcs contracts.negative_security contracts.numerics contracts.scalars contracts.schemas domain domain.capabilities domain.pipeboard_contract domain.registry domain.resource_ref ports ports.cell_runtime ports.provider reconciliation reconciliation.bundle_7b reconciliation.bundle_common reconciliation.bundle_evidence reconciliation.bundle_executions reconciliation.bundle_native reconciliation.bundle_reconcile reconciliation.bundle_record reconciliation.bundle_universe reconciliation.bundle_verify reconciliation.certification_7a reconciliation.tolerance transports transports.mcp transports.mcp.delegation transports.mcp.gateway transports.mcp.protocol transports.mcp.schemas".split())).split(), key=lambda s: s.encode("utf-8")))
 _CASE_SUBOBJ_TYPES: Final[tuple[tuple[str, type[Any]], ...]] = (("runtime_readback", SandboxRuntimeReadback), ("effective_resource_limits", SandboxResourceLimits), ("usage", SandboxUsageCounters), ("termination", SandboxTermination), ("observation_batch", ProviderObservationBatch))
 _CASE_SCALAR_KEYS: Final[tuple[str, ...]] = ("case_id", "admitted_collection_digest", "source_contract_ref", "sandbox_instance_ref", "execution_binding_digest", "started_at_utc", "ended_at_utc", "expected_completeness_status", "observed_completeness_status", "normalized_fact_set_digest")
 _RECORD_LOCATOR_SPECS: Final[tuple[tuple[str, str], ...]] = (("migration_run_context_locator", _RUN_CONTEXT_SCHEMA), ("sealed_sandbox_profile_locator", _SANDBOX_PROFILE_SCHEMA), ("wheel_build_provenance_locator", _WHEEL_PROVENANCE_SCHEMA), ("wheel_boundary_report_locator", _WHEEL_BOUNDARY_SCHEMA), ("negative_security_test_report_locator", NegativeSecurityTestReport.SCHEMA))
@@ -151,7 +152,7 @@ def _parse_record_csv_line(line: str) -> tuple[str, str, str]:
         raise ClosedValidationError("wheel RECORD: expected exact 3 CSV columns")
     return fields[0], fields[1], fields[2]
 
-def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
+def _verify_pep427_record(members: Mapping[str, bytes]) -> tuple[list[dict[str, Any]], str, list[str]]:
     raw_rec = members[_WHEEL_RECORD_MEMBER]
     if len(raw_rec) > _MAX_WHEEL_RECORD_BYTES:
         raise ClosedValidationError("wheel RECORD: exceeds 256 KiB ceiling")
@@ -163,6 +164,7 @@ def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
     if not lines or len(lines) > _MAX_WHEEL_ENTRIES or "\x00" in record_text or any(not ln or len(ln) > _MAX_WHEEL_RECORD_LINE_CHARS for ln in lines):
         raise ClosedValidationError("wheel RECORD: empty, blank, or oversized CSV row")
     seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
     for ln in lines:
         rec_path, rec_hash, rec_size = _parse_record_csv_line(ln)
         if rec_path in seen or rec_path not in members:
@@ -171,15 +173,28 @@ def _verify_pep427_record(members: Mapping[str, bytes]) -> None:
         if rec_path == _WHEEL_RECORD_MEMBER:
             if rec_hash != "" or rec_size != "":
                 raise ClosedValidationError("wheel RECORD: self row must have empty hash and size")
+            entries.append({"path": rec_path, "record_hash": "", "record_size": None})
             continue
         raw = members[rec_path]
         exp_hash = "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).rstrip(b"=").decode("ascii")
         if rec_hash != exp_hash or _NONNEG_DEC_RE.fullmatch(rec_size) is None or int(rec_size) != len(raw):
             raise ClosedValidationError(f"wheel RECORD: SHA-256 or size mismatch for {rec_path!r}")
+        entries.append({"path": rec_path, "record_hash": exp_hash, "record_size": len(raw)})
     if seen != set(members.keys()):
         raise ClosedValidationError("wheel RECORD: archive members omitted from RECORD")
+    mods: list[str] = []
+    for p in members:
+        if p.endswith(".py"):
+            if not p.startswith("smart_ads/") or (not p.endswith("/__init__.py") and p.rsplit("/", 1)[0] + "/__init__.py" not in members):
+                raise ClosedValidationError(f"wheel_bytes: invalid or package-less Python member {p!r}")
+            mods.append(p[:-12].replace("/", ".") if p.endswith("/__init__.py") else p[:-3].replace("/", "."))
+    sorted_mods = sorted(set(mods), key=lambda s: s.encode("utf-8"))
+    if len(sorted_mods) != len(mods) or tuple(sorted_mods) != _EXPECTED_PACKAGED_MODULES:
+        raise ClosedValidationError("wheel_bytes: packaged_modules mismatch against expected 51 modules")
+    sorted_entries = sorted(entries, key=lambda e: e["path"].encode("utf-8"))
+    return sorted_entries, jcs_sha256(sorted_entries), sorted_mods
 
-def _extract_verified_wheel_members(wheel_bytes: bytes) -> dict[str, bytes]:
+def _extract_verified_wheel_members(wheel_bytes: bytes) -> tuple[dict[str, bytes], list[dict[str, Any]], str, list[str]]:
     if len(wheel_bytes) < 22 or (len(wheel_bytes) >= 42 and wheel_bytes[-42:-38] == b"PK\x06\x07") or wheel_bytes[-22:-18] != b"PK\x05\x06":
         raise ClosedValidationError("wheel_bytes: missing standard 22-byte ZIP EOCD or forbidden Zip64 locator")
     eocd = wheel_bytes[-22:]
@@ -204,8 +219,8 @@ def _extract_verified_wheel_members(wheel_bytes: bytes) -> dict[str, bytes]:
         lfh_cursor = span_end
     if cd_cursor != cd_end or lfh_cursor != cd_offset or _WHEEL_RECORD_MEMBER not in members:
         raise ClosedValidationError(f"wheel_bytes: central directory span mismatch or missing {_WHEEL_RECORD_MEMBER!r}")
-    _verify_pep427_record(members)
-    return members
+    rec_entries, rec_digest, mods = _verify_pep427_record(members)
+    return members, rec_entries, rec_digest, mods
 
 def _require_sorted_git_locators(locators: object, expected_len: int, *, label: str) -> tuple[ArtifactLocator, ...]:
     if isinstance(locators, (str, bytes, bytearray, memoryview)) or not isinstance(locators, (list, tuple)):
@@ -538,17 +553,17 @@ def _resolve_verified_object(resolver: Callable[[ArtifactLocator], Mapping[str, 
     checked = require_mapping(raw, label=label)
     if "$schema" not in checked or checked["$schema"] != locator.artifact_type or "integrity" not in checked:
         raise ClosedValidationError(f"{label}: expected P1 envelope for {locator.artifact_type!r}")
-    integ = P1Integrity.from_dict(checked["integrity"])
-    if integ.is_signed and integ.content_digest != p1_content_digest(checked):
+    integ = P1Integrity.from_dict(checked["integrity"], require_signed=True)
+    if integ.content_digest != p1_content_digest(checked):
         raise ClosedValidationError(f"{label}.integrity.content_digest: mismatch against P1 preimage")
     if ArtifactLocator.for_canonical_bytes(locator.artifact_type, canonicalize_jcs(checked)) != locator:
         raise ClosedValidationError(f"{label}: canonical JCS digest mismatch against ArtifactLocator")
     return checked
 
-
 @dataclass(frozen=True, slots=True)
 class _Stage7VerifiedContext:
     negative_report: NegativeSecurityTestReport
+    wheel_members: Mapping[str, bytes]
     sandbox_payload: dict[str, Any]
     sandbox_limits: SandboxResourceLimits
     sandbox_spec_digest: str
@@ -562,34 +577,25 @@ def _verify_stage7_and_negative_report(record: Certification7ARecord, resolver: 
     prov_env = _resolve_verified_object(resolver, record.wheel_build_provenance_locator, label="wheel_build_provenance")
     bound_env = _resolve_verified_object(resolver, record.wheel_boundary_report_locator, label="wheel_boundary_report")
     require_exact_keys(bound_env, _WHEEL_BOUNDARY_ENVELOPE_17_KEYS, label="wheel_boundary_report")
-    neg_report = NegativeSecurityTestReport.from_dict(_resolve_verified_object(resolver, record.negative_security_test_report_locator, label="negative_security_test_report"))
+    neg_report = NegativeSecurityTestReport.from_dict(_resolve_verified_object(resolver, record.negative_security_test_report_locator, label="negative_security_test_report"), require_signed=True)
     bound_prov_loc = ArtifactLocator.from_dict(bound_env["wheel_build_provenance_locator"], expected_type=_WHEEL_PROVENANCE_SCHEMA)
     bound_ctx = ArtifactLocator.from_dict(bound_env["migration_run_context_locator"], expected_type=_RUN_CONTEXT_SCHEMA)
     _utc_sec_micros(bound_env["verified_at_utc"], label="wheel_boundary_report.verified_at_utc")
     actual_whl_digest = "sha256:" + hashlib.sha256(wheel_bytes).hexdigest()
-    if (
-        record.wheel_build_provenance_locator != neg_report.wheel_build_provenance_locator or record.wheel_build_provenance_locator != bound_prov_loc
-        or (boundary_prov_loc is not None and record.wheel_build_provenance_locator != boundary_prov_loc)
-        or record.sealed_sandbox_profile_locator != neg_report.sealed_sandbox_profile_locator
-        or record.migration_run_context_locator != neg_report.migration_run_context_locator or record.migration_run_context_locator != bound_ctx
-        or record.build_run_id != prov_env["build_run_id"] or bound_env["build_run_id"] != record.build_run_id
-        or record.wheel_digest != prov_env["wheel_digest"] or record.wheel_digest != actual_whl_digest
-        or bound_env["wheel_digest"] != actual_whl_digest or bound_env["repository"] != "aiconnai/smart-ads"
-        or record.source_commit_sha != prov_env["source_commit_sha"] or bound_env["source_commit_sha"] != record.source_commit_sha
-        or record.build_backend_digest != prov_env["build_backend_digest"] or bound_env["build_backend_digest"] != record.build_backend_digest
-        or record.schema_bundle_digest != prov_env["schema_bundle_digest"] or bound_env["schema_bundle_digest"] != record.schema_bundle_digest
-        or any(bound_env[f] is not True for f in ("archive_allowlist_passed", "ast_boundary_scan_passed", "isolated_venv_import_passed"))
-    ):
+    if (record.wheel_build_provenance_locator != neg_report.wheel_build_provenance_locator or record.wheel_build_provenance_locator != bound_prov_loc or (boundary_prov_loc is not None and record.wheel_build_provenance_locator != boundary_prov_loc) or record.sealed_sandbox_profile_locator != neg_report.sealed_sandbox_profile_locator or record.migration_run_context_locator != neg_report.migration_run_context_locator or record.migration_run_context_locator != bound_ctx or record.build_run_id != prov_env["build_run_id"] or bound_env["build_run_id"] != record.build_run_id or record.wheel_digest != prov_env["wheel_digest"] or record.wheel_digest != actual_whl_digest or bound_env["wheel_digest"] != actual_whl_digest or bound_env["repository"] != "aiconnai/smart-ads" or record.source_commit_sha != prov_env["source_commit_sha"] or bound_env["source_commit_sha"] != record.source_commit_sha or record.build_backend_digest != prov_env["build_backend_digest"] or bound_env["build_backend_digest"] != record.build_backend_digest or record.schema_bundle_digest != prov_env["schema_bundle_digest"] or bound_env["schema_bundle_digest"] != record.schema_bundle_digest or any(bound_env[f] is not True for f in ("archive_allowlist_passed", "ast_boundary_scan_passed", "isolated_venv_import_passed"))):
         raise ClosedValidationError("certification_7a_record: Stage 7 / negative report cross-artifact mismatch")
     verify_negative_security_report_against_profile(neg_report, sandbox_profile=sbx_env, wheel_provenance_payload=prov_env, wheel_bytes=wheel_bytes)
     if _utc_sec_micros(neg_report.executed_at_utc, label="neg_report.executed_at_utc") > certified_us:
         raise ClosedValidationError("certification_7a_record: negative_report.executed_at_utc > certified_at_utc")
+    wheel_members, rec_entries, rec_digest, mods = _extract_verified_wheel_members(wheel_bytes)
+    if type(bound_env["sorted_record_entries"]) is not list or type(bound_env["packaged_modules"]) is not list or bound_env["sorted_record_digest"] != rec_digest or canonicalize_jcs(bound_env["sorted_record_entries"]) != canonicalize_jcs(rec_entries) or canonicalize_jcs(bound_env["packaged_modules"]) != canonicalize_jcs(mods):
+        raise ClosedValidationError("wheel_boundary_report: RECORD entries, digest, or packaged_modules mismatch against wheel archive")
     sbx_payload = {k: v for k, v in sbx_env.items() if k not in {"$schema", "integrity"}}
-    return _Stage7VerifiedContext(neg_report, sbx_payload, SandboxResourceLimits.from_dict(sbx_payload["resource_limits"]), jcs_sha256({k: sbx_payload[k] for k in _SPEC_17_FIELDS}), _utc_sec_micros(sbx_payload["issued_at_utc"], label="sbx.issued"), _utc_sec_micros(sbx_payload["validity"]["from"], label="sbx.from"), _utc_sec_micros(sbx_payload["validity"]["until"], label="sbx.until"), _utc_sec_micros(prov_env["built_at_utc"], label="prov.built"))
+    return _Stage7VerifiedContext(neg_report, wheel_members, sbx_payload, SandboxResourceLimits.from_dict(sbx_payload["resource_limits"]), jcs_sha256({k: sbx_payload[k] for k in _SPEC_17_FIELDS}), _utc_sec_micros(sbx_payload["issued_at_utc"], label="sbx.issued"), _utc_sec_micros(sbx_payload["validity"]["from"], label="sbx.from"), _utc_sec_micros(sbx_payload["validity"]["until"], label="sbx.until"), _utc_sec_micros(prov_env["built_at_utc"], label="prov.built"))
 
 def _verify_registry_and_contract(record: Certification7ARecord, resolver: Callable[[ArtifactLocator], Mapping[str, Any]]) -> ResolvedRegistryState:
-    snapshot = PrivateRegistrySnapshot.from_dict(_resolve_verified_object(resolver, record.capability.registry_snapshot_locator, label="registry_snapshot"))
-    driver_contract = PipeboardPhase1Contract.from_dict(_resolve_verified_object(resolver, record.capability.driver_contract_locator, label="driver_contract"))
+    snapshot = PrivateRegistrySnapshot.from_dict(_resolve_verified_object(resolver, record.capability.registry_snapshot_locator, label="registry_snapshot"), require_signed=True)
+    driver_contract = PipeboardPhase1Contract.from_dict(_resolve_verified_object(resolver, record.capability.driver_contract_locator, label="driver_contract"), require_signed=True)
     entry = snapshot.get_capability(record.capability.capability_ref, record.capability.resource_scope_ref)
     if (entry.state != "declared" or entry.driver_id != record.capability.driver_id or entry.driver_contract_locator != record.capability.driver_contract_locator or entry.driver_contract_digest != record.capability.driver_contract_digest or entry.required_metrics != record.capability.required_metrics or record.resource_mapping_contract_digest != snapshot.resource_mapping_contract_digest):
         raise ClosedValidationError("certification_7a_record.capability: snapshot capability/contract mismatch")
@@ -741,6 +747,8 @@ def _verify_and_replay_single_case(record: Certification7ARecord, corpus: Mappin
 def verify_certification_7a_record(record: Certification7ARecord, *, object_resolver: Callable[[ArtifactLocator], Mapping[str, Any]], wheel_bytes: bytes, corpus_bytes: bytes, resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes], boundary_report_wheel_provenance_locator: ArtifactLocator | None = None) -> None:
     """Materially verify `record` against Store envelopes, decompressed wheel ZIP members, Git/d26 blobs, and offline 7A replay."""
     checked = _reparse(record, Certification7ARecord, label="record")
+    if checked.integrity is None or not checked.integrity.is_signed:
+        raise ClosedValidationError("verify_certification_7a_record: record must carry 4-field signed P1 integrity")
     if not callable(object_resolver) or type(wheel_bytes) is not bytes or len(wheel_bytes) == 0 or type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
         raise ClosedValidationError("verify_certification_7a_record: invalid resolver or empty wheel/corpus bytes")
     git_blobs, d26_blobs = _check_blob_map(resolved_git_blobs, label="resolved_git_blobs"), _check_blob_map(resolved_d26_blobs, label="resolved_d26_blobs")
@@ -748,9 +756,8 @@ def verify_certification_7a_record(record: Certification7ARecord, *, object_reso
         _require_typed_locator(boundary_report_wheel_provenance_locator, _WHEEL_PROVENANCE_SCHEMA, label="boundary_report_wheel_provenance_locator")
     certified_us = _utc_sec_micros(checked.certified_at_utc, label="record.certified_at_utc")
     stage7 = _verify_stage7_and_negative_report(checked, object_resolver, wheel_bytes, boundary_report_wheel_provenance_locator, certified_us)
-    wheel_members = _extract_verified_wheel_members(wheel_bytes)
     resolved_registry = _verify_registry_and_contract(checked, object_resolver)
-    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, wheel_members=wheel_members, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
+    _verify_all_13_git_provenances(checked, driver_contract=resolved_registry.driver_contract, resolver=object_resolver, wheel_members=stage7.wheel_members, corpus_bytes=corpus_bytes, git_blobs=git_blobs, d26_blobs=d26_blobs, certified_us=certified_us)
     expected_reg_loc = ArtifactLocator.for_canonical_bytes(RegressionFixtureV1.SCHEMA, canonicalize_jcs(checked.fixture_evidence.regression_fixture.to_dict()))
     corpus = _parse_pipeboard_7a_corpus(corpus_bytes)
     if [c["case_id"] for c in corpus["cases"]] != [c.case_id for c in checked.fixture_evidence.cases]:
@@ -764,11 +771,4 @@ def verify_certification_7a_record(record: Certification7ARecord, *, object_reso
         _verify_and_replay_single_case(checked, corpus, corpus_case, rec_case, resolved_registry=resolved_registry, boundary=boundary, inv=inv_map[rec_case.expected_resource_inventory_locator], ctx=ctx)
 
 
-__all__ = [
-    "ADAPTER_ARTIFACT_PATHS", "CERTIFICATION_7A_RECORD_SCHEMA", "CORPUS_CAMPAIGN_PAIR_KEYS", "CORPUS_CASE_KEYS",
-    "CORPUS_CLOCK_READING_KEYS", "CORPUS_GIT_PATH", "CORPUS_HTTP_RESPONSE_KEYS", "CORPUS_PRIVATE_BINDING_KEYS",
-    "CORPUS_TOP_LEVEL_KEYS", "Certification7ACapabilityBinding", "Certification7AFixtureCase",
-    "Certification7AFixtureEvidence", "Certification7ARecord", "MAPPING_ARTIFACT_PATHS", "PARSER_ARTIFACT_PATHS",
-    "PIPEBOARD_7A_CORPUS_SCHEMA", "compute_7a_case_execution_binding_digest", "compute_adapter_code_digest",
-    "compute_mapping_rules_digest", "compute_parser_code_digest", "verify_certification_7a_record",
-]
+__all__ = "ADAPTER_ARTIFACT_PATHS CERTIFICATION_7A_RECORD_SCHEMA CORPUS_CAMPAIGN_PAIR_KEYS CORPUS_CASE_KEYS CORPUS_CLOCK_READING_KEYS CORPUS_GIT_PATH CORPUS_HTTP_RESPONSE_KEYS CORPUS_PRIVATE_BINDING_KEYS CORPUS_TOP_LEVEL_KEYS Certification7ACapabilityBinding Certification7AFixtureCase Certification7AFixtureEvidence Certification7ARecord MAPPING_ARTIFACT_PATHS PARSER_ARTIFACT_PATHS PIPEBOARD_7A_CORPUS_SCHEMA compute_7a_case_execution_binding_digest compute_adapter_code_digest compute_mapping_rules_digest compute_parser_code_digest verify_certification_7a_record".split()

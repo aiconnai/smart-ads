@@ -582,13 +582,11 @@ def _validate_outer_jsonrpc_envelope(raw_bytes: bytes) -> dict[str, Any]:
 
 
 def _validate_paging_object(paging: Any) -> None:
-    if paging is None:
-        return
     if type(paging) is not dict or not set(paging.keys()).issubset(
         {"cursors", "next", "previous"}
     ):
         raise make_wire_rejection("invalid_paging_shape", payload_schema_valid=False) from None
-    if "cursors" in paging and paging["cursors"] is not None:
+    if "cursors" in paging:
         cursors = paging["cursors"]
         if (
             type(cursors) is not dict

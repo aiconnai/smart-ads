@@ -2218,6 +2218,8 @@ def _extract_single_wheel_member(
         raise ValueError(
             f"wheel archive: symlink or special entry forbidden: {info.filename!r}"
         )
+    if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or not (0 <= info.file_size <= 8_388_608):
+        raise ValueError(f"wheel archive: unsupported compression or member > 8 MiB on {info.filename!r}")
     source_path(info.filename)
     if info.filename in members:
         raise ValueError(
@@ -2228,21 +2230,14 @@ def _extract_single_wheel_member(
             f"wheel archive: member violates strict allowlist: {info.filename!r}"
         )
     try:
-        raw = zf.read(info)
-    except (
-        zipfile.BadZipFile,
-        zlib.error,
-        EOFError,
-        RuntimeError,
-        NotImplementedError,
-    ) as exc:
-        raise ValueError(
-            f"wheel archive: failed to decompress member {info.filename!r}: {exc}"
-        ) from exc
-    if len(raw) != info.file_size:
-        raise ValueError(
-            f"wheel archive: declared file_size mismatch on {info.filename!r}"
-        )
+        with zf.open(info, "r") as zfp:
+            raw = zfp.read(info.file_size + 1)
+            dec = getattr(zfp, "_decompressor", None)
+            stream_clean = zfp._compress_left == 0 and (dec is None or (dec.eof and dec.unconsumed_tail == b"" and dec.unused_data == b""))
+    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError) as exc:
+        raise ValueError(f"wheel archive: failed to decompress member {info.filename!r}: {exc}") from exc
+    if len(raw) != info.file_size or not stream_clean:
+        raise ValueError(f"wheel archive: declared file_size or stream EOF mismatch on {info.filename!r}")
     return raw
 
 
@@ -2255,10 +2250,14 @@ def _extract_wheel_zip_members(wheel_bytes: bytes) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     with zf_ctx as zf:
         infos = zf.infolist()
-        if not infos:
-            raise ValueError("wheel archive: empty ZIP central directory")
+        if not (1 <= len(infos) <= 512):
+            raise ValueError("wheel archive: empty or > 512 entries in ZIP central directory")
         verify_contiguous_zip_layout(wheel_bytes, infos, comment=zf.comment)
+        total_uncomp = 0
         for info in infos:
+            if total_uncomp + info.file_size > 33_554_432:
+                raise ValueError("wheel archive: cumulative uncompressed size exceeds 32 MiB ceiling")
+            total_uncomp += info.file_size
             members[info.filename] = _extract_single_wheel_member(zf, info, members)
 
     for mandatory in (

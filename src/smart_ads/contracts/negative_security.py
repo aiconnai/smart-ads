@@ -480,6 +480,11 @@ def _validate_single_resource_run(case_id: str, run: NegativeSecurityRun) -> Non
             raise ClosedValidationError(f"{lbl}.obs.ceiling_kind: invalid {obs['ceiling_kind']!r}")
         b_key = "B_tmpfs_bytes" if obs["ceiling_kind"] == "bytes" else "B_tmpfs_inodes"
         _require_resource_common(run, label=lbl, breach_key=b_key, seccomp=True, signals=frozenset({"SIGTERM", "SIGKILL"}), cause="tmpfs_enospc")
+        tmp_lim = run.effective_resource_limits.tmpfs_limits["/tmp"]
+        if obs["ceiling_kind"] == "bytes":
+            _exact_int(u.tmpfs_peak_bytes, tmp_lim["size_bytes"], label=f"{lbl}.usage.tmpfs_peak_bytes")
+        else:
+            _exact_int(u.tmpfs_peak_inodes, tmp_lim["inodes_max"], label=f"{lbl}.usage.tmpfs_peak_inodes")
         return
     b_key, seccomp, sigs, cause, exp_obs = _STATIC_RESOURCE_SPECS[case_id]
     _require_resource_common(run, label=lbl, breach_key=b_key, seccomp=seccomp, signals=sigs, cause=cause)

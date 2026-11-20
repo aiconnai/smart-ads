@@ -232,14 +232,16 @@ def loads_pipeboard_wire_json(raw_utf8: str, *, max_depth: int = 16) -> Any:
 
 
 def _validate_http_headers(headers: Sequence[tuple[str, str]], *, max_streamed_bytes: int) -> int | None:
-    singletons: dict[str, str] = {}
+    normalized: list[tuple[str, str]] = []
     for item in headers:
         if type(item) is not tuple or len(item) != 2:
             raise Gov1WireRejection("malformed_http_headers", media_and_encoding_valid=False)
         k, v = item
         if type(k) is not str or type(v) is not str or _HEADER_TOKEN_RE.fullmatch(k) is None or any(c in v for c in ("\r", "\n", "\x00")) or any(0xD800 <= ord(c) <= 0xDFFF for c in v):
             raise Gov1WireRejection("malformed_http_headers", media_and_encoding_valid=False)
-        lk = k.lower()
+        normalized.append((k.lower(), v))
+    singletons: dict[str, str] = {}
+    for lk, v in normalized:
         if lk in _SINGLETON_HDRS:
             if lk in singletons:
                 raise Gov1WireRejection("duplicate_http_header", media_and_encoding_valid=False)
@@ -261,7 +263,6 @@ def _validate_http_headers(headers: Sequence[tuple[str, str]], *, max_streamed_b
     if declared > max_streamed_bytes:
         raise Gov1WireRejection("declared_length_over_2mib", truncated_2mib=True)
     return declared
-
 
 def _consume_body_and_outer_jsonrpc(
     body_chunks: Iterable[bytes], *, read_chunk_bytes: int, max_streamed_bytes: int, declared_length: int | None
@@ -291,13 +292,10 @@ def _consume_body_and_outer_jsonrpc(
         raise Gov1WireRejection("invalid_mcp_content", payload_schema_valid=False)
     return outer_obj["result"]
 
-
 def _validate_paging_dict(paging: Any) -> None:
-    if paging is None:
-        return
     if type(paging) is not dict or not set(paging.keys()).issubset({"cursors", "next", "previous"}):
         raise Gov1WireRejection("invalid_paging_shape", payload_schema_valid=False)
-    if "cursors" in paging and paging["cursors"] is not None:
+    if "cursors" in paging:
         cur = paging["cursors"]
         if type(cur) is not dict or not set(cur.keys()).issubset({"before", "after"}) or any(type(v) is not str for v in cur.values()):
             raise Gov1WireRejection("invalid_paging_shape", payload_schema_valid=False)
@@ -653,7 +651,10 @@ def recompute_fixture_7a_admission(
     driver_contract_locator: Mapping[str, Any], driver_contract: Mapping[str, Any],
     sealed_sandbox_profile_locator: Mapping[str, Any], regression_fixture_locator: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    from tools.governance.gov1_7a_runner import validate_private_registry_snapshot_payload
+
     _opaque_ref_str(admission_id, "admission_id", expected_prefix="admission")
+    validate_private_registry_snapshot_payload(registry_snapshot)
     req = dict(collection_request)
     exact_fields(req, {"request_id", "collection_purpose", "tenant_ref", "binding_ref", "resource_scope_ref", "date_rule", "resource_level", "requested_capabilities", "breakdowns"}, "collection_request")
     _strict_str(req["request_id"], "request_id")

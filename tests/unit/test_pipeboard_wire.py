@@ -379,6 +379,18 @@ STEPS_8_AND_9_CASES: tuple[tuple[bytes, str, str, TransportOutcome], ...] = (
         _clean_outcome(payload_schema_valid=False),
     ),
     (
+        _mcp_outer_bytes({"data": [], "paging": None}),
+        "invalid_paging_shape",
+        "schema",
+        _clean_outcome(payload_schema_valid=False),
+    ),
+    (
+        _mcp_outer_bytes({"data": [], "paging": {"cursors": None}}),
+        "invalid_paging_shape",
+        "schema",
+        _clean_outcome(payload_schema_valid=False),
+    ),
+    (
         _mcp_outer_bytes({"data": [], "paging": {"cursors": {"before": 123}}}),
         "invalid_paging_shape",
         "schema",
@@ -601,6 +613,9 @@ def test_parse_pipeboard_envelope_clean_multi_chunk_and_paging_empty() -> None:
     assert len(parsed.rows) == 1
     assert parsed.rows[0]["cpc"] == _WireDecimalToken(raw="1.25")
     assert parsed.transport_outcome == _clean_outcome()
+    for empty_paging in ({"data": []}, {"data": [], "paging": {}}, {"data": [], "paging": {"cursors": {}}}):
+        ok_env = parse_pipeboard_http_and_mcp_envelope(network_ok=True, http_status=200, headers=JSON_HEADERS, body_chunks=[_mcp_outer_bytes(empty_paging)])
+        assert ok_env.transport_outcome == _clean_outcome()
 
 
 def test_parse_pipeboard_envelope_preconditions_and_short_circuit_streaming() -> None:

@@ -28,8 +28,8 @@ from tools.governance.gov1_7a_runner import (
     EXPECTED_RESOURCE_INVENTORY_SCHEMA, GIT_ARTIFACT_PROVENANCE_SCHEMA, PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO,
     PINNED_PIPEBOARD_D26_SPECS, PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, _verify_d26_blob_map,
     build_expected_resource_inventory_envelope, build_git_artifact_provenance_envelope,
-    compute_git_blob_oid, sort_git_provenance_locators, verify_expected_resource_inventory_envelope,
-    verify_git_artifact_provenance_envelope,
+    compute_git_blob_oid, sort_git_provenance_locators, validate_private_registry_snapshot_payload,
+    verify_expected_resource_inventory_envelope, verify_git_artifact_provenance_envelope,
 )
 from tools.governance.gov1_convergence import Pr3SevenAConstituentVerifier
 from tools.governance.gov1_mcp import MCP_REJECTION_REPORT_SCHEMA
@@ -293,7 +293,7 @@ def build_certification_7a_record_candidate(
     return wrap_local_candidate(CERTIFICATION_7A_RECORD_SCHEMA, payload)
 
 
-def _get_verified_store_envelope(store: Store, locator: Mapping[str, Any], expected_schema: str, *, require_signed: bool = False) -> dict[str, Any]:
+def _get_verified_store_envelope(store: Store, locator: Mapping[str, Any], expected_schema: str, *, require_signed: bool = True) -> dict[str, Any]:
     loc_d = dict(locator)
     validate_locator(loc_d, expected_schema)
     obj = store.get(loc_d, expected_type=expected_schema)
@@ -303,11 +303,8 @@ def _get_verified_store_envelope(store: Store, locator: Mapping[str, Any], expec
 
 def _verify_registry_and_contract_from_store(store: Store, cap: Mapping[str, Any], rmc_digest: str) -> tuple[dict[str, Any], dict[str, Any]]:
     snap = _get_verified_store_envelope(store, cap["registry_snapshot_locator"], PRIVATE_REGISTRY_SNAPSHOT_SCHEMA)
-    exact_fields(snap, {"$schema", "snapshot_id", "tenant_ref", "issued_at_utc", "valid_until_utc", "resource_ref_mapping_version", "key_identity", "domain_separator", "resource_mapping_contract_digest", "bindings", "authorized_scopes", "capabilities", "integrity"}, "private_registry_snapshot")
-    if _SNAP_ID_RE.fullmatch(_strict_str(snap["snapshot_id"], "snap_id")) is None or snap["domain_separator"] != "0x00" or _utc_sec_micros(snap["issued_at_utc"], "issued") >= _utc_sec_micros(snap["valid_until_utc"], "until"):
-        raise ValueError("private_registry_snapshot: invalid snapshot_id, domain_separator, or validity")
-    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(snap["key_identity"], "key", expected_prefix="key"), "resource_ref_mapping_version": _strict_str(snap["resource_ref_mapping_version"], "ver"), "tenant_ref": _opaque_ref_str(snap["tenant_ref"], "tenant", expected_prefix="tenant")})
-    if snap["resource_mapping_contract_digest"] != "sha256:" + hashlib.sha256(rmc_pre).hexdigest() or rmc_digest != snap["resource_mapping_contract_digest"]:
+    validate_private_registry_snapshot_payload(snap)
+    if rmc_digest != snap["resource_mapping_contract_digest"]:
         raise ValueError("private_registry_snapshot: resource_mapping_contract_digest mismatch")
     drv = _get_verified_store_envelope(store, cap["driver_contract_locator"], PIPEBOARD_CONTRACT_SCHEMA)
     exact_fields(drv, {"$schema", "contract_id", "driver_id", "legacy_source_packet", "upstream_reference", "transport_limits", "metric_source_mappings", "integrity"}, "pipeboard_phase1_contract")
@@ -345,8 +342,11 @@ def _verify_all_13_git_provenances(
     if type(members) is not list or len(members) != len(PINNED_PIPEBOARD_D26_SPECS):
         raise ValueError("legacy_source_packet.members: expected 5 pinned members")
     for m, (role, r_path, oid, sha) in zip(members, PINNED_PIPEBOARD_D26_SPECS, strict=True):
+        if not isinstance(m, Mapping):
+            raise ValueError("legacy_source_packet.member: expected Mapping")
+        exact_fields(dict(m), {"role", "repository", "commit_sha", "path", "git_blob_oid", "file_content_sha256", "git_artifact_provenance_locator"}, "legacy_source_packet.member")
         m_loc = m["git_artifact_provenance_locator"]
-        d_prov = verify_git_artifact_provenance_envelope(_get_verified_store_envelope(store, m_loc, GIT_ARTIFACT_PROVENANCE_SCHEMA), expected_bytes=d26_blobs[r_path])
+        d_prov = verify_git_artifact_provenance_envelope(_get_verified_store_envelope(store, m_loc, GIT_ARTIFACT_PROVENANCE_SCHEMA), expected_bytes=d26_blobs[r_path], require_signed=True)
         if (m["role"], m["repository"], m["commit_sha"], m["path"], m["git_blob_oid"], m["file_content_sha256"]) != (role, PINNED_LEGACY_REPO, PINNED_LEGACY_COMMIT, r_path, oid, sha) or (d_prov["repository"], d_prov["commit_sha"], d_prov["path"], d_prov["git_blob_oid"], d_prov["file_content_sha256"]) != (PINNED_LEGACY_REPO, PINNED_LEGACY_COMMIT, r_path, oid, sha) or _utc_sec_micros(d_prov["resolved_at_utc"], "d.res") > certified_us:
             raise ValueError(f"d26[{role}]: pinned legacy provenance mismatch")
         unique_locs[canonicalize(m_loc)] = copy.deepcopy(m_loc)
@@ -397,7 +397,7 @@ def _resolve_store_sandbox_locator_for_candidate(store: Store, sbx_payload: Mapp
     matches: list[dict[str, Any]] = []
     for p in sorted(sha_dir.glob("*.json")) if sha_dir.is_dir() else ():
         obj = loads_strict(p.read_text(encoding="utf-8"))
-        if isinstance(obj, dict) and obj.get("$schema") == SANDBOX_PROFILE_SCHEMA and "integrity" in obj:
+        if isinstance(obj, dict) and obj.get("$schema") == SANDBOX_PROFILE_SCHEMA and isinstance(obj.get("integrity"), Mapping) and "signature_base64" in obj["integrity"]:
             if json_digest({k: v for k, v in obj.items() if k not in {"$schema", "integrity"}}) == target:
                 loc = make_locator(SANDBOX_PROFILE_SCHEMA, canonicalize(obj))
                 _get_verified_store_envelope(store, loc, SANDBOX_PROFILE_SCHEMA)
@@ -438,13 +438,13 @@ def _verify_stage7_and_wheel_archive_passively(
     wheel_boundary_report: Mapping[str, Any] | None, negative_security_report: Mapping[str, Any] | None,
     explicit_sbx_store_loc: Mapping[str, Any] | None,
 ) -> tuple[dict[str, bytes], dict[str, Any], dict[str, Any], dict[str, Any], str, dict[str, Any]]:
-    members, rec_entries, rec_digest, mods = _read_and_validate_wheel_archive(wheel_bytes)
     whl_digest = digest(wheel_bytes)
     if mode == "envelope":
         sbx_loc, sbx_obj, prov_obj, bound_obj, neg_obj, bound_payload = _resolve_envelope_stage7_from_store(
             store, raw_payload, sandbox_profile=sandbox_profile, wheel_provenance=wheel_provenance,
             wheel_boundary_report=wheel_boundary_report, negative_security_report=negative_security_report,
         )
+        neg_meta: Mapping[str, Any] = neg_obj
     else:
         if sandbox_profile is None or wheel_provenance is None or wheel_boundary_report is None or negative_security_report is None:
             raise ValueError("candidate mode requires sandbox_profile, wheel_provenance, wheel_boundary_report, and negative_security_report")
@@ -455,25 +455,28 @@ def _verify_stage7_and_wheel_archive_passively(
         if canonicalize(build_local_candidate_ref(dict(bound_obj))) != canonicalize(raw_payload["wheel_boundary_report_candidate_ref"]) or canonicalize(build_local_candidate_ref(dict(neg_obj))) != canonicalize(raw_payload["negative_security_test_report_candidate_ref"]) or canonicalize(bound_payload["wheel_build_provenance_candidate_ref"]) != canonicalize(raw_payload["wheel_build_provenance_candidate_ref"]) or canonicalize(raw_payload["wheel_build_provenance_candidate_ref"]) != canonicalize(neg_cand_p["wheel_build_provenance_candidate_ref"]) or canonicalize(raw_payload["sealed_sandbox_profile_candidate_ref"]) != canonicalize(neg_cand_p["sealed_sandbox_profile_candidate_ref"]):
             raise ValueError("certification_7a_record: Stage 7 candidate_ref cross-binding mismatch")
         sbx_cand_p = unwrap_local_candidate(dict(sbx_obj), expected_schema=SANDBOX_PROFILE_SCHEMA) if sbx_obj.get("artifact_kind") == LOCAL_CANDIDATE_KIND else dict(sbx_obj)
-        sbx_loc = _resolve_store_sandbox_locator_for_candidate(store, sbx_cand_p, explicit_sbx_store_loc)
-    neg_p = _check_passive_boundary_and_negative(raw_payload, bound_payload, sbx_obj, prov_obj, neg_obj, wheel_bytes, whl_digest, rec_entries, rec_digest, mods)
+        sbx_loc, neg_meta = _resolve_store_sandbox_locator_for_candidate(store, sbx_cand_p, explicit_sbx_store_loc), neg_cand_p
+    prov_p = extract_provenance_payload(prov_obj)
+    ctx_b = canonicalize(raw_payload["migration_run_context_locator"])
+    if not ({raw_payload["wheel_digest"], prov_p["wheel_digest"], bound_payload.get("wheel_digest"), neg_meta.get("wheel_digest")} == {whl_digest} and all(isinstance(x, Mapping) and canonicalize(dict(x)) == ctx_b for x in (prov_p["migration_run_context_locator"], bound_payload.get("migration_run_context_locator"), neg_meta.get("migration_run_context_locator")))):
+        raise ValueError("certification_7a_record: wheel_digest or migration_run_context_locator mismatch before archive extraction")
+    members, rec_entries, rec_digest, mods = _read_and_validate_wheel_archive(wheel_bytes)
+    neg_p = _check_passive_boundary_and_negative(raw_payload, bound_payload, sbx_obj, prov_obj, prov_p, neg_obj, wheel_bytes, whl_digest, rec_entries, rec_digest, mods)
     sbx_p = unwrap_local_candidate(dict(sbx_obj), expected_schema=SANDBOX_PROFILE_SCHEMA) if sbx_obj.get("artifact_kind") == LOCAL_CANDIDATE_KIND else {k: sbx_obj[k] for k in sbx_obj if k not in {"$schema", "integrity"}}
-    return members, sbx_p, extract_provenance_payload(prov_obj), neg_p, json_digest({k: sbx_p[k] for k in _SPEC_17_FIELDS}), sbx_loc
+    return members, sbx_p, prov_p, neg_p, json_digest({k: sbx_p[k] for k in _SPEC_17_FIELDS}), sbx_loc
 
 
 def _check_passive_boundary_and_negative(
     raw_payload: Mapping[str, Any], bound_payload: Mapping[str, Any], sbx_obj: Mapping[str, Any],
-    prov_obj: Mapping[str, Any], neg_obj: Mapping[str, Any], wheel_bytes: bytes, whl_digest: str,
+    prov_obj: Mapping[str, Any], prov_p: Mapping[str, Any], neg_obj: Mapping[str, Any], wheel_bytes: bytes, whl_digest: str,
     rec_entries: list[dict[str, Any]], rec_digest: str, mods: list[str],
 ) -> dict[str, Any]:
-    prov_p = extract_provenance_payload(prov_obj)
     checked_insp = _validate_inspection_dict({k: bound_payload[k] for k in _INSPECTION_FIELDS})
     _utc_sec_micros(bound_payload["verified_at_utc"], "bound.verified_at_utc")
     if (
         checked_insp["wheel_digest"] != whl_digest or canonicalize(checked_insp["sorted_record_entries"]) != canonicalize(rec_entries)
         or checked_insp["sorted_record_digest"] != rec_digest or canonicalize(checked_insp["packaged_modules"]) != canonicalize(mods)
         or bound_payload["repository"] != DEFAULT_REPOSITORY or raw_payload["wheel_digest"] != whl_digest
-        or canonicalize(bound_payload["migration_run_context_locator"]) != canonicalize(raw_payload["migration_run_context_locator"])
         or any(raw_payload[k] != prov_p[k] or bound_payload[k] != raw_payload[k] for k in ("build_run_id", "source_commit_sha", "build_backend_digest", "schema_bundle_digest"))
     ):
         raise ValueError("certification_7a_record: passive wheel archive / boundary / provenance mismatch")
@@ -516,15 +519,21 @@ def _load_verified_inventories(store: Store, snap: Mapping[str, Any], known_refs
     auth_scopes = {(s["binding_ref"], s["resource_scope_ref"]) for s in snap["authorized_scopes"]}
     snap_bnds = {b["binding_ref"]: b for b in snap["bindings"]}
     inv_map: dict[bytes, dict[str, Any]] = {}
+    seen_inv_by_scope_key: dict[tuple[str, str, str, str, str], bytes] = {}
     for c in cases:
         loc = c["expected_resource_inventory_locator"]
         lb = canonicalize(loc)
         if lb not in inv_map:
-            inv = verify_expected_resource_inventory_envelope(_get_verified_store_envelope(store, loc, EXPECTED_RESOURCE_INVENTORY_SCHEMA))
+            inv = verify_expected_resource_inventory_envelope(_get_verified_store_envelope(store, loc, EXPECTED_RESOURCE_INVENTORY_SCHEMA), require_signed=True)
             sb = snap_bnds.get(inv["binding_ref"])
             if inv["tenant_ref"] != snap["tenant_ref"] or sb is None or sb["account_ref"] != inv["account_ref"] or (inv["binding_ref"], inv["resource_scope_ref"]) not in auth_scopes or inv["date_range"]["start_date"] != inv["date_range"]["end_date"] or any(u["resource_ref"] not in known_refs for u in inv["expected_resources"]):
                 raise ValueError("expected_resource_inventory: snapshot/scope/resource_ref mismatch")
             inv_map[lb] = inv
+        inv = inv_map[lb]
+        sk = (inv["binding_ref"], inv["account_ref"], inv["resource_scope_ref"], inv["date_range"]["start_date"], inv["date_range"]["end_date"])
+        if seen_inv_by_scope_key.get(sk, lb) != lb:
+            raise ValueError("expected_resource_inventory: conflicting inventory locators for admitted scope/date tuple")
+        seen_inv_by_scope_key[sk] = lb
     return inv_map
 
 
@@ -589,7 +598,7 @@ def _verify_single_replayed_case(
         raise ValueError(f"case[{rc['case_id']}]: deterministic offline 7A replay mismatch")
 
 
-def _unwrap_cert_record(artifact: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+def _unwrap_cert_record(artifact: Mapping[str, Any], *, require_signed_envelope: bool = True) -> tuple[str, dict[str, Any]]:
     if not isinstance(artifact, Mapping):
         raise ValueError("certification_7a_record: expected Mapping")
     d = dict(artifact)
@@ -601,7 +610,7 @@ def _unwrap_cert_record(artifact: Mapping[str, Any]) -> tuple[str, dict[str, Any
         return "candidate", payload
     if d.get("$schema") == CERTIFICATION_7A_RECORD_SCHEMA and "artifact_kind" not in d:
         exact_fields(d, _CERT_ENV_23_KEYS, "certification_7a_envelope")
-        _verify_p1_integrity(d, label="certification_7a_record")
+        _verify_p1_integrity(d, label="certification_7a_record", require_signed=require_signed_envelope)
         payload = {k: copy.deepcopy(v) for k, v in d.items() if k not in {"$schema", "integrity"}}
         exact_fields(payload, _CERT_ENV_PAYLOAD_21_KEYS, "certification_7a_envelope_payload")
         return "envelope", payload
@@ -613,14 +622,14 @@ def verify_certification_7a_replay_bytes(
     resolved_git_blobs: Mapping[str, bytes], resolved_d26_blobs: Mapping[str, bytes],
     sandbox_profile: Mapping[str, Any] | None = None, wheel_provenance: Mapping[str, Any] | None = None,
     wheel_boundary_report: Mapping[str, Any] | None = None, negative_security_report: Mapping[str, Any] | None = None,
-    sealed_sandbox_profile_store_locator: Mapping[str, Any] | None = None,
+    sealed_sandbox_profile_store_locator: Mapping[str, Any] | None = None, require_signed_envelope: bool = True,
 ) -> dict[str, Any]:
-    if not isinstance(store, Store) or type(wheel_bytes) is not bytes or not wheel_bytes or type(corpus_bytes) is not bytes or not corpus_bytes:
-        raise ValueError("verify_certification_7a_replay_bytes: invalid Store or empty wheel_bytes/corpus_bytes")
+    if not isinstance(store, Store) or type(wheel_bytes) is not bytes or not wheel_bytes or type(corpus_bytes) is not bytes or not corpus_bytes or type(require_signed_envelope) is not bool:
+        raise ValueError("verify_certification_7a_replay_bytes: invalid Store/require_signed_envelope or empty wheel_bytes/corpus_bytes")
     if not isinstance(resolved_git_blobs, Mapping) or any(type(k) is not str or type(v) is not bytes for k, v in resolved_git_blobs.items()):
         raise ValueError("resolved_git_blobs: expected Mapping[str, bytes]")
     d26_blobs = _verify_d26_blob_map(resolved_d26_blobs)
-    mode, raw_payload = _unwrap_cert_record(artifact)
+    mode, raw_payload = _unwrap_cert_record(artifact, require_signed_envelope=require_signed_envelope)
     checked_common = _build_cert_common_payload(**{k: raw_payload[k] for k in _CERT_COMMON_17_KEYS})
     wheel_members, sbx_p, prov_p, neg_p, sbx_digest, sbx_loc = _verify_stage7_and_wheel_archive_passively(
         mode, raw_payload, store, wheel_bytes, sandbox_profile=sandbox_profile, wheel_provenance=wheel_provenance,

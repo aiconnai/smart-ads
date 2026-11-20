@@ -28,7 +28,7 @@ from smart_ads.domain.resource_ref import TenantResourceKeyHandle
 from smart_ads.ports.cell_runtime import CellRuntimePorts, ClockAttestation, ResolvedClockState, ResolvedPrerequisiteBundle, ResolvedRegistryState, TimezoneRuleSnapshot
 from smart_ads.ports.provider import ExternalIOCounters
 import smart_ads.reconciliation as reconciliation_pkg
-from smart_ads.reconciliation.certification_7a import ADAPTER_ARTIFACT_PATHS, CERTIFICATION_7A_RECORD_SCHEMA, CORPUS_GIT_PATH, MAPPING_ARTIFACT_PATHS, PARSER_ARTIFACT_PATHS, PIPEBOARD_7A_CORPUS_SCHEMA, Certification7ACapabilityBinding, Certification7AFixtureCase, Certification7AFixtureEvidence, Certification7ARecord, compute_7a_case_execution_binding_digest, compute_adapter_code_digest, compute_mapping_rules_digest, compute_parser_code_digest, verify_certification_7a_record
+from smart_ads.reconciliation.certification_7a import ADAPTER_ARTIFACT_PATHS, CERTIFICATION_7A_RECORD_SCHEMA, CORPUS_GIT_PATH, MAPPING_ARTIFACT_PATHS, PARSER_ARTIFACT_PATHS, PIPEBOARD_7A_CORPUS_SCHEMA, Certification7ACapabilityBinding, Certification7AFixtureCase, Certification7AFixtureEvidence, Certification7ARecord, _EXPECTED_PACKAGED_MODULES, _extract_verified_wheel_members, compute_7a_case_execution_binding_digest, compute_adapter_code_digest, compute_mapping_rules_digest, compute_parser_code_digest, verify_certification_7a_record
 from tests.unit.test_negative_security_7a import _DENIAL_OBSERVATIONS, _SPEC_17_KEYS, _make_readback, _resource_run_specs
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -77,8 +77,11 @@ def _build_deterministic_wheel_bytes(
     compress_type: int = zipfile.ZIP_DEFLATED,
 ) -> bytes:
     members: dict[str, bytes] = {
-        src_path[4:]: raw for src_path, raw in sorted(git_blobs.items()) if src_path.startswith("src/")
+        p.relative_to(REPO_ROOT / "src").as_posix(): p.read_bytes() for p in sorted((REPO_ROOT / "src" / "smart_ads").rglob("*.py"))
     }
+    members["smart_ads-0.1.0.dist-info/METADATA"] = b"Metadata-Version: 2.1\nName: smart-ads\nVersion: 0.1.0\n"
+    members["smart_ads-0.1.0.dist-info/WHEEL"] = b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    members.update({src_path[4:]: raw for src_path, raw in sorted(git_blobs.items()) if src_path.startswith("src/")})
     if overrides:
         members.update(overrides)
     if custom_record_raw is not None:
@@ -201,16 +204,20 @@ def _stage_sandbox_and_wheel_envelopes(
         "uv_lock_sha256": _UVLOCK_DIGEST, "schema_bundle_digest": schema_digest, "wheel_digest": whl_digest,
         "wheel": {"$schema": "smart_ads/wheel_object_locator/v1", "store_kind": "cell_immutable_object", "object_ref": f"cell-object:{whl_digest}", "wheel_digest": whl_digest, "size_bytes": len(wheel_bytes)},
     })
-    entries = [{"path": _RECORD_REL_PATH, "record_hash": "", "record_size": None}]
+    try:
+        _, entries, rec_digest, mods = _extract_verified_wheel_members(wheel_bytes)
+    except ClosedValidationError:
+        entries = [{"path": _RECORD_REL_PATH, "record_hash": "", "record_size": None}]
+        rec_digest, mods = jcs_sha256(entries), list(_EXPECTED_PACKAGED_MODULES)
     bound_loc, _ = _put_signed(store, {
         "$schema": "smart_ads/wheel_boundary_report/v1",
         "migration_run_context_locator": _RUN_CTX_LOC.to_dict(), "build_run_id": build_run_id,
         "verified_at_utc": "2026-09-07T10:00:10Z", "repository": "aiconnai/smart-ads",
         "source_commit_sha": commit_sha, "wheel_digest": whl_digest, "build_backend_digest": _BACKEND_DIGEST,
         "schema_bundle_digest": schema_digest, "sorted_record_entries": entries,
-        "sorted_record_digest": jcs_sha256(entries), "archive_allowlist_passed": True,
+        "sorted_record_digest": rec_digest, "archive_allowlist_passed": True,
         "ast_boundary_scan_passed": True, "isolated_venv_import_passed": True,
-        "packaged_modules": ["smart_ads"], "wheel_build_provenance_locator": prov_loc.to_dict(),
+        "packaged_modules": mods, "wheel_build_provenance_locator": prov_loc.to_dict(),
     })
     return sbx_loc, prov_loc, bound_loc, sbx_spec_digest, whl_digest, schema_digest
 
@@ -372,7 +379,7 @@ def build_valid_7a_world(
         reg_state.locator, ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1"),
     )
     ev = Certification7AFixtureEvidence(prov_map[CORPUS_GIT_PATH][0], corpus_digest, reg_fix, cases)
-    rec = Certification7ARecord(
+    rec_u = Certification7ARecord(
         _RUN_CTX_LOC, sbx_loc, prov_loc, bound_loc, neg_loc, build_run_id,
         certified_at_utc, "fixture_certified", _COMMIT_SHA, _BACKEND_DIGEST,
         schema_digest, whl_digest, reg_state.snapshot.resource_mapping_contract_digest, cap,
@@ -384,7 +391,12 @@ def build_valid_7a_world(
         compute_mapping_rules_digest([prov_map[k][1] for k in MAPPING_ARTIFACT_PATHS], reg_state.driver_contract.metric_source_mappings),
         ev,
     )
+    rec = Certification7ARecord.from_dict(_sign_env(rec_u.to_dict()), require_signed=True)
     return Valid7AWorld(rec, neg_rep, store, eff_whl_bytes, corpus_bytes, git_blobs, d26_blobs, sbx_spec_digest, prov_loc)
+
+
+def _mut_rec(rec: Certification7ARecord, **changes: Any) -> Certification7ARecord:
+    return Certification7ARecord.from_dict(_sign_env(replace(rec, integrity=None, **changes).to_dict()), require_signed=True)
 
 
 def _verify_world(w: Valid7AWorld, **overrides: Any) -> None:
@@ -422,16 +434,23 @@ def test_record_schema_p1_roundtrip_and_forbids_generation() -> None:
     w = build_valid_7a_world()
     assert Certification7ARecord.SCHEMA == CERTIFICATION_7A_RECORD_SCHEMA
     assert ADR_P1_DOMAIN_PREFIXES[CERTIFICATION_7A_RECORD_SCHEMA] == "SMART-ADS:CERTIFICATION-7A:V1\n"
-    assert len(Certification7ARecord.CORE_KEYS) == 22
-    assert len(Certification7ARecord.KEYS) == 23
+    assert (len(Certification7ARecord.CORE_KEYS), len(Certification7ARecord.KEYS)) == (22, 23)
     assert "generation" not in Certification7ARecord.KEYS
-    assert Certification7ARecord.from_dict(w.record.to_dict()) == w.record
+    unsigned_rec = replace(w.record, integrity=None)
+    assert Certification7ARecord.from_dict(unsigned_rec.to_dict()) == unsigned_rec
+    assert Certification7ARecord.from_dict(w.record.to_dict(), require_signed=True) == w.record
     with pytest.raises(ClosedValidationError):
-        Certification7ARecord.from_dict({**w.record.to_dict(), "generation": 1})
-    signed_dict = _sign_env(w.record.to_dict())
-    assert Certification7ARecord.from_dict(signed_dict, require_signed=True).to_dict() == signed_dict
+        Certification7ARecord.from_dict({**unsigned_rec.to_dict(), "generation": 1})
     with pytest.raises(ClosedValidationError):
-        Certification7ARecord.from_dict({**signed_dict, "certified_at_utc": "2026-09-07T10:00:17Z"}, require_signed=True)
+        Certification7ARecord.from_dict({**w.record.to_dict(), "certified_at_utc": "2026-09-07T10:00:17Z"}, require_signed=True)
+    with pytest.raises(ClosedValidationError, match="signed P1 integrity"):
+        _verify_world(w, record=unsigned_rec)
+    store_u = dict(w.store)
+    drv_u = {**copy.deepcopy(store_u[w.record.capability.driver_contract_locator]), "integrity": {"key_id": _KEY_ID, "key_registry_snapshot_locator": _KEY_REG_LOC.to_dict()}}
+    drv_u_loc = ArtifactLocator.for_canonical_bytes(drv_u["$schema"], canonicalize_jcs(drv_u))
+    store_u[drv_u_loc] = drv_u
+    with pytest.raises(ClosedValidationError):
+        _verify_world(w, record=_mut_rec(w.record, capability=replace(w.record.capability, driver_contract_locator=drv_u_loc, driver_contract_digest=drv_u_loc.content_digest), fixture_evidence=replace(w.record.fixture_evidence, cases=tuple(replace(c, source_contract_ref=f"opaque-driver-contract:{drv_u_loc.content_digest}") for c in w.record.fixture_evidence.cases))), object_resolver=store_u.__getitem__)
 
 
 def test_code_and_mapping_digests_are_invariant_to_resolved_at_and_integrity() -> None:
@@ -519,16 +538,16 @@ def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None
     with pytest.raises(ClosedValidationError, match="RECORD"):
         _verify_world(build_valid_7a_world(wheel_bytes=no_rec_whl))
 
-    # Forbidden ZIP bitflags (bit 0 / bit 3) or traversal/directory member paths
-    for bad_kw in (
-        {"patch_cd_flag_bits": 0x01},
-        {"patch_cd_flag_bits": 0x08},
-        {"overrides": {"../evil.py": b"x"}},
-        {"overrides": {"smart_ads/dir/": b""}},
-    ):
+    # Forbidden ZIP bitflags, traversal/directory paths, or boundary RECORD/module mismatch
+    for bad_kw in ({"patch_cd_flag_bits": 0x01}, {"patch_cd_flag_bits": 0x08}, {"overrides": {"../evil.py": b"x"}}, {"overrides": {"smart_ads/dir/": b""}}):
         bad_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
         with pytest.raises(ClosedValidationError, match="wheel"):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_whl))
+    store_b = dict(w.store)
+    bad_b = {**copy.deepcopy(store_b[w.record.wheel_boundary_report_locator]), "sorted_record_entries": [{"path": _RECORD_REL_PATH, "record_hash": "", "record_size": None}], "sorted_record_digest": jcs_sha256([{"path": _RECORD_REL_PATH, "record_hash": "", "record_size": None}])}
+    bad_b_loc, _ = _put_signed(store_b, bad_b)
+    with pytest.raises(ClosedValidationError, match="wheel_boundary_report"):
+        _verify_world(w, record=_mut_rec(w.record, wheel_boundary_report_locator=bad_b_loc), object_resolver=store_b.__getitem__)
 
 
 def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None:
@@ -574,15 +593,16 @@ def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None
         with pytest.raises(ClosedValidationError, match=exp_pat):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_csv_whl))
 
-    # (d) 5000-digit RECORD size rejected with ClosedValidationError (never ValueError)
-    huge_sz_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_size=(wire_rel, "9" * 5000))
-    with pytest.raises(ClosedValidationError, match="RECORD"):
-        _verify_world(build_valid_7a_world(wheel_bytes=huge_sz_whl))
+    # (d) 25-digit (< 4096-char row) and 5000-digit RECORD size both rejected with ClosedValidationError
+    for bad_sz in ("9" * 25, "9" * 5000):
+        huge_sz_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_size=(wire_rel, bad_sz))
+        with pytest.raises(ClosedValidationError, match="RECORD"):
+            _verify_world(build_valid_7a_world(wheel_bytes=huge_sz_whl))
 
 
 def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:
     w = build_valid_7a_world()
-    bad_rmc = Certification7ARecord.from_dict({**w.record.to_dict(), "resource_mapping_contract_digest": "sha256:" + ("e" * 64)})
+    bad_rmc = _mut_rec(w.record, resource_mapping_contract_digest="sha256:" + ("e" * 64))
     with pytest.raises(ClosedValidationError):
         _verify_world(w, record=bad_rmc)
     store2 = dict(w.store)
@@ -593,7 +613,7 @@ def test_verifier_rejects_non_declared_state_and_rmc_digest_mismatch() -> None:
     cap_fc = replace(w.record.capability, registry_snapshot_locator=reg_fc.locator)
     ev_fc = replace(w.record.fixture_evidence, regression_fixture=RegressionFixtureV1.canonical(reg_fc.locator.content_digest))
     with pytest.raises(ClosedValidationError):
-        _verify_world(w, record=replace(w.record, capability=cap_fc, fixture_evidence=ev_fc), object_resolver=store2.__getitem__)
+        _verify_world(w, record=_mut_rec(w.record, capability=cap_fc, fixture_evidence=ev_fc), object_resolver=store2.__getitem__)
 
 
 def test_verifier_checks_admitted_digest_before_execution_binding_digest() -> None:
@@ -605,14 +625,14 @@ def test_verifier_checks_admitted_digest_before_execution_binding_digest() -> No
         corpus_digest=w.record.fixture_evidence.corpus_digest, sealed_sandbox_profile_digest=w.sbx_spec_digest,
     )
     forged_case = replace(forged_draft, execution_binding_digest=forged_bind)
-    bad_rec = replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(forged_case, *w.record.fixture_evidence.cases[1:])))
+    bad_rec = _mut_rec(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(forged_case, *w.record.fixture_evidence.cases[1:])))
     with pytest.raises(ClosedValidationError, match="admitted_collection_digest"):
         _verify_world(w, record=bad_rec)
 
 
 def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> None:
     w = build_valid_7a_world()
-    rec_dict = w.record.to_dict()
+    rec_dict = replace(w.record, integrity=None).to_dict()
     rec_dict["fixture_evidence"]["regression_fixture"] = RegressionFixtureV1.canonical("sha256:" + ("9" * 64)).to_dict()
     with pytest.raises(ClosedValidationError):
         Certification7ARecord.from_dict(rec_dict)
@@ -627,7 +647,7 @@ def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> No
     )
     wrong_inv_loc, _ = _put_signed(store_bad_inv, wrong_day_inv.to_dict())
     c0_wrong = replace(w.record.fixture_evidence.cases[0], expected_resource_inventory_locator=wrong_inv_loc)
-    bad_rec = replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_wrong, *w.record.fixture_evidence.cases[1:])))
+    bad_rec = _mut_rec(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_wrong, *w.record.fixture_evidence.cases[1:])))
     with pytest.raises(ClosedValidationError):
         _verify_world(w, record=bad_rec, object_resolver=store_bad_inv.__getitem__)
 
@@ -650,7 +670,7 @@ def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
         bad_ev = replace(w.record.fixture_evidence, corpus_git_locator=c_loc, corpus_digest=p.file_content_sha256)
         with pytest.raises(ClosedValidationError):
             _verify_world(
-                w, record=replace(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__,
+                w, record=_mut_rec(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__,
                 corpus_bytes=bad_bytes, resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes},
             )
 
@@ -662,7 +682,7 @@ def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
     )
     cases_t = (w.record.fixture_evidence.cases[0], replace(alt_draft, execution_binding_digest=alt_bind), *w.record.fixture_evidence.cases[2:])
     with pytest.raises(ClosedValidationError):
-        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=cases_t)))
+        _verify_world(w, record=_mut_rec(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=cases_t)))
 
 
 def test_verifier_rejects_sandbox_provenance_readback_and_chronology_violations() -> None:
@@ -676,12 +696,14 @@ def test_verifier_rejects_sandbox_provenance_readback_and_chronology_violations(
     wrong_prov = ArtifactLocator.from_digest("smart_ads/wheel_build_provenance/v1", "sha256:" + ("d" * 64))
     with pytest.raises(ClosedValidationError):
         _verify_world(w, boundary_report_wheel_provenance_locator=wrong_prov)
-    c0_bad_rb = replace(w.record.fixture_evidence.cases[0], runtime_readback=SandboxRuntimeReadback.from_dict({**_make_readback().to_dict(), "oci_image_digest": "sha256:" + ("8" * 64)}))
-    with pytest.raises(ClosedValidationError):
-        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_bad_rb, *w.record.fixture_evidence.cases[1:]))))
+    rb_draft = replace(w.record.fixture_evidence.cases[0], runtime_readback=SandboxRuntimeReadback.from_dict({**_make_readback().to_dict(), "oci_image_digest": "sha256:" + ("8" * 64)}))
+    rb_bind = compute_7a_case_execution_binding_digest(case=rb_draft, wheel_digest=w.record.wheel_digest, corpus_digest=w.record.fixture_evidence.corpus_digest, sealed_sandbox_profile_digest=w.sbx_spec_digest)
+    c0_bad_rb = replace(rb_draft, execution_binding_digest=rb_bind)
+    with pytest.raises(ClosedValidationError, match="runtime_readback"):
+        _verify_world(w, record=_mut_rec(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_bad_rb, *w.record.fixture_evidence.cases[1:]))))
     c0_collide = replace(w.record.fixture_evidence.cases[0], sandbox_instance_ref="sandbox:neg-00-0")
     with pytest.raises(ClosedValidationError):
-        _verify_world(w, record=replace(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_collide, *w.record.fixture_evidence.cases[1:]))))
+        _verify_world(w, record=_mut_rec(w.record, fixture_evidence=replace(w.record.fixture_evidence, cases=(c0_collide, *w.record.fixture_evidence.cases[1:]))))
 
 
 def test_verifier_rejects_corpus_or_legacy_d26_blob_tampering() -> None:
