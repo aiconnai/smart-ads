@@ -2070,6 +2070,72 @@ def _scan_wheel_python_ast_violations(source: str, *, filename: str) -> list[str
     return violations
 
 
+def _parse_contiguous_zip_eocd(
+    raw_bytes: bytes, infos_len: int, comment: bytes
+) -> tuple[int, int, int]:
+    if type(raw_bytes) is not bytes or len(raw_bytes) < 22:
+        raise ValueError("wheel archive: truncated or non-bytes ZIP layout")
+    if comment != b"":
+        raise ValueError("wheel archive: non-empty ZIP archive comment forbidden")
+    if len(raw_bytes) >= 42 and raw_bytes[-42:-38] == b"PK\x06\x07":
+        raise ValueError("wheel archive: Zip64 EOCD locator record forbidden")
+    (
+        eocd_sig, disk_no, cd_start_disk, disk_entries, cd_count, cd_size, cd_offset, comment_len
+    ) = struct.unpack("<4sHHHHIIH", raw_bytes[-22:])
+    if eocd_sig != b"PK\x05\x06":
+        raise ValueError("wheel archive: missing standard 22-byte EOCD or trailing bytes past EOCD")
+    if comment_len != 0:
+        raise ValueError("wheel archive: non-zero EOCD comment length forbidden")
+    if 0xFFFF in (disk_no, cd_start_disk, disk_entries, cd_count) or 0xFFFFFFFF in (cd_size, cd_offset):
+        raise ValueError("wheel archive: Zip64 EOCD sentinel values forbidden")
+    if disk_no != 0 or cd_start_disk != 0 or disk_entries != cd_count or cd_count == 0:
+        raise ValueError("wheel archive: invalid multi-disk or empty EOCD header")
+    if infos_len != cd_count:
+        raise ValueError("wheel archive: central directory count mismatch against EOCD")
+    if cd_offset + cd_size + 22 != len(raw_bytes):
+        raise ValueError("wheel archive: non-contiguous central directory or EOCD byte layout")
+    return cd_count, cd_size, cd_offset
+
+
+def _verify_local_zip_entry(
+    raw_bytes: bytes, cursor: int, cd_offset: int, info: zipfile.ZipInfo
+) -> int:
+    if info.header_offset != cursor:
+        raise ValueError(
+            f"wheel archive: non-contiguous local header offset on {info.filename!r} "
+            f"(expected {cursor}, got {info.header_offset})"
+        )
+    if cursor + 30 > cd_offset:
+        raise ValueError(f"wheel archive: truncated local file header on {info.filename!r}")
+    (
+        lfh_sig, _lfh_ver, lfh_flags, lfh_method, _lfh_time, _lfh_date,
+        lfh_crc, lfh_comp_size, lfh_uncomp_size, lfh_fname_len, lfh_extra_len,
+    ) = struct.unpack_from("<4sHHHHHIIIHH", raw_bytes, cursor)
+    if lfh_sig != b"PK\x03\x04":
+        raise ValueError(f"wheel archive: invalid local file header magic on {info.filename!r}")
+    if (lfh_flags & 0x08) != 0 or (info.flag_bits & 0x08) != 0:
+        raise ValueError(f"wheel archive: streaming data descriptor flag forbidden on {info.filename!r}")
+    if (
+        lfh_flags != info.flag_bits
+        or (lfh_flags & ~0x0806) != 0
+        or (lfh_method == zipfile.ZIP_STORED and (lfh_flags & 0x0006) != 0)
+    ):
+        raise ValueError(
+            f"wheel archive: forbidden or mismatched ZIP general-purpose bit flags on {info.filename!r}"
+        )
+    if 0xFFFFFFFF in (lfh_comp_size, lfh_uncomp_size):
+        raise ValueError(f"wheel archive: Zip64 local header size sentinel forbidden on {info.filename!r}")
+    fname_start, fname_end = cursor + 30, cursor + 30 + lfh_fname_len
+    next_cursor = fname_end + lfh_extra_len + info.compress_size
+    if next_cursor > cd_offset:
+        raise ValueError(f"wheel archive: local entry span overflows central directory on {info.filename!r}")
+    if raw_bytes[fname_start:fname_end] != info.filename.encode("utf-8"):
+        raise ValueError(f"wheel archive: local header filename mismatch against central directory on {info.filename!r}")
+    if (lfh_method, lfh_comp_size, lfh_uncomp_size, lfh_crc) != (info.compress_type, info.compress_size, info.file_size, info.CRC):
+        raise ValueError(f"wheel archive: local header metadata mismatch against central directory on {info.filename!r}")
+    return next_cursor
+
+
 def verify_contiguous_zip_layout(
     raw_bytes: bytes,
     infos: list[zipfile.ZipInfo],
@@ -2077,128 +2143,22 @@ def verify_contiguous_zip_layout(
     comment: bytes,
 ) -> None:
     """Verify strict gap-free 32-bit ZIP archive byte contiguity from offset 0."""
-    if type(raw_bytes) is not bytes or len(raw_bytes) < 22:
-        raise ValueError("wheel archive: truncated or non-bytes ZIP layout")
-    if comment != b"":
-        raise ValueError("wheel archive: non-empty ZIP archive comment forbidden")
-    if len(raw_bytes) >= 42 and raw_bytes[-42:-38] == b"PK\x06\x07":
-        raise ValueError("wheel archive: Zip64 EOCD locator record forbidden")
-
-    (
-        eocd_sig,
-        disk_no,
-        cd_start_disk,
-        disk_entries,
-        cd_count,
-        cd_size,
-        cd_offset,
-        comment_len,
-    ) = struct.unpack("<4sHHHHIIH", raw_bytes[-22:])
-    if eocd_sig != b"PK\x05\x06":
-        raise ValueError(
-            "wheel archive: missing standard 22-byte EOCD or trailing bytes past EOCD"
-        )
-    if comment_len != 0:
-        raise ValueError("wheel archive: non-zero EOCD comment length forbidden")
-    if (
-        0xFFFF in (disk_no, cd_start_disk, disk_entries, cd_count)
-        or 0xFFFFFFFF in (cd_size, cd_offset)
-    ):
-        raise ValueError("wheel archive: Zip64 EOCD sentinel values forbidden")
-    if (
-        disk_no != 0
-        or cd_start_disk != 0
-        or disk_entries != cd_count
-        or cd_count == 0
-    ):
-        raise ValueError("wheel archive: invalid multi-disk or empty EOCD header")
-    if len(infos) != cd_count:
-        raise ValueError("wheel archive: central directory count mismatch against EOCD")
-    if cd_offset + cd_size + 22 != len(raw_bytes):
-        raise ValueError(
-            "wheel archive: non-contiguous central directory or EOCD byte layout"
-        )
-
+    cd_count, cd_size, cd_offset = _parse_contiguous_zip_eocd(raw_bytes, len(infos), comment)
     sorted_infos = sorted(infos, key=lambda item: item.header_offset)
     if len({item.header_offset for item in sorted_infos}) != len(sorted_infos):
         raise ValueError("wheel archive: duplicate local header_offset in central directory")
     if sorted_infos[0].header_offset != 0:
-        raise ValueError(
-            "wheel archive: unreferenced prefix bytes before offset 0 local header"
-        )
-
+        raise ValueError("wheel archive: unreferenced prefix bytes before offset 0 local header")
     cursor = 0
     for info in sorted_infos:
-        if info.header_offset != cursor:
-            raise ValueError(
-                f"wheel archive: non-contiguous local header offset on {info.filename!r} "
-                f"(expected {cursor}, got {info.header_offset})"
-            )
-        if cursor + 30 > cd_offset:
-            raise ValueError(
-                f"wheel archive: truncated local file header on {info.filename!r}"
-            )
-        (
-            lfh_sig,
-            _lfh_ver,
-            lfh_flags,
-            lfh_method,
-            _lfh_time,
-            _lfh_date,
-            lfh_crc,
-            lfh_comp_size,
-            lfh_uncomp_size,
-            lfh_fname_len,
-            lfh_extra_len,
-        ) = struct.unpack_from("<4sHHHHHIIIHH", raw_bytes, cursor)
-        if lfh_sig != b"PK\x03\x04":
-            raise ValueError(
-                f"wheel archive: invalid local file header magic on {info.filename!r}"
-            )
-        if (lfh_flags & 0x08) != 0 or (info.flag_bits & 0x08) != 0:
-            raise ValueError(
-                f"wheel archive: streaming data descriptor flag forbidden on {info.filename!r}"
-            )
-        if 0xFFFFFFFF in (lfh_comp_size, lfh_uncomp_size):
-            raise ValueError(
-                f"wheel archive: Zip64 local header size sentinel forbidden on {info.filename!r}"
-            )
-        fname_start = cursor + 30
-        fname_end = fname_start + lfh_fname_len
-        data_start = fname_end + lfh_extra_len
-        next_cursor = data_start + info.compress_size
-        if next_cursor > cd_offset:
-            raise ValueError(
-                f"wheel archive: local entry span overflows central directory on {info.filename!r}"
-            )
-        if raw_bytes[fname_start:fname_end] != info.filename.encode("utf-8"):
-            raise ValueError(
-                f"wheel archive: local header filename mismatch against central directory on {info.filename!r}"
-            )
-        if (
-            lfh_method != info.compress_type
-            or lfh_comp_size != info.compress_size
-            or lfh_uncomp_size != info.file_size
-            or lfh_crc != info.CRC
-        ):
-            raise ValueError(
-                f"wheel archive: local header metadata mismatch against central directory on {info.filename!r}"
-            )
-        cursor = next_cursor
-
+        cursor = _verify_local_zip_entry(raw_bytes, cursor, cd_offset, info)
     if cursor != cd_offset:
-        raise ValueError(
-            "wheel archive: unreferenced trailing gap between local entries and central directory"
-        )
-
-    cd_cursor = cd_offset
-    cd_end = cd_offset + cd_size
+        raise ValueError("wheel archive: unreferenced trailing gap between local entries and central directory")
+    cd_cursor, cd_end = cd_offset, cd_offset + cd_size
     for _ in range(cd_count):
         if cd_cursor + 46 > cd_end or raw_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
             raise ValueError("wheel archive: corrupt central directory header")
-        cd_fname_len, cd_extra_len, cd_comment_len = struct.unpack_from(
-            "<HHH", raw_bytes, cd_cursor + 28
-        )
+        cd_fname_len, cd_extra_len, cd_comment_len = struct.unpack_from("<HHH", raw_bytes, cd_cursor + 28)
         cd_cursor += 46 + cd_fname_len + cd_extra_len + cd_comment_len
     if cd_cursor != cd_end:
         raise ValueError("wheel archive: non-contiguous central directory byte span")

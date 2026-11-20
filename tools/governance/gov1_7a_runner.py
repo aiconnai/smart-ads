@@ -17,11 +17,12 @@ from types import MappingProxyType
 from typing import Any, Final, Protocol, cast, runtime_checkable
 import unicodedata
 
+from tools.governance import p1
 from tools.governance.decomposition_scope import run_git_offline
 from tools.governance.gov1_7a_negative import (
     _KEY_REGISTRY_SCHEMA, _SHARED_RUNTIME_16_FIELDS, _exact_str, _hex40_str, _key_id_str,
-    _opaque_ref_str, _sha256_str, _strict_str, _utc_sec_micros, _validate_resource_limits_dict,
-    _validate_runtime_readback_dict, _verify_p1_integrity,
+    _non_empty_nfc_str, _opaque_ref_str, _sha256_str, _strict_str, _utc_sec_micros,
+    _validate_resource_limits_dict, _validate_runtime_readback_dict, _verify_p1_integrity,
 )
 from tools.governance.gov1_7a_replay_helpers import _parse_iso_date, validate_resource_ref_str
 from tools.governance.gov1_sandbox import verify_sealed_sandbox_profile
@@ -284,12 +285,20 @@ def _verify_oci_readback_matches_profile(
 def run_7a_hermetic_execution(
     *, wheel_bytes: bytes, corpus_bytes: bytes, sandbox_profile: dict[str, Any],
     seccomp_profile: dict[str, Any], resolved_d26_blobs: Mapping[str, bytes],
-    supervisor: SealedOciSupervisorPort | None = None,
+    sandbox_pubkey_raw32: bytes, supervisor: SealedOciSupervisorPort | None = None,
 ) -> dict[str, Any]:
     """Execute 7A corpus in a verified Linux OCI sandbox with injected `0dbdfede` reducer, or fail-closed `BLOCKED`."""
     if type(wheel_bytes) is not bytes or len(wheel_bytes) == 0 or type(corpus_bytes) is not bytes or len(corpus_bytes) == 0:
         raise ValueError("wheel_bytes and corpus_bytes: expected non-empty bytes")
-    sbx_payload = verify_sealed_sandbox_profile(sandbox_profile, seccomp_profile=seccomp_profile)["payload"]
+    if type(sandbox_pubkey_raw32) is not bytes or len(sandbox_pubkey_raw32) != 32:
+        raise ValueError("sandbox_pubkey_raw32: expected 32-byte raw Ed25519 public key")
+    sbx_res = verify_sealed_sandbox_profile(sandbox_profile, seccomp_profile=seccomp_profile)
+    if sbx_res["mode"] != "envelope" or not isinstance(sandbox_profile, Mapping):
+        raise ValueError("sandbox_profile: expected signed sealed_sandbox_profile/v1 P1 envelope")
+    sbx_env = dict(sandbox_profile)
+    _verify_p1_integrity(sbx_env, label="sealed_sandbox_profile", require_signed=True)
+    p1.verify_envelope(sbx_env, "SMART-ADS:SANDBOX-PROFILE:V1\n", sandbox_pubkey_raw32)
+    sbx_payload = sbx_res["payload"]
     verified_d26 = _verify_d26_blob_map(resolved_d26_blobs)
     if supervisor is None or not isinstance(supervisor, SealedOciSupervisorPort):
         return {"status": "BLOCKED", "reason": "sealed Linux amd64 OCI cgroup-v2 supervisor is unavailable"}
@@ -454,12 +463,7 @@ def verify_expected_resource_inventory_envelope(envelope: Mapping[str, Any], *, 
 
 
 _CAP_STATES: Final[frozenset[str]] = frozenset({"declared", "fixture_certified", "live_certified", "unavailable", "deferred", "invalidated", "revalidation_pending"})
-
-
-def _non_empty_nfc_str(value: object, label: str) -> str:
-    if type(value) is not str or not value.strip() or "\x00" in value or any(0xD800 <= ord(c) <= 0xDFFF for c in value) or not unicodedata.is_normalized("NFC", value):
-        raise ValueError(f"{label}: expected non-empty non-blank NFC string without NUL/surrogates")
-    return value
+_SCHEMA_ID_RE: Final[re.Pattern[str]] = re.compile(r"\Asmart_ads/[a-z0-9_]+/v[1-9][0-9]*\Z")
 
 
 def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None:
@@ -468,11 +472,11 @@ def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None
     seen_b, seen_a, b_keys = set(), set(), []
     for raw_b in bnds:
         b = dict(raw_b) if isinstance(raw_b, Mapping) else {}
-        exact_fields(b, {"binding_ref", "account_ref", "transport_provider_ref", "ad_platform_ref", "currency", "driver_id"}, "registry_binding")
-        br = _opaque_ref_str(b["binding_ref"], "b", expected_prefix="binding")
-        ar = _opaque_ref_str(b["account_ref"], "a", expected_prefix="account")
-        _opaque_ref_str(b["transport_provider_ref"], "p", expected_prefix="provider")
-        drv_id = _non_empty_nfc_str(b["driver_id"], "driver_id")
+        exact_fields(b, {"binding_ref", "account_ref", "transport_provider_ref", "ad_platform_ref", "currency", "driver_id"}, "private_registry_snapshot.binding")
+        br = _opaque_ref_str(b["binding_ref"], "private_registry_snapshot.binding_ref", expected_prefix="binding")
+        ar = _opaque_ref_str(b["account_ref"], "private_registry_snapshot.account_ref", expected_prefix="account")
+        _opaque_ref_str(b["transport_provider_ref"], "private_registry_snapshot.transport_provider_ref", expected_prefix="provider")
+        drv_id = _non_empty_nfc_str(b["driver_id"], "private_registry_snapshot.driver_id")
         if type(b["ad_platform_ref"]) is not str or b["ad_platform_ref"] != "meta" or type(b["currency"]) is not str or b["currency"] != "BRL" or any(ch.isspace() for ch in drv_id) or br in seen_b or ar in seen_a:
             raise ValueError("private_registry_snapshot.bindings: invalid field or duplicate binding_ref/account_ref")
         seen_b.add(br)
@@ -481,11 +485,11 @@ def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None
     s_keys: list[bytes] = []
     for raw_s in scopes:
         s = dict(raw_s) if isinstance(raw_s, Mapping) else {}
-        exact_fields(s, {"front_ref", "profile_ref", "binding_ref", "resource_scope_ref"}, "authorized_scope")
-        fr = _opaque_ref_str(s["front_ref"], "f", expected_prefix="front")
-        pr = _opaque_ref_str(s["profile_ref"], "pr", expected_prefix="profile")
-        sbr = _opaque_ref_str(s["binding_ref"], "b", expected_prefix="binding")
-        sr = _opaque_ref_str(s["resource_scope_ref"], "s", expected_prefix="scope")
+        exact_fields(s, {"front_ref", "profile_ref", "binding_ref", "resource_scope_ref"}, "private_registry_snapshot.authorized_scope")
+        fr = _opaque_ref_str(s["front_ref"], "private_registry_snapshot.front_ref", expected_prefix="front")
+        pr = _opaque_ref_str(s["profile_ref"], "private_registry_snapshot.profile_ref", expected_prefix="profile")
+        sbr = _opaque_ref_str(s["binding_ref"], "private_registry_snapshot.scope.binding_ref", expected_prefix="binding")
+        sr = _opaque_ref_str(s["resource_scope_ref"], "private_registry_snapshot.resource_scope_ref", expected_prefix="scope")
         sk = canonicalize([fr, pr, sbr, sr])
         if sbr not in seen_b or sk in s_keys:
             raise ValueError("private_registry_snapshot.authorized_scopes: unknown binding_ref or duplicate scope")
@@ -500,10 +504,10 @@ def validate_private_registry_snapshot_payload(snap: Mapping[str, Any]) -> None:
     exact_fields(d, core | ({"$schema", "integrity"} & set(d)), "private_registry_snapshot")
     if "$schema" in d:
         _exact_str(d["$schema"], PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, "private_registry_snapshot.$schema")
-    if type(d["snapshot_id"]) is not str or re.fullmatch(r"\Aregistry-snapshot:[A-Za-z0-9._:-]+\Z", d["snapshot_id"]) is None or type(d["domain_separator"]) is not str or d["domain_separator"] != "0x00" or _utc_sec_micros(d["issued_at_utc"], "issued") >= _utc_sec_micros(d["valid_until_utc"], "until"):
+    if type(d["snapshot_id"]) is not str or re.fullmatch(r"\Aregistry-snapshot:[A-Za-z0-9._:-]+\Z", d["snapshot_id"]) is None or type(d["domain_separator"]) is not str or d["domain_separator"] != "0x00" or _utc_sec_micros(d["issued_at_utc"], "private_registry_snapshot.issued_at_utc") >= _utc_sec_micros(d["valid_until_utc"], "private_registry_snapshot.valid_until_utc"):
         raise ValueError("private_registry_snapshot: invalid snapshot_id, domain_separator, or validity")
-    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(d["key_identity"], "key", expected_prefix="key"), "resource_ref_mapping_version": _non_empty_nfc_str(d["resource_ref_mapping_version"], "ver"), "tenant_ref": _opaque_ref_str(d["tenant_ref"], "tenant", expected_prefix="tenant")})
-    if _sha256_str(d["resource_mapping_contract_digest"], "rmc_digest") != "sha256:" + hashlib.sha256(rmc_pre).hexdigest():
+    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(d["key_identity"], "private_registry_snapshot.key_identity", expected_prefix="key"), "resource_ref_mapping_version": _non_empty_nfc_str(d["resource_ref_mapping_version"], "private_registry_snapshot.resource_ref_mapping_version"), "tenant_ref": _opaque_ref_str(d["tenant_ref"], "private_registry_snapshot.tenant_ref", expected_prefix="tenant")})
+    if _sha256_str(d["resource_mapping_contract_digest"], "private_registry_snapshot.resource_mapping_contract_digest") != "sha256:" + hashlib.sha256(rmc_pre).hexdigest():
         raise ValueError("private_registry_snapshot: resource_mapping_contract_digest mismatch")
     _validate_snapshot_bindings_and_scopes(d["bindings"], d["authorized_scopes"])
     if type(d["capabilities"]) is not list or not d["capabilities"]:
@@ -511,15 +515,19 @@ def validate_private_registry_snapshot_payload(snap: Mapping[str, Any]) -> None:
     c_keys: list[bytes] = []
     for raw_c in d["capabilities"]:
         c = dict(raw_c) if isinstance(raw_c, Mapping) else {}
-        exact_fields(c, {"capability_ref", "capability_semantic_version", "driver_id", "driver_contract_locator", "driver_contract_digest", "resource_scope_ref", "state", "required_metrics"}, "capability_entry")
-        cr, cs = _opaque_ref_str(c["capability_ref"], "cap", expected_prefix="cap"), _opaque_ref_str(c["resource_scope_ref"], "scope", expected_prefix="scope")
-        _non_empty_nfc_str(c["capability_semantic_version"], "ver")
-        cd_id = _non_empty_nfc_str(c["driver_id"], "drv")
-        validate_locator(dict(c["driver_contract_locator"]) if isinstance(c["driver_contract_locator"], Mapping) else {})
+        exact_fields(c, {"capability_ref", "capability_semantic_version", "driver_id", "driver_contract_locator", "driver_contract_digest", "resource_scope_ref", "state", "required_metrics"}, "private_registry_snapshot.capability_entry")
+        cr, cs = _opaque_ref_str(c["capability_ref"], "private_registry_snapshot.capability_ref", expected_prefix="cap"), _opaque_ref_str(c["resource_scope_ref"], "private_registry_snapshot.resource_scope_ref", expected_prefix="scope")
+        _non_empty_nfc_str(c["capability_semantic_version"], "private_registry_snapshot.capability_semantic_version")
+        cd_id = _non_empty_nfc_str(c["driver_id"], "private_registry_snapshot.driver_id")
+        loc = dict(c["driver_contract_locator"]) if isinstance(c["driver_contract_locator"], Mapping) else {}
+        try:
+            validate_locator(loc)
+        except ValueError as exc:
+            raise ValueError(f"private_registry_snapshot.capabilities.driver_contract_locator: {exc}") from exc
         rm = c["required_metrics"]
-        if any(ch.isspace() for ch in cd_id) or _sha256_str(c["driver_contract_digest"], "dcd") != c["driver_contract_locator"]["content_digest"] or type(c["state"]) is not str or c["state"] not in _CAP_STATES or type(rm) is not list or not rm:
-            raise ValueError("private_registry_snapshot.capabilities: invalid capability entry field")
-        ms = [_opaque_ref_str(m, "m", expected_prefix="metric") for m in rm]
+        if _SCHEMA_ID_RE.fullmatch(loc["artifact_type"]) is None or any(ch.isspace() for ch in cd_id) or _sha256_str(c["driver_contract_digest"], "private_registry_snapshot.driver_contract_digest") != loc["content_digest"] or type(c["state"]) is not str or c["state"] not in _CAP_STATES or type(rm) is not list or not rm:
+            raise ValueError("private_registry_snapshot.capabilities: invalid capability entry or driver_contract_locator.artifact_type")
+        ms = [_opaque_ref_str(m, "private_registry_snapshot.metric", expected_prefix="metric") for m in rm]
         ck = canonicalize([cr, cs])
         if len(set(ms)) != len(ms) or [m.encode("utf-8") for m in ms] != sorted(m.encode("utf-8") for m in ms) or ck in c_keys:
             raise ValueError("private_registry_snapshot.capabilities: duplicate or unsorted capability/metrics")

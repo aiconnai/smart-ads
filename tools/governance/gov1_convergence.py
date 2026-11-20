@@ -273,6 +273,8 @@ class Pr3SevenAConstituentVerifier(Protocol):
     admission of `smart_ads/gov1_convergence_record/v1` fail-closed until PR 3 lands.
     """
 
+    __slots__ = ()
+
     def verify_7a_constituents(
         self,
         *,
@@ -879,10 +881,7 @@ def _validate_pr3_outcome_fields(
 
 
 def _require_exact_seven_a_verifier(pr3_verifier: object, cert7a: Any) -> Any:
-    if type(pr3_verifier) is not cert7a.SevenAConstituentVerifier or any(
-        attr in getattr(pr3_verifier, "__dict__", {})
-        for attr in ("verify_7a_constituents", "verify_bound_preflight_inputs")
-    ):
+    if type(pr3_verifier) is not cert7a.SevenAConstituentVerifier or hasattr(pr3_verifier, "__dict__"):
         raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be exact unshadowed SevenAConstituentVerifier")
     return pr3_verifier
 

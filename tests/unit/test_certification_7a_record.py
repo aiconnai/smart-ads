@@ -73,7 +73,7 @@ def _build_deterministic_wheel_bytes(
     custom_record_size: tuple[str, str] | None = None,
     quote_record: bool = False,
     custom_record_raw: bytes | None = None,
-    patch_cd_flag_bits: int = 0,
+    patch_flag_bits: tuple[int, int] = (0, 0),
     compress_type: int = zipfile.ZIP_DEFLATED,
 ) -> bytes:
     members: dict[str, bytes] = {
@@ -104,10 +104,10 @@ def _build_deterministic_wheel_bytes(
             info.external_attr = 0o100644 << 16
             zf.writestr(info, raw)
     raw_whl = bytearray(buf.getvalue())
-    if patch_cd_flag_bits:
+    if patch_flag_bits != (0, 0):
         cd_off = int.from_bytes(raw_whl[-6:-2], "little")
-        cur_flags = int.from_bytes(raw_whl[cd_off + 8 : cd_off + 10], "little")
-        raw_whl[cd_off + 8 : cd_off + 10] = (cur_flags | patch_cd_flag_bits).to_bytes(2, "little")
+        raw_whl[6:8] = (int.from_bytes(raw_whl[6:8], "little") | patch_flag_bits[0]).to_bytes(2, "little")
+        raw_whl[cd_off + 8 : cd_off + 10] = (int.from_bytes(raw_whl[cd_off + 8 : cd_off + 10], "little") | patch_flag_bits[1]).to_bytes(2, "little")
     return bytes(raw_whl)
 
 
@@ -538,7 +538,7 @@ def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None
         _verify_world(build_valid_7a_world(wheel_bytes=no_rec_whl))
 
     # Forbidden ZIP bitflags, traversal/directory paths, or boundary RECORD/module mismatch
-    for bad_kw in ({"patch_cd_flag_bits": 0x01}, {"patch_cd_flag_bits": 0x08}, {"overrides": {"../evil.py": b"x"}}, {"overrides": {"smart_ads/dir/": b""}}):
+    for bad_kw in ({"patch_flag_bits": (0x01, 0x01)}, {"patch_flag_bits": (0x40, 0x40)}, {"patch_flag_bits": (0x00, 0x0800)}, {"patch_flag_bits": (0x02, 0x02), "compress_type": zipfile.ZIP_STORED}, {"patch_flag_bits": (0x08, 0x08)}, {"overrides": {"../evil.py": b"x"}}, {"overrides": {"smart_ads/dir/": b""}}):
         bad_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, **bad_kw)  # type: ignore[arg-type]
         with pytest.raises(ClosedValidationError, match="wheel"):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_whl))

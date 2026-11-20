@@ -113,6 +113,12 @@ def _strict_str(value: object, label: str) -> str:
     return value
 
 
+def _non_empty_nfc_str(value: object, label: str) -> str:
+    if type(value) is not str or not value.strip() or "\x00" in value or any(0xD800 <= ord(c) <= 0xDFFF for c in value) or not unicodedata.is_normalized("NFC", value):
+        raise ValueError(f"{label}: expected non-empty non-blank NFC string without NUL/surrogates")
+    return value
+
+
 def _exact_str(value: object, expected: str, label: str) -> str:
     if type(value) is not str or value != expected:
         raise ValueError(f"{label}: expected exact string {expected!r}")

@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from tools.governance.gov1_7a_negative import (
-    _EPOCH_DATE, _exact_str, _opaque_ref_str, _sha256_str, _strict_int, _strict_str, _utc_sec_micros,
+    _EPOCH_DATE, _exact_str, _non_empty_nfc_str, _opaque_ref_str, _sha256_str, _strict_int, _strict_str, _utc_sec_micros,
 )
 from tools.governance.jcs import canonicalize
 from tools.governance.locator import exact_fields, json_digest, make_locator
@@ -149,7 +149,7 @@ def derive_resource_ref(
     if type(secret_bytes) is not bytes or len(secret_bytes) < 32:
         raise ValueError("secret_bytes: expected >= 32 bytes")
     _exact_str(domain_separator, "0x00", "domain_separator")
-    parts = [_strict_str(mapping_version, "v"), _strict_str(ad_platform_ref, "p"), _strict_str(resource_level, "l"), _strict_str(raw_provider_id, "id")]
+    parts = [_non_empty_nfc_str(mapping_version, "mapping_version"), _non_empty_nfc_str(ad_platform_ref, "ad_platform_ref"), _non_empty_nfc_str(resource_level, "resource_level"), _non_empty_nfc_str(raw_provider_id, "raw_provider_id")]
     mac = hmac.new(secret_bytes, b"\x00".join(p.encode("utf-8") for p in parts), hashlib.sha256).digest()
     return validate_resource_ref_str("resource:" + base64.b32encode(mac).decode("ascii").rstrip("=").lower())
 

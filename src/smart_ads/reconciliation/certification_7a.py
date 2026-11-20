@@ -101,7 +101,7 @@ def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int,
     fn_len, ex_len, cm_len = _u16(wheel_bytes, cd_cursor + 28), _u16(wheel_bytes, cd_cursor + 30), _u16(wheel_bytes, cd_cursor + 32)
     ext_attr, lfh_off = _u32(wheel_bytes, cd_cursor + 38), _u32(wheel_bytes, cd_cursor + 42)
     next_cd, unix_type = cd_cursor + 46 + fn_len + ex_len + cm_len, (ext_attr >> 16) & 0o170000
-    if next_cd > cd_end or (cd_flags & 0x09) != 0 or cd_method not in (0, 8) or 0xFFFFFFFF in (cd_comp, cd_uncomp, lfh_off) or unix_type not in (0, 0o100000):
+    if next_cd > cd_end or cd_method not in (0, 8) or (cd_flags & ~0x0806) != 0 or (cd_method == 0 and (cd_flags & 0x0006) != 0) or 0xFFFFFFFF in (cd_comp, cd_uncomp, lfh_off) or unix_type not in (0, 0o100000):
         raise ClosedValidationError("wheel_bytes: forbidden ZIP flags, compression method, Zip64 sentinel, or special mode")
     if cd_uncomp > max_remaining_uncomp:
         raise ClosedValidationError("wheel_bytes: total archive uncompressed size exceeds 32 MiB ceiling")
@@ -111,7 +111,7 @@ def _parse_cd_entry_and_extract(wheel_bytes: bytes, cd_cursor: int, cd_end: int,
         raise ClosedValidationError(f"wheel_bytes: invalid local file header for {name!r}")
     lfh_fn, lfh_ex = _u16(wheel_bytes, lfh_off + 26), _u16(wheel_bytes, lfh_off + 28)
     data_off, lfh_end = lfh_off + 30 + lfh_fn + lfh_ex, lfh_off + 30 + lfh_fn + lfh_ex + cd_comp
-    if ((_u16(wheel_bytes, lfh_off + 6) & 0x09) != 0 or lfh_end > cd_offset or (_u16(wheel_bytes, lfh_off + 8), _u32(wheel_bytes, lfh_off + 14), _u32(wheel_bytes, lfh_off + 18), _u32(wheel_bytes, lfh_off + 22)) != (cd_method, cd_crc, cd_comp, cd_uncomp) or wheel_bytes[lfh_off + 30 : lfh_off + 30 + lfh_fn] != raw_name):
+    if (_u16(wheel_bytes, lfh_off + 6) != cd_flags or lfh_end > cd_offset or (_u16(wheel_bytes, lfh_off + 8), _u32(wheel_bytes, lfh_off + 14), _u32(wheel_bytes, lfh_off + 18), _u32(wheel_bytes, lfh_off + 22)) != (cd_method, cd_crc, cd_comp, cd_uncomp) or wheel_bytes[lfh_off + 30 : lfh_off + 30 + lfh_fn] != raw_name):
         raise ClosedValidationError(f"wheel_bytes: local header mismatch or overflow on {name!r}")
     raw = _decompress_wheel_member(wheel_bytes[data_off:lfh_end], method=cd_method, uncomp_size=cd_uncomp, exp_crc=cd_crc, name=name)
     return name, raw, (lfh_off, lfh_end), next_cd

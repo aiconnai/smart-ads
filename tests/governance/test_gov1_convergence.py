@@ -67,6 +67,7 @@ from tools.governance.decomposition_runtime import (
 from tools.governance.decomposition_scope import run_git_offline
 import tools.governance.gov1_7a_certification as gov1_7a_certification
 import tools.governance.gov1_7a_negative as gov1_7a_negative
+import tools.governance.gov1_7a_replay_helpers as gov1_7a_replay_helpers
 import tools.governance.gov1_7a_runner as gov1_7a_runner
 import tools.governance.gov1_convergence as gov1_convergence
 from tools.governance.gov1_d4_helpers import Gov1InstallationPins, SnapshotStore
@@ -630,6 +631,38 @@ def _build_world_cert7a_common(
         "mapping_rules_digest": compute_mapping_rules_digest([prov_map[k][1] for k in MAPPING_ARTIFACT_PATHS], reg_state.driver_contract.metric_source_mappings),
         "fixture_evidence": ev_dict,
     }
+
+
+def _build_padded_v1_d4_conv_and_verifier(
+    world: Gov1D4World, baseline: Mapping[str, Any], dest_dir: Path
+) -> tuple[dict[str, Any], gov1_convergence.Gov1AdmissionVerifier, dict[str, bytes]]:
+    corpus_doc = loads_strict_json(baseline["corpus_bytes"])
+    sec = bytes.fromhex(corpus_doc["tenant_hmac_key_hex"])
+    corpus_v1 = {**copy.deepcopy(corpus_doc), "verified_campaign_pairs": [{"raw_campaign_id": p["raw_campaign_id"], "resource_ref": gov1_7a_replay_helpers.derive_resource_ref(secret_bytes=sec, mapping_version=" v1 ", raw_provider_id=p["raw_campaign_id"])} for p in corpus_doc["verified_campaign_pairs"]]}
+    corpus_v1_bytes = canonicalize(corpus_v1)
+    git_v1 = {**dict(baseline["git_blobs"]), CORPUS_GIT_PATH[1]: corpus_v1_bytes}
+    cg_u = gov1_7a_certification.build_git_artifact_provenance_envelope(repository="aiconnai/smart-ads", commit_sha=baseline["snapshot"].commit_sha, path=CORPUS_GIT_PATH[1], raw_bytes=corpus_v1_bytes, resolved_at_utc="2026-09-07T10:00:04Z", registry_locator=world.registry_loc, signer_key_id=world.keys["git_provenance_verifier"][2])
+    cg_s = p1.sign_envelope(cg_u, world.profiles[gov1_7a_runner.GIT_ARTIFACT_PROVENANCE_SCHEMA]["domain_prefix"], world.keys["git_provenance_verifier"][0])
+    prov_v1 = {**world.prov_map, CORPUS_GIT_PATH: (ArtifactLocator.from_dict(world.store.put(cg_s)), GitArtifactProvenance.from_dict(cg_s, require_signed=True))}
+    snap_d = PrivateRegistrySnapshot("registry-snapshot:2026-09-07-pad-v1", "tenant:ibvi", ISSUED_AT_UTC, VALID_UNTIL_UTC, " v1 ", "key:7a-fixture-hmac-v1", world.reg_state.snapshot.bindings, world.reg_state.snapshot.authorized_scopes, (DriverCapabilityEntry("cap:campaign-basic-v1", " 1.0.0 ", "pipeboard_hosted", world.reg_state.driver_contract_locator, world.reg_state.driver_contract_locator.content_digest, "scope:campaigns-active", "declared", ("metric:clicks_v1", "metric:impressions_v1", "metric:spend_v1")),)).to_dict()
+    snap_d["integrity"] = {"key_id": world.keys["registry_publisher"][2], "key_registry_snapshot_locator": copy.deepcopy(world.registry_loc)}
+    snap_s = p1.sign_envelope(snap_d, world.profiles[gov1_7a_runner.PRIVATE_REGISTRY_SNAPSHOT_SCHEMA]["domain_prefix"], world.keys["registry_publisher"][0])
+    snap_loc = ArtifactLocator.from_dict(world.store.put(snap_s))
+    reg_v1 = ResolvedRegistryState(snap_loc, PrivateRegistrySnapshot.from_dict(snap_s, require_signed=True), world.reg_state.driver_contract_locator, world.reg_state.driver_contract)
+    refs_v1 = sorted(p["resource_ref"] for p in corpus_v1["verified_campaign_pairs"])
+    inv_u = gov1_7a_certification.build_expected_resource_inventory_envelope(inventory_id="inventory:7a-2026-09-06-pad", registry_snapshot_locator=snap_loc.to_dict(), tenant_ref="tenant:ibvi", binding_ref="binding:meta-primary", account_ref="account:ibvi-01", resource_scope_ref="scope:campaigns-active", date_range={"start_date": "2026-09-06", "end_date": "2026-09-06", "inclusive": True}, expected_resources=[ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", r, "campaign", "2026-09-06").to_dict() for r in refs_v1], registry_locator=world.registry_loc, signer_key_id=world.keys["private_registry_publisher"][2])
+    inv_s = p1.sign_envelope(inv_u, world.profiles[gov1_7a_runner.EXPECTED_RESOURCE_INVENTORY_SCHEMA]["domain_prefix"], world.keys["private_registry_publisher"][0])
+    inv_v1 = (ArtifactLocator.from_dict(world.store.put(inv_s)), ExpectedResourceInventory.from_dict(inv_s, require_signed=True))
+    common_v1 = _build_world_cert7a_common({**baseline, "corpus_bytes": corpus_v1_bytes}, world.sandbox_loc, {k: world.sandbox_env[k] for k in world.sandbox_env if k not in {"$schema", "integrity"}}, reg_v1, prov_v1, inv_v1)
+    c_u = gov1_7a_certification.build_certification_7a_record_envelope(**common_v1, sealed_sandbox_profile_locator=world.sandbox_loc, wheel_build_provenance_locator=world.prov_loc, wheel_boundary_report_locator=world.boundary_loc, negative_security_test_report_locator=world.neg_loc, registry_locator=world.registry_loc, signer_key_id=world.keys["independent_7a_verifier"][2])
+    c_loc = world.store.put(p1.sign_envelope(c_u, world.profiles[gov1_convergence.CERTIFICATION_7A_SCHEMA]["domain_prefix"], world.keys["independent_7a_verifier"][0]))
+    pr3_v1 = gov1_7a_certification.SevenAConstituentVerifier(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=corpus_v1_bytes, stripped_provenance_payload=gov1_7a_negative.extract_provenance_payload(world.prov_env), resolved_git_blobs=git_v1, resolved_d26_blobs=baseline["d26_blobs"])
+    conv_u = gov1_convergence.build_gov1_convergence_record_envelope(**{**_make_conv_base_kwargs(world, world.keys, baseline), "certification_7a_record_locator": c_loc}, store=world.store, pr3_verifier=pr3_v1)
+    conv_loc = world.store.put(p1.sign_envelope(conv_u, world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], world.keys["gov1_convergence_verifier"][0]))
+    cp_v1 = dest_dir / "corpus_pad_v1.json"
+    cp_v1.write_bytes(corpus_v1_bytes)
+    v_d4 = gov1_convergence.Gov1AdmissionVerifier(world.runtime, world.pins, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=pr3_v1, isolated_probe_runner=world.probe_runner, corpus_path=cp_v1, legacy_blobs_dir=world.legacy_blobs_dir)
+    return conv_loc, v_d4, git_v1
 
 
 def _sign_d4_etapa7_and_7a_envelopes(

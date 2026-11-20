@@ -13,12 +13,9 @@ from typing import Any
 
 import pytest
 
-from smart_ads.contracts.jcs import ArtifactLocator
 from smart_ads.domain.pipeboard_contract import PINNED_LEGACY_COMMIT, PINNED_PIPEBOARD_D26_SPECS
-from smart_ads.domain.registry import ExpectedResourceInventory, PrivateRegistrySnapshot
-from smart_ads.ports.cell_runtime import ResolvedRegistryState
 from smart_ads.reconciliation.certification_7a import CORPUS_GIT_PATH
-from tests.governance.test_gov1_convergence import ALT_RUN_CONTEXT_LOCATOR, BUILD_RUN_ID, CONVERGED_AT_UTC, EXECUTED_AT_UTC, ISSUED_AT_UTC, REPO_ROOT, RUN_CONTEXT_LOCATOR, FakeOsIsolatedWheelProbeRunner, Gov1D4World, MemoryProtectedRuntime, _StructuralFakePr3Verifier, _build_world_cert7a_common, _make_conv_base_kwargs, _recompute_candidate_digest, baseline_artifacts, synthetic_gov1_keys
+from tests.governance.test_gov1_convergence import ALT_RUN_CONTEXT_LOCATOR, BUILD_RUN_ID, CONVERGED_AT_UTC, EXECUTED_AT_UTC, ISSUED_AT_UTC, REPO_ROOT, RUN_CONTEXT_LOCATOR, FakeOsIsolatedWheelProbeRunner, Gov1D4World, MemoryProtectedRuntime, _StructuralFakePr3Verifier, _build_padded_v1_d4_conv_and_verifier, _make_conv_base_kwargs, _recompute_candidate_digest, baseline_artifacts, synthetic_gov1_keys
 from tools.governance import cli, decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_replay_helpers, gov1_7a_runner, gov1_convergence, gov1_mcp, gov1_sandbox, gov1_wheel, p1
 from tools.governance.decomposition_runtime import CHECKPOINT, HEAD, INVENTORY, REGISTRY, STATE, InstallationPins
 from tools.governance.gov1_d4_helpers import Gov1InstallationPins, SnapshotStore, _resolve_d4_pins, _verify_d4_registry_lineage_step, _verify_d4_registry_membership, build_gov1_convergence_record_candidate, verify_gov1_convergence_candidate
@@ -124,18 +121,25 @@ def _assert_candidate_tamper_stops_before_7a(
 def _assert_envelope_tamper_stops_before_7a(monkeypatch: pytest.MonkeyPatch, world: Gov1D4World, keys: dict[str, tuple[Path, bytes, str]], baseline: Mapping[str, Any]) -> None:
     conv_s, _ = _build_signed_conv_in_world(world, keys, baseline)
     pr3_v = world.make_pr3_verifier()
+    assert not hasattr(pr3_v, "__dict__") and isinstance(pr3_v, gov1_convergence.Pr3SevenAConstituentVerifier)
+    for fn_attr in ("verify_7a_constituents", "_verify_loaded_7a_constituents"):
+        with pytest.raises(AttributeError):
+            setattr(pr3_v, fn_attr, lambda **_kw: {})
     ok_res = gov1_convergence.verify_gov1_convergence_record(conv_s, store=world.store, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], corpus_path=world.corpus_path, repo_root=REPO_ROOT, legacy_blobs_dir=world.legacy_blobs_dir, pr3_verifier=pr3_v, probe_runner=world.probe_runner)
     assert ok_res["convergence_status"] == "PASS" and ok_res["authority"] == "none"
     class _SubSevenA(gov1_7a_certification.SevenAConstituentVerifier):
-        def verify_7a_constituents(self, **_kw: Any) -> dict[str, Any]: raise AssertionError("subclass hook called")
-    v_sub = _SubSevenA(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=baseline["corpus_bytes"], stripped_provenance_payload=gov1_7a_negative.extract_provenance_payload(world.prov_env), resolved_git_blobs=baseline["git_blobs"], resolved_d26_blobs=baseline["d26_blobs"])
-    v_sh = world.make_pr3_verifier()
-    setattr(v_sh, "verify_7a_constituents", lambda **_kw: {})
-    for bad_v in (_StructuralFakePr3Verifier(), v_sub, v_sh):
+        __slots__ = ()
+        def _verify_loaded_7a_constituents(self, **_kw: Any) -> dict[str, Any]: raise AssertionError("subclass hook called")
+    prov_p = gov1_7a_negative.extract_provenance_payload(world.prov_env)
+    v_sub = _SubSevenA(wheel_bytes=baseline["wheel_bytes"], corpus_bytes=baseline["corpus_bytes"], stripped_provenance_payload=prov_p, resolved_git_blobs=baseline["git_blobs"], resolved_d26_blobs=baseline["d26_blobs"])
+    assert not hasattr(v_sub, "__dict__")
+    assert gov1_7a_certification.SevenAConstituentVerifier.verify_7a_constituents(v_sub, negative_security_test_report_locator=world.neg_loc, certification_7a_record_locator=world.cert7a_loc, migration_run_context_locator=RUN_CONTEXT_LOCATOR, sealed_sandbox_profile_locator=world.sandbox_loc, wheel_boundary_report_locator=world.boundary_loc, mcp_rejection_matrix_report_locator=world.mcp_loc, build_run_id=BUILD_RUN_ID, source_commit_sha=prov_p["source_commit_sha"], wheel_digest=prov_p["wheel_digest"], build_backend_digest=prov_p["build_backend_digest"], schema_bundle_digest=prov_p["schema_bundle_digest"], converged_at_utc=CONVERGED_AT_UTC, store=world.store)["certified"] is True
+    for bad_v in (_StructuralFakePr3Verifier(), v_sub):
         with pytest.raises(ValueError, match="SevenAConstituentVerifier"):
             gov1_convergence.verify_gov1_convergence_record(conv_s, store=world.store, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT, pr3_verifier=bad_v, probe_runner=world.probe_runner)
         with pytest.raises(ValueError, match="SevenAConstituentVerifier"):
             gov1_convergence.Gov1AdmissionVerifier(world.runtime, world.pins, world.store, world.adr, inventory_locator=world.inventory_loc, pr3_verifier=bad_v, isolated_probe_runner=world.probe_runner, corpus_path=world.corpus_path, legacy_blobs_dir=world.legacy_blobs_dir)
+    assert world.runtime.cas_calls == 0
 
     calls: list[str] = []
     orig_cls_v7a = gov1_7a_certification.SevenAConstituentVerifier.verify_7a_constituents
@@ -204,8 +208,9 @@ def _assert_d4_rejects_malformed_snapshot_before_cas(world: Gov1D4World, keys: d
         c_loc = world.store.put(p1.sign_envelope(cu, world.profiles[gov1_convergence.CERTIFICATION_7A_SCHEMA]["domain_prefix"], keys["independent_7a_verifier"][0]))
         conv_u = gov1_convergence.build_gov1_convergence_record_envelope(**{**_make_conv_base_kwargs(world, keys, baseline), "certification_7a_record_locator": c_loc}, store=world.store, pr3_verifier=fake_pr3)
         return world.store.put(p1.sign_envelope(conv_u, world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], keys["gov1_convergence_verifier"][0]))
-    for bad_mut in ({"bindings": [{**b0, "account_ref": "account:ibvi-00"}, b0]}, {"bindings": [{**b0, "binding_ref": "binding:meta-a"}, b0]}, {"capabilities": [{**c0, "state": []}]}, {"capabilities": [{**c0, "capability_semantic_version": "   "}]}):
-        with pytest.raises(ValueError):
+    bad_unused = {**c0, "capability_ref": "cap:unused-v1", "driver_contract_locator": {**copy.deepcopy(c0["driver_contract_locator"]), "artifact_type": "not-a-schema"}}
+    for bad_mut in ({"bindings": [{**b0, "account_ref": "account:ibvi-00"}, b0]}, {"bindings": [{**b0, "binding_ref": "binding:meta-a"}, b0]}, {"capabilities": [{**c0, "state": []}]}, {"capabilities": [{**c0, "capability_semantic_version": "   "}]}, {"capabilities": [c0, bad_unused]}):
+        with pytest.raises(ValueError, match="private_registry_snapshot"):
             world.make_verifier(pr3_verifier=world.make_pr3_verifier()).verify_artifact(_conv_for_snap(bad_mut), seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
         assert world.runtime.cas_calls == 0
 
@@ -247,19 +252,10 @@ def _assert_d4_passes_only_snapshot_store(world: Gov1D4World, baseline: Mapping[
         mp.setattr(gov1_7a_certification.SevenAConstituentVerifier, "verify_7a_constituents", _spy_v7a)
         res = world.make_verifier(pr3_verifier=pr3_ok).verify_artifact(conv_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)
     assert res["verification_status"] == "VERIFIED" and len(seen_stores) == 1 and world.runtime.cas_calls == 1
-    snap_p = copy.deepcopy(world.store.get(world.cert7a_env["capability"]["registry_snapshot_locator"]))
-    su_p = {**{k: v for k, v in snap_p.items() if k != "integrity"}, "capabilities": [{**snap_p["capabilities"][0], "capability_semantic_version": " 1.0.0 "}], "integrity": {"key_id": world.keys["registry_publisher"][2], "key_registry_snapshot_locator": world.registry_loc}}
-    s_p = p1.sign_envelope(su_p, world.profiles[gov1_7a_runner.PRIVATE_REGISTRY_SNAPSHOT_SCHEMA]["domain_prefix"], world.keys["registry_publisher"][0])
-    s_p_loc = world.store.put(s_p)
-    inv_p_u = {**{k: v for k, v in copy.deepcopy(world.store.get(world.inv_pair[0].to_dict())).items() if k != "integrity"}, "registry_snapshot_locator": s_p_loc, "registry_snapshot_digest": s_p_loc["content_digest"], "integrity": {"key_id": world.keys["private_registry_publisher"][2], "key_registry_snapshot_locator": world.registry_loc}}
-    inv_p_s = p1.sign_envelope(inv_p_u, world.profiles[gov1_7a_runner.EXPECTED_RESOURCE_INVENTORY_SCHEMA]["domain_prefix"], world.keys["private_registry_publisher"][0])
-    pad_reg = ResolvedRegistryState(ArtifactLocator.from_dict(s_p_loc), PrivateRegistrySnapshot.from_dict(s_p, require_signed=True), world.reg_state.driver_contract_locator, world.reg_state.driver_contract)
-    pad_common = _build_world_cert7a_common(baseline, world.sandbox_loc, {k: world.sandbox_env[k] for k in world.sandbox_env if k not in {"$schema", "integrity"}}, pad_reg, world.prov_map, (ArtifactLocator.from_dict(world.store.put(inv_p_s)), ExpectedResourceInventory.from_dict(inv_p_s, require_signed=True)))
-    c_p_u = gov1_7a_certification.build_certification_7a_record_envelope(**pad_common, sealed_sandbox_profile_locator=world.sandbox_loc, wheel_build_provenance_locator=world.prov_loc, wheel_boundary_report_locator=world.boundary_loc, negative_security_test_report_locator=world.neg_loc, registry_locator=world.registry_loc, signer_key_id=world.keys["independent_7a_verifier"][2])
-    c_p_loc = world.store.put(p1.sign_envelope(c_p_u, world.profiles[gov1_convergence.CERTIFICATION_7A_SCHEMA]["domain_prefix"], world.keys["independent_7a_verifier"][0]))
-    conv_p_u = gov1_convergence.build_gov1_convergence_record_envelope(**{**_make_conv_base_kwargs(world, world.keys, baseline), "certification_7a_record_locator": c_p_loc}, store=world.store, pr3_verifier=world.make_pr3_verifier())
-    conv_p_loc = world.store.put(p1.sign_envelope(conv_p_u, world.profiles[gov1_convergence.GOV1_CONVERGENCE_SCHEMA]["domain_prefix"], world.keys["gov1_convergence_verifier"][0]))
-    assert world.make_verifier(pr3_verifier=world.make_pr3_verifier()).verify_artifact(conv_p_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)["verification_status"] == "VERIFIED"
+    conv_p_loc, v_p_d4, git_v1 = _build_padded_v1_d4_conv_and_verifier(world, baseline, world.store.root.parent)
+    with monkeypatch.context() as mp:
+        mp.setattr(gov1_7a_certification, "resolve_7a_smart_ads_git_blobs", lambda _r, _sha: git_v1)
+        assert v_p_d4.verify_artifact(conv_p_loc, seccomp_profile=baseline["seccomp_profile"], wheel_path=baseline["wheel_path"], repo_root=REPO_ROOT)["verification_status"] == "VERIFIED"
 
 
 def test_all_five_d4_probe_entrypoints_require_os_isolated_probe_runner(tmp_path: Path, baseline_artifacts: dict[str, Any], synthetic_gov1_keys: dict[str, tuple[Path, bytes, str]], monkeypatch: pytest.MonkeyPatch) -> None:

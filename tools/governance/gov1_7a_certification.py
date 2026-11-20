@@ -674,6 +674,7 @@ def _freeze_smart_ads_git_blobs(raw_git: Mapping[str, bytes]) -> Mapping[str, by
 
 class SevenAConstituentVerifier(Pr3SevenAConstituentVerifier):
     """Concrete PR 3 implementation of `Pr3SevenAConstituentVerifier` bound to frozen preflight inputs."""
+    __slots__ = ("_wheel_bytes", "_corpus_bytes", "_stripped_provenance_payload", "_resolved_git_blobs", "_resolved_d26_blobs")
 
     def __init__(
         self, *, wheel_bytes: bytes, corpus_bytes: bytes, stripped_provenance_payload: Mapping[str, Any],
@@ -718,8 +719,8 @@ class SevenAConstituentVerifier(Pr3SevenAConstituentVerifier):
         neg_env = _get_verified_store_envelope(store, negative_security_test_report_locator, NEGATIVE_SECURITY_REPORT_SCHEMA, require_signed=True)
         cert_env = _get_verified_store_envelope(store, certification_7a_record_locator, CERTIFICATION_7A_RECORD_SCHEMA, require_signed=True)
         prov_env = _get_verified_store_envelope(store, bound_env["wheel_build_provenance_locator"], WHEEL_BUILD_PROVENANCE_SCHEMA, require_signed=True)
-        return self._verify_loaded_7a_constituents(
-            store=store, sbx_env=sbx_env, prov_env=prov_env, bound_env=bound_env, mcp_env=mcp_env, neg_env=neg_env, cert_env=cert_env,
+        return SevenAConstituentVerifier._verify_loaded_7a_constituents(
+            self, store=store, sbx_env=sbx_env, prov_env=prov_env, bound_env=bound_env, mcp_env=mcp_env, neg_env=neg_env, cert_env=cert_env,
             run_ctx=migration_run_context_locator, sbx_loc=sealed_sandbox_profile_locator, bound_loc=wheel_boundary_report_locator,
             neg_loc=negative_security_test_report_locator, build_run_id=build_run_id, source_commit_sha=source_commit_sha,
             wheel_digest=wheel_digest, build_backend_digest=build_backend_digest, schema_bundle_digest=schema_bundle_digest, converged_at_utc=converged_at_utc,
