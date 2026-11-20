@@ -368,7 +368,7 @@ def _check_resource_case(case_id: str, runs: list[dict[str, Any]], label: str) -
         obs = dict(run["observation"])
         exact_fields(obs, {"ceiling_kind", "errno"}, f"{label}.obs")
         _exact_str(obs["errno"], "ENOSPC", f"{label}.obs.errno")
-        if obs["ceiling_kind"] not in {"bytes", "inodes"}:
+        if type(obs["ceiling_kind"]) is not str or obs["ceiling_kind"] not in {"bytes", "inodes"}:
             raise ValueError(f"{label}.obs.ceiling_kind: invalid {obs['ceiling_kind']!r}")
         b_k = "B_tmpfs_bytes" if obs["ceiling_kind"] == "bytes" else "B_tmpfs_inodes"
         _check_resource_common(run, label=label, breach_key=b_k, seccomp=True, signals=frozenset({"SIGTERM", "SIGKILL"}), cause="tmpfs_enospc")

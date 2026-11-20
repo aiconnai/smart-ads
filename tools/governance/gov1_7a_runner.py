@@ -298,7 +298,7 @@ def run_7a_hermetic_execution(
         checked_limits = _validate_resource_limits_dict(supervisor.readback_effective_resource_limits(), "oci_effective_resource_limits")
         if canonicalize(checked_limits) != canonicalize(sbx_payload["resource_limits"]):
             raise ValueError("oci_effective_resource_limits: canonical byte mismatch against sealed_sandbox_profile/v1")
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
         return {"status": "BLOCKED", "reason": str(exc)}
     pinned_reducer = load_isolated_pinned_meta_reducer(verified_d26)
     exec_out = supervisor.execute_7a_corpus(
@@ -456,6 +456,12 @@ def verify_expected_resource_inventory_envelope(envelope: Mapping[str, Any], *, 
 _CAP_STATES: Final[frozenset[str]] = frozenset({"declared", "fixture_certified", "live_certified", "unavailable", "deferred", "invalidated", "revalidation_pending"})
 
 
+def _non_empty_nfc_str(value: object, label: str) -> str:
+    if type(value) is not str or not value.strip() or "\x00" in value or any(0xD800 <= ord(c) <= 0xDFFF for c in value) or not unicodedata.is_normalized("NFC", value):
+        raise ValueError(f"{label}: expected non-empty non-blank NFC string without NUL/surrogates")
+    return value
+
+
 def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None:
     if type(bnds) is not list or not bnds or type(scopes) is not list or not scopes:
         raise ValueError("private_registry_snapshot: bindings and authorized_scopes must be non-empty lists")
@@ -466,8 +472,8 @@ def _validate_snapshot_bindings_and_scopes(bnds: object, scopes: object) -> None
         br = _opaque_ref_str(b["binding_ref"], "b", expected_prefix="binding")
         ar = _opaque_ref_str(b["account_ref"], "a", expected_prefix="account")
         _opaque_ref_str(b["transport_provider_ref"], "p", expected_prefix="provider")
-        drv_id = _strict_str(b["driver_id"], "driver_id")
-        if b["ad_platform_ref"] != "meta" or b["currency"] != "BRL" or any(ch.isspace() for ch in drv_id) or br in seen_b or ar in seen_a:
+        drv_id = _non_empty_nfc_str(b["driver_id"], "driver_id")
+        if type(b["ad_platform_ref"]) is not str or b["ad_platform_ref"] != "meta" or type(b["currency"]) is not str or b["currency"] != "BRL" or any(ch.isspace() for ch in drv_id) or br in seen_b or ar in seen_a:
             raise ValueError("private_registry_snapshot.bindings: invalid field or duplicate binding_ref/account_ref")
         seen_b.add(br)
         seen_a.add(ar)
@@ -494,9 +500,9 @@ def validate_private_registry_snapshot_payload(snap: Mapping[str, Any]) -> None:
     exact_fields(d, core | ({"$schema", "integrity"} & set(d)), "private_registry_snapshot")
     if "$schema" in d:
         _exact_str(d["$schema"], PRIVATE_REGISTRY_SNAPSHOT_SCHEMA, "private_registry_snapshot.$schema")
-    if re.fullmatch(r"\Aregistry-snapshot:[A-Za-z0-9._:-]+\Z", _strict_str(d["snapshot_id"], "snap_id")) is None or d["domain_separator"] != "0x00" or _utc_sec_micros(d["issued_at_utc"], "issued") >= _utc_sec_micros(d["valid_until_utc"], "until"):
+    if type(d["snapshot_id"]) is not str or re.fullmatch(r"\Aregistry-snapshot:[A-Za-z0-9._:-]+\Z", d["snapshot_id"]) is None or type(d["domain_separator"]) is not str or d["domain_separator"] != "0x00" or _utc_sec_micros(d["issued_at_utc"], "issued") >= _utc_sec_micros(d["valid_until_utc"], "until"):
         raise ValueError("private_registry_snapshot: invalid snapshot_id, domain_separator, or validity")
-    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(d["key_identity"], "key", expected_prefix="key"), "resource_ref_mapping_version": _strict_str(d["resource_ref_mapping_version"], "ver"), "tenant_ref": _opaque_ref_str(d["tenant_ref"], "tenant", expected_prefix="tenant")})
+    rmc_pre = b"SMART-ADS:RESOURCE-MAPPING-CONTRACT:V1\n\x00" + canonicalize({"domain_separator": "0x00", "key_identity": _opaque_ref_str(d["key_identity"], "key", expected_prefix="key"), "resource_ref_mapping_version": _non_empty_nfc_str(d["resource_ref_mapping_version"], "ver"), "tenant_ref": _opaque_ref_str(d["tenant_ref"], "tenant", expected_prefix="tenant")})
     if _sha256_str(d["resource_mapping_contract_digest"], "rmc_digest") != "sha256:" + hashlib.sha256(rmc_pre).hexdigest():
         raise ValueError("private_registry_snapshot: resource_mapping_contract_digest mismatch")
     _validate_snapshot_bindings_and_scopes(d["bindings"], d["authorized_scopes"])
@@ -507,11 +513,11 @@ def validate_private_registry_snapshot_payload(snap: Mapping[str, Any]) -> None:
         c = dict(raw_c) if isinstance(raw_c, Mapping) else {}
         exact_fields(c, {"capability_ref", "capability_semantic_version", "driver_id", "driver_contract_locator", "driver_contract_digest", "resource_scope_ref", "state", "required_metrics"}, "capability_entry")
         cr, cs = _opaque_ref_str(c["capability_ref"], "cap", expected_prefix="cap"), _opaque_ref_str(c["resource_scope_ref"], "scope", expected_prefix="scope")
-        _strict_str(c["capability_semantic_version"], "ver")
-        cd_id = _strict_str(c["driver_id"], "drv")
+        _non_empty_nfc_str(c["capability_semantic_version"], "ver")
+        cd_id = _non_empty_nfc_str(c["driver_id"], "drv")
         validate_locator(dict(c["driver_contract_locator"]) if isinstance(c["driver_contract_locator"], Mapping) else {})
         rm = c["required_metrics"]
-        if any(ch.isspace() for ch in cd_id) or _sha256_str(c["driver_contract_digest"], "dcd") != c["driver_contract_locator"]["content_digest"] or c["state"] not in _CAP_STATES or type(rm) is not list or not rm:
+        if any(ch.isspace() for ch in cd_id) or _sha256_str(c["driver_contract_digest"], "dcd") != c["driver_contract_locator"]["content_digest"] or type(c["state"]) is not str or c["state"] not in _CAP_STATES or type(rm) is not list or not rm:
             raise ValueError("private_registry_snapshot.capabilities: invalid capability entry field")
         ms = [_opaque_ref_str(m, "m", expected_prefix="metric") for m in rm]
         ck = canonicalize([cr, cs])

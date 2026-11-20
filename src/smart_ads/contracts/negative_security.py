@@ -476,7 +476,7 @@ def _validate_single_resource_run(case_id: str, run: NegativeSecurityRun) -> Non
     if case_id == "tmpfs_limit_enforced":
         obs = require_exact_keys(run.observation, {"ceiling_kind", "errno"}, label=f"{lbl}.obs")
         _exact_str(obs["errno"], "ENOSPC", label=f"{lbl}.obs.errno")
-        if obs["ceiling_kind"] not in {"bytes", "inodes"}:
+        if type(obs["ceiling_kind"]) is not str or obs["ceiling_kind"] not in {"bytes", "inodes"}:
             raise ClosedValidationError(f"{lbl}.obs.ceiling_kind: invalid {obs['ceiling_kind']!r}")
         b_key = "B_tmpfs_bytes" if obs["ceiling_kind"] == "bytes" else "B_tmpfs_inodes"
         _require_resource_common(run, label=lbl, breach_key=b_key, seccomp=True, signals=frozenset({"SIGTERM", "SIGKILL"}), cause="tmpfs_enospc")

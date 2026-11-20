@@ -153,7 +153,7 @@ def _validate_7a_case_dict(raw_case: object, label: str) -> dict[str, Any]:
     if rb["seccomp_enforced_before_entry"] is not True or t["supervisor_terminated_cgroup"] is not False or t["cause"] != "clean_exit" or t["exit_code"] != 0 or t["signal"] is not None or t["force_kill_used"] is not False or any(evaluate_breach_predicates(u, t).values()):
         raise ValueError(f"{label}: positive 7A sandbox run violated clean-exit/seccomp/ceiling invariants")
     batch = validate_provider_observation_batch_dict(c["observation_batch"], label=f"{label}.observation_batch")
-    if c["expected_completeness_status"] not in _COMPLETENESS_SET or c["observed_completeness_status"] != c["expected_completeness_status"]:
+    if type(c["expected_completeness_status"]) is not str or c["expected_completeness_status"] not in _COMPLETENESS_SET or c["observed_completeness_status"] != c["expected_completeness_status"]:
         raise ValueError(f"{label}: completeness status invalid or mismatched")
     if c["observed_completeness_status"] == "complete":
         _sha256_str(c["normalized_fact_set_digest"], f"{label}.normalized_fact_set_digest")
@@ -458,7 +458,7 @@ def _verify_stage7_and_wheel_archive_passively(
         sbx_loc, neg_meta = _resolve_store_sandbox_locator_for_candidate(store, sbx_cand_p, explicit_sbx_store_loc), neg_cand_p
     prov_p = extract_provenance_payload(prov_obj)
     ctx_b = canonicalize(raw_payload["migration_run_context_locator"])
-    if not ({raw_payload["wheel_digest"], prov_p["wheel_digest"], bound_payload.get("wheel_digest"), neg_meta.get("wheel_digest")} == {whl_digest} and all(isinstance(x, Mapping) and canonicalize(dict(x)) == ctx_b for x in (prov_p["migration_run_context_locator"], bound_payload.get("migration_run_context_locator"), neg_meta.get("migration_run_context_locator")))):
+    if not (all(type(d) is str and d == whl_digest for d in (raw_payload["wheel_digest"], prov_p["wheel_digest"], bound_payload.get("wheel_digest"), neg_meta.get("wheel_digest"))) and all(isinstance(x, Mapping) and canonicalize(dict(x)) == ctx_b for x in (prov_p["migration_run_context_locator"], bound_payload.get("migration_run_context_locator"), neg_meta.get("migration_run_context_locator")))):
         raise ValueError("certification_7a_record: wheel_digest or migration_run_context_locator mismatch before archive extraction")
     members, rec_entries, rec_digest, mods = _read_and_validate_wheel_archive(wheel_bytes)
     neg_p = _check_passive_boundary_and_negative(raw_payload, bound_payload, sbx_obj, prov_obj, prov_p, neg_obj, wheel_bytes, whl_digest, rec_entries, rec_digest, mods)
@@ -542,7 +542,7 @@ def _replay_all_7a_cases(
     priv_map: Mapping[tuple[str, str], str], cmap: Mapping[str, str], inv_map: Mapping[bytes, dict[str, Any]], ctx: Mapping[str, Any],
 ) -> None:
     c_cases, r_cases = corpus_doc["cases"], checked_common["fixture_evidence"]["cases"]
-    if len(c_cases) != len(r_cases) or len({c.get("admission_id") for c in c_cases if isinstance(c, Mapping)}) != len(c_cases):
+    if len(c_cases) != len(r_cases) or len({c.get("admission_id") for c in c_cases if isinstance(c, Mapping) and type(c.get("admission_id")) is str}) != len(c_cases):
         raise ValueError("corpus.cases: count or duplicate admission_id mismatch")
     for cc_raw, rc in zip(c_cases, r_cases, strict=True):
         cc = dict(cc_raw) if isinstance(cc_raw, Mapping) else {}

@@ -878,6 +878,15 @@ def _validate_pr3_outcome_fields(
     return pr3_outcome
 
 
+def _require_exact_seven_a_verifier(pr3_verifier: object, cert7a: Any) -> Any:
+    if type(pr3_verifier) is not cert7a.SevenAConstituentVerifier or any(
+        attr in getattr(pr3_verifier, "__dict__", {})
+        for attr in ("verify_7a_constituents", "verify_bound_preflight_inputs")
+    ):
+        raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be exact unshadowed SevenAConstituentVerifier")
+    return pr3_verifier
+
+
 def _enforce_pr3_verifier_gate(
     *,
     payload: dict[str, Any],
@@ -893,30 +902,30 @@ def _enforce_pr3_verifier_gate(
         raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier does not satisfy Pr3SevenAConstituentVerifier")
     if not isinstance(store, Store):
         raise ValueError("gov1_convergence_record/v1: fail-closed; Store is required when pr3_verifier is provided")
-    sbx_env = _validate_sandbox_envelope_structure(
-        load_object(store, payload["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA)
-    )
-    neg_env = _validate_negative_security_envelope_structure(
-        load_object(store, payload["negative_security_test_report_locator"], NEGATIVE_SECURITY_SCHEMA)
-    )
-    cert7a_env = _validate_certification_7a_envelope_structure(
-        load_object(store, payload["certification_7a_record_locator"], CERTIFICATION_7A_SCHEMA)
-    )
-    pr3_outcome = pr3_verifier.verify_7a_constituents(
-        negative_security_test_report_locator=copy.deepcopy(payload["negative_security_test_report_locator"]),
-        certification_7a_record_locator=copy.deepcopy(payload["certification_7a_record_locator"]),
-        migration_run_context_locator=copy.deepcopy(payload["migration_run_context_locator"]),
-        sealed_sandbox_profile_locator=copy.deepcopy(payload["sealed_sandbox_profile_locator"]),
-        wheel_boundary_report_locator=copy.deepcopy(payload["wheel_boundary_report_locator"]),
-        mcp_rejection_matrix_report_locator=copy.deepcopy(payload["mcp_rejection_matrix_report_locator"]),
-        build_run_id=payload["build_run_id"],
-        source_commit_sha=payload["source_commit_sha"],
-        wheel_digest=payload["wheel_digest"],
-        build_backend_digest=payload["build_backend_digest"],
-        schema_bundle_digest=payload["schema_bundle_digest"],
-        converged_at_utc=payload["converged_at_utc"],
-        store=store,
-    )
+    sbx_env = _validate_sandbox_envelope_structure(load_object(store, payload["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA))
+    neg_env = _validate_negative_security_envelope_structure(load_object(store, payload["negative_security_test_report_locator"], NEGATIVE_SECURITY_SCHEMA))
+    cert7a_env = _validate_certification_7a_envelope_structure(load_object(store, payload["certification_7a_record_locator"], CERTIFICATION_7A_SCHEMA))
+    cert7a = _cert7a_mod()
+    call_kw = {
+        "negative_security_test_report_locator": copy.deepcopy(payload["negative_security_test_report_locator"]),
+        "certification_7a_record_locator": copy.deepcopy(payload["certification_7a_record_locator"]),
+        "migration_run_context_locator": copy.deepcopy(payload["migration_run_context_locator"]),
+        "sealed_sandbox_profile_locator": copy.deepcopy(payload["sealed_sandbox_profile_locator"]),
+        "wheel_boundary_report_locator": copy.deepcopy(payload["wheel_boundary_report_locator"]),
+        "mcp_rejection_matrix_report_locator": copy.deepcopy(payload["mcp_rejection_matrix_report_locator"]),
+        "build_run_id": payload["build_run_id"],
+        "source_commit_sha": payload["source_commit_sha"],
+        "wheel_digest": payload["wheel_digest"],
+        "build_backend_digest": payload["build_backend_digest"],
+        "schema_bundle_digest": payload["schema_bundle_digest"],
+        "converged_at_utc": payload["converged_at_utc"],
+        "store": store,
+    }
+    if type(pr3_verifier) is cert7a.SevenAConstituentVerifier:
+        _require_exact_seven_a_verifier(pr3_verifier, cert7a)
+        pr3_outcome = cert7a.SevenAConstituentVerifier.verify_7a_constituents(pr3_verifier, **call_kw)
+    else:
+        pr3_outcome = pr3_verifier.verify_7a_constituents(**call_kw)
     return _validate_pr3_outcome_fields(
         pr3_outcome, payload=payload, sbx_env=sbx_env, neg_env=neg_env, cert7a_env=cert7a_env
     )
@@ -981,7 +990,7 @@ def _capture_envelope_pr3_preflight_inputs(
     legacy_repo: Path | None,
     legacy_blobs_dir: Path | None,
     require_external: bool = False,
-) -> tuple[bytes, Mapping[str, bytes], Mapping[str, bytes]] | None:
+) -> tuple[bytes, Mapping[str, bytes], Mapping[str, bytes]]:
     cert7a = _cert7a_mod()
     has_ext = require_external or corpus_path is not None or legacy_repo is not None or legacy_blobs_dir is not None
     if has_ext:
@@ -992,17 +1001,17 @@ def _capture_envelope_pr3_preflight_inputs(
         if corpus_bytes != git_blobs.get(cert7a.CORPUS_GIT_PATH[1]):
             raise ValueError("verify_gov1_convergence_record: corpus_path bytes disagree with Git blob at source_commit_sha")
         d26_blobs = gov1_7a_runner.resolve_pinned_pipeboard_d26_blobs(legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir)
-        if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
-            if wheel_bytes != pr3_verifier._wheel_bytes or corpus_bytes != pr3_verifier._corpus_bytes or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs) or dict(d26_blobs) != dict(pr3_verifier._resolved_d26_blobs):
+        if not require_external:
+            v_checked = _require_exact_seven_a_verifier(pr3_verifier, cert7a)
+            if wheel_bytes != v_checked._wheel_bytes or corpus_bytes != v_checked._corpus_bytes or dict(git_blobs) != dict(v_checked._resolved_git_blobs) or dict(d26_blobs) != dict(v_checked._resolved_d26_blobs):
                 raise ValueError("verify_gov1_convergence_record: preflight inputs diverged from bound SevenAConstituentVerifier")
         return corpus_bytes, git_blobs, d26_blobs
-    if isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
-        git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
-        d26_blobs = gov1_7a_runner._verify_d26_blob_map(pr3_verifier._resolved_d26_blobs)
-        if wheel_bytes != pr3_verifier._wheel_bytes or pr3_verifier._corpus_bytes != git_blobs.get(cert7a.CORPUS_GIT_PATH[1]) or dict(git_blobs) != dict(pr3_verifier._resolved_git_blobs):
-            raise ValueError("verify_gov1_convergence_record: wheel_bytes, corpus_bytes, or git_blobs diverged from bound SevenAConstituentVerifier")
-        return pr3_verifier._corpus_bytes, git_blobs, d26_blobs
-    raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be concrete SevenAConstituentVerifier")
+    v_checked = _require_exact_seven_a_verifier(pr3_verifier, cert7a)
+    git_blobs = cert7a.resolve_7a_smart_ads_git_blobs(repo_dir, source_commit_sha)
+    d26_blobs = gov1_7a_runner._verify_d26_blob_map(v_checked._resolved_d26_blobs)
+    if wheel_bytes != v_checked._wheel_bytes or v_checked._corpus_bytes != git_blobs.get(cert7a.CORPUS_GIT_PATH[1]) or dict(git_blobs) != dict(v_checked._resolved_git_blobs):
+        raise ValueError("verify_gov1_convergence_record: wheel_bytes, corpus_bytes, or git_blobs diverged from bound SevenAConstituentVerifier")
+    return v_checked._corpus_bytes, git_blobs, d26_blobs
 
 
 def _parse_convergence_envelope_header(envelope: object) -> dict[str, Any]:
@@ -1028,8 +1037,7 @@ def _verify_convergence_envelope_core(
     if not cli_auto_pr3:
         if pr3_verifier is None:
             raise ValueError("gov1_convergence_record/v1: fail-closed in Etapa 8; Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent")
-        if not isinstance(pr3_verifier, cert7a.SevenAConstituentVerifier):
-            raise ValueError("gov1_convergence_record/v1: fail-closed; pr3_verifier must be concrete SevenAConstituentVerifier")
+        _require_exact_seven_a_verifier(pr3_verifier, cert7a)
     if not isinstance(store, Store) or not isinstance(seccomp_profile, dict):
         raise ValueError("verify_gov1_convergence_record: Store and seccomp_profile are required")
     _, wheel_bytes = _read_nonempty_regular_file(_require_path(wheel_path, "wheel_path"), "wheel_path")
@@ -1050,13 +1058,12 @@ def _verify_convergence_envelope_core(
             wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
             resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
         )
-        if cli_auto_pr3 else pr3_verifier
+        if cli_auto_pr3 else _require_exact_seven_a_verifier(pr3_verifier, cert7a)
     )
-    if isinstance(active_pr3, cert7a.SevenAConstituentVerifier):
-        active_pr3.verify_bound_preflight_inputs(
-            wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
-            resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
-        )
+    cert7a.SevenAConstituentVerifier.verify_bound_preflight_inputs(
+        active_pr3, wheel_bytes=wheel_bytes, corpus_bytes=preflight[0], stripped_provenance_payload=prov_res["payload"],
+        resolved_git_blobs=preflight[1], resolved_d26_blobs=preflight[2],
+    )
     _enforce_pr3_verifier_gate(payload=validated, store=store, pr3_verifier=active_pr3)
     return {"schema": GOV1_CONVERGENCE_SCHEMA, "convergence_status": "PASS", "authority": "none", "wheel_digest": validated["wheel_digest"], "payload": validated}
 
@@ -1138,8 +1145,8 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             self.inventory_locator: dict[str, Any] | None = copy.deepcopy(inventory_locator)
         else:
             self.inventory_locator = None
-        if pr3_verifier is not None and not isinstance(pr3_verifier, _cert7a_mod().SevenAConstituentVerifier):
-            raise ValueError("admission: D4 pr3_verifier must be a concrete SevenAConstituentVerifier")
+        if pr3_verifier is not None:
+            _require_exact_seven_a_verifier(pr3_verifier, _cert7a_mod())
         self.pr3_verifier = pr3_verifier
         self.isolated_probe_runner = isolated_probe_runner
         self.corpus_path = corpus_path
@@ -1510,8 +1517,7 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
         if self.pr3_verifier is None:
             raise ValueError("gov1_convergence_record/v1: fail-closed in Etapa 8; Pr3SevenAConstituentVerifier (PR 3 / Etapa 10) is absent")
         cert7a = _cert7a_mod()
-        if not isinstance(self.pr3_verifier, cert7a.SevenAConstituentVerifier):
-            raise ValueError("admission: D4 requires concrete SevenAConstituentVerifier")
+        v_pr3 = _require_exact_seven_a_verifier(self.pr3_verifier, cert7a)
         require(isinstance(seccomp_profile, dict), "seccomp_profile is required for gov1_convergence_record/v1 verification")
         whl_file, wheel_bytes = _read_nonempty_regular_file(_require_path(wheel_path, "wheel_path"), "wheel_path")
         corpus_file, corpus_bytes = _read_nonempty_regular_file(_require_path(self.corpus_path, "corpus_path"), "corpus_path")
@@ -1528,11 +1534,11 @@ class Gov1AdmissionVerifier(AdmissionVerifier):
             bound_obj=bound_env, mcp_obj=mcp_env, repo_dir=repo_dir, backend_wheel_dir=backend_wheel_dir,
             site_packages_dir=site_packages_dir, probe_runner=runner,
         )
-        self.pr3_verifier.verify_bound_preflight_inputs(
-            wheel_bytes=wheel_bytes, corpus_bytes=corpus_bytes, stripped_provenance_payload=prov_res["payload"],
+        cert7a.SevenAConstituentVerifier.verify_bound_preflight_inputs(
+            v_pr3, wheel_bytes=wheel_bytes, corpus_bytes=corpus_bytes, stripped_provenance_payload=prov_res["payload"],
             resolved_git_blobs=git_blobs, resolved_d26_blobs=d26_blobs,
         )
-        _enforce_pr3_verifier_gate(payload=validated, store=snap_store, pr3_verifier=self.pr3_verifier)
+        _enforce_pr3_verifier_gate(payload=validated, store=snap_store, pr3_verifier=v_pr3)
         material = {"schema": GOV1_CONVERGENCE_SCHEMA, "convergence_status": "PASS", "wheel_digest": validated["wheel_digest"], "payload": validated}
         reload_fn = lambda: _reload_and_verify_d4_external_7a_inputs(
             wheel_path=whl_file, expected_wheel_bytes=wheel_bytes, corpus_path=corpus_file, expected_corpus_bytes=corpus_bytes,

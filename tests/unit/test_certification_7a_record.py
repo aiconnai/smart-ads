@@ -424,41 +424,42 @@ def test_fixtures_line_budgets_and_pinned_d26_hashes() -> None:
         assert "sha256:" + hashlib.sha256(raw).hexdigest() == exp_sha
     corpus_doc = loads_strict_json(CORPUS_PATH.read_bytes())
     assert corpus_doc["$schema"] == PIPEBOARD_7A_CORPUS_SCHEMA
-    assert [c["case_id"] for c in corpus_doc["cases"]] == [
-        "case_01_complete_two_campaigns", "case_02_failed_http_401",
-        "case_03_partial_date_mismatch", "case_04_partial_non_empty_paging_next",
-    ]
+    assert [c["case_id"] for c in corpus_doc["cases"]] == ["case_01_complete_two_campaigns", "case_02_failed_http_401", "case_03_partial_date_mismatch", "case_04_partial_non_empty_paging_next"]
 
 
 def test_record_schema_p1_roundtrip_and_forbids_generation() -> None:
     w = build_valid_7a_world()
     assert Certification7ARecord.SCHEMA == CERTIFICATION_7A_RECORD_SCHEMA
     assert ADR_P1_DOMAIN_PREFIXES[CERTIFICATION_7A_RECORD_SCHEMA] == "SMART-ADS:CERTIFICATION-7A:V1\n"
-    assert (len(Certification7ARecord.CORE_KEYS), len(Certification7ARecord.KEYS)) == (22, 23)
-    assert "generation" not in Certification7ARecord.KEYS
+    assert (len(Certification7ARecord.CORE_KEYS), len(Certification7ARecord.KEYS)) == (22, 23) and "generation" not in Certification7ARecord.KEYS
     unsigned_rec = replace(w.record, integrity=None)
-    assert Certification7ARecord.from_dict(unsigned_rec.to_dict()) == unsigned_rec
-    assert Certification7ARecord.from_dict(w.record.to_dict(), require_signed=True) == w.record
+    assert Certification7ARecord.from_dict(unsigned_rec.to_dict()) == unsigned_rec and Certification7ARecord.from_dict(w.record.to_dict(), require_signed=True) == w.record
     with pytest.raises(ClosedValidationError):
         Certification7ARecord.from_dict({**unsigned_rec.to_dict(), "generation": 1})
     with pytest.raises(ClosedValidationError):
         Certification7ARecord.from_dict({**w.record.to_dict(), "certified_at_utc": "2026-09-07T10:00:17Z"}, require_signed=True)
     with pytest.raises(ClosedValidationError, match="signed P1 integrity"):
         _verify_world(w, record=unsigned_rec)
-    store_u = dict(w.store)
-    drv_u = {**copy.deepcopy(store_u[w.record.capability.driver_contract_locator]), "integrity": {"key_id": _KEY_ID, "key_registry_snapshot_locator": _KEY_REG_LOC.to_dict()}}
+    store_u, uns_int = dict(w.store), {"key_id": _KEY_ID, "key_registry_snapshot_locator": _KEY_REG_LOC.to_dict()}
+    bound_u = {**copy.deepcopy(store_u[w.record.wheel_boundary_report_locator]), "integrity": copy.deepcopy(uns_int)}
+    bound_u_loc = ArtifactLocator.for_canonical_bytes(bound_u["$schema"], canonicalize_jcs(bound_u))
+    store_u[bound_u_loc] = bound_u
+    with pytest.raises(ClosedValidationError, match="invalid P1 member set"):
+        _verify_world(w, record=_mut_rec(w.record, wheel_boundary_report_locator=bound_u_loc), object_resolver=store_u.__getitem__)
+    drv_u = {**copy.deepcopy(store_u[w.record.capability.driver_contract_locator]), "integrity": copy.deepcopy(uns_int)}
     drv_u_loc = ArtifactLocator.for_canonical_bytes(drv_u["$schema"], canonicalize_jcs(drv_u))
     store_u[drv_u_loc] = drv_u
-    with pytest.raises(ClosedValidationError):
-        _verify_world(w, record=_mut_rec(w.record, capability=replace(w.record.capability, driver_contract_locator=drv_u_loc, driver_contract_digest=drv_u_loc.content_digest), fixture_evidence=replace(w.record.fixture_evidence, cases=tuple(replace(c, source_contract_ref=f"opaque-driver-contract:{drv_u_loc.content_digest}") for c in w.record.fixture_evidence.cases))), object_resolver=store_u.__getitem__)
+    snap_d = {k: v for k, v in copy.deepcopy(store_u[w.record.capability.registry_snapshot_locator]).items() if k != "integrity"}
+    snap_d["capabilities"][0].update({"driver_contract_locator": drv_u_loc.to_dict(), "driver_contract_digest": drv_u_loc.content_digest})
+    snap_u_loc, _ = _put_signed(store_u, snap_d)
+    with pytest.raises(ClosedValidationError, match="invalid P1 member set"):
+        _verify_world(w, record=_mut_rec(w.record, capability=replace(w.record.capability, registry_snapshot_locator=snap_u_loc, driver_contract_locator=drv_u_loc, driver_contract_digest=drv_u_loc.content_digest), fixture_evidence=replace(w.record.fixture_evidence, regression_fixture=RegressionFixtureV1.canonical(snap_u_loc.content_digest), cases=tuple(replace(c, source_contract_ref=f"opaque-driver-contract:{drv_u_loc.content_digest}") for c in w.record.fixture_evidence.cases))), object_resolver=store_u.__getitem__)
 
 
 def test_code_and_mapping_digests_are_invariant_to_resolved_at_and_integrity() -> None:
     _, git_blobs, d26_blobs = _load_d26_and_git_blobs()
     store: dict[ArtifactLocator, dict[str, Any]] = {}
-    reg_state, prov_map = _stage_git_and_registry_envelopes(
-        store, commit_sha=_COMMIT_SHA, git_blobs=git_blobs, d26_blobs=d26_blobs,
-    )
+    reg_state, prov_map = _stage_git_and_registry_envelopes(store, commit_sha=_COMMIT_SHA, git_blobs=git_blobs, d26_blobs=d26_blobs)
     p_signed = [prov_map[k][1] for k in PARSER_ARTIFACT_PATHS]
     p_alt = [replace(p, resolved_at_utc="2026-10-01T00:00:00Z", integrity=None) for p in reversed(p_signed)]
     assert compute_parser_code_digest(p_signed) == compute_parser_code_digest(p_alt)
@@ -499,9 +500,7 @@ def test_subobject_invariants_reject_malformed_cases_and_evidence() -> None:
 def test_positive_replay_c1_build_run_id_and_reconciliation_reexports() -> None:
     w = build_valid_7a_world()
     _verify_world(w, boundary_report_wheel_provenance_locator=w.bound_prov_locator)
-    w_stored = build_valid_7a_world(
-        wheel_bytes=_build_deterministic_wheel_bytes(w.resolved_git_blobs, compress_type=zipfile.ZIP_STORED)
-    )
+    w_stored = build_valid_7a_world(wheel_bytes=_build_deterministic_wheel_bytes(w.resolved_git_blobs, compress_type=zipfile.ZIP_STORED))
     _verify_world(w_stored)
     w_c1 = build_valid_7a_world(build_run_id="build\x80run-7a")
     _verify_world(w_c1)

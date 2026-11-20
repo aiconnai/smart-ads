@@ -2205,39 +2205,39 @@ def verify_contiguous_zip_layout(
 
 
 def _extract_single_wheel_member(
-    zf: zipfile.ZipFile,
+    wheel_bytes: bytes,
     info: zipfile.ZipInfo,
     members: dict[str, bytes],
 ) -> bytes:
     if info.is_dir() or info.filename.endswith("/"):
-        raise ValueError(
-            f"wheel archive: directory entry forbidden: {info.filename!r}"
-        )
+        raise ValueError(f"wheel archive: directory entry forbidden: {info.filename!r}")
     unix_type = (info.external_attr >> 16) & 0o170000
     if unix_type == 0o120000 or (unix_type != 0 and unix_type != 0o100000):
-        raise ValueError(
-            f"wheel archive: symlink or special entry forbidden: {info.filename!r}"
-        )
+        raise ValueError(f"wheel archive: symlink or special entry forbidden: {info.filename!r}")
     if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED) or not (0 <= info.file_size <= 8_388_608):
         raise ValueError(f"wheel archive: unsupported compression or member > 8 MiB on {info.filename!r}")
     source_path(info.filename)
     if info.filename in members:
-        raise ValueError(
-            f"wheel archive: duplicate central-directory entry {info.filename!r}"
-        )
+        raise ValueError(f"wheel archive: duplicate central-directory entry {info.filename!r}")
     if _WHEEL_ALLOWLIST_RE.fullmatch(info.filename) is None:
-        raise ValueError(
-            f"wheel archive: member violates strict allowlist: {info.filename!r}"
-        )
-    try:
-        with zf.open(info, "r") as zfp:
-            raw = zfp.read(info.file_size + 1)
-            dec = getattr(zfp, "_decompressor", None)
-            stream_clean = zfp._compress_left == 0 and (dec is None or (dec.eof and dec.unconsumed_tail == b"" and dec.unused_data == b""))
-    except (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError) as exc:
-        raise ValueError(f"wheel archive: failed to decompress member {info.filename!r}: {exc}") from exc
-    if len(raw) != info.file_size or not stream_clean:
-        raise ValueError(f"wheel archive: declared file_size or stream EOF mismatch on {info.filename!r}")
+        raise ValueError(f"wheel archive: member violates strict allowlist: {info.filename!r}")
+    lfh_fname_len, lfh_extra_len = struct.unpack_from("<HH", wheel_bytes, info.header_offset + 26)
+    data_start = info.header_offset + 30 + lfh_fname_len + lfh_extra_len
+    comp_slice = wheel_bytes[data_start : data_start + info.compress_size]
+    if info.compress_type == zipfile.ZIP_STORED:
+        if len(comp_slice) != info.file_size:
+            raise ValueError(f"wheel archive: stored size mismatch on {info.filename!r}")
+        raw = comp_slice
+    else:
+        try:
+            decomp = zlib.decompressobj(-15)
+            raw = decomp.decompress(comp_slice, info.file_size + 1)
+            if len(raw) != info.file_size or decomp.unconsumed_tail != b"" or not decomp.eof or decomp.unused_data != b"" or decomp.flush(1) != b"":
+                raise ValueError(f"wheel archive: incomplete, trailing, or oversized DEFLATE stream on {info.filename!r}")
+        except zlib.error as exc:
+            raise ValueError(f"wheel archive: failed to decompress member {info.filename!r}: {exc}") from exc
+    if len(raw) != info.file_size or (zlib.crc32(raw) & 0xFFFFFFFF) != info.CRC:
+        raise ValueError(f"wheel archive: size or CRC-32 mismatch on {info.filename!r}")
     return raw
 
 
@@ -2258,7 +2258,7 @@ def _extract_wheel_zip_members(wheel_bytes: bytes) -> dict[str, bytes]:
             if total_uncomp + info.file_size > 33_554_432:
                 raise ValueError("wheel archive: cumulative uncompressed size exceeds 32 MiB ceiling")
             total_uncomp += info.file_size
-            members[info.filename] = _extract_single_wheel_member(zf, info, members)
+            members[info.filename] = _extract_single_wheel_member(wheel_bytes, info, members)
 
     for mandatory in (
         "smart_ads/__init__.py",
