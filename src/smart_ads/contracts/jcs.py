@@ -681,6 +681,8 @@ ADR_P1_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "smart_ads/authorization_consumption_record/v1": "SMART-ADS:AUTH-CONSUMPTION:V1\n",
         "smart_ads/effect_proof/v1": "SMART-ADS:EFFECT-PROOF:V1\n",
         "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
+        "smart_ads/negative_security_test_report/v1": "SMART-ADS:NEGATIVE-SECURITY:V1\n",
+        "smart_ads/certification_7a_record/v1": "SMART-ADS:CERTIFICATION-7A:V1\n",
         "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
         "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
         "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",

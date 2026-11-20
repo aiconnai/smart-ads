@@ -26,6 +26,7 @@ from typing import Any, Final
 from tools.governance import (
     artifacts,
     decomposition as dec,
+    gov1_cli_7a,
     gov1_convergence,
     gov1_mcp,
     gov1_sandbox,
@@ -653,7 +654,7 @@ def _decode_ed25519_pubkey_b64(
     return raw32
 
 
-# ADR-0001 §12.7 P1 domain separation prefixes for Etapa 7 CLI envelope verifiers.
+# ADR-0001 §12.7 P1 domain separation prefixes for GOV 1 / PR 3 CLI envelope verifiers.
 # Kept self-contained in `tools.governance` so `python3 -m tools.governance.cli`
 # never depends on an editable `smart_ads` install on host `sys.path`.
 _GOV1_CLI_P1_DOMAIN_PREFIXES: Final[Mapping[str, str]] = MappingProxyType(
@@ -662,6 +663,9 @@ _GOV1_CLI_P1_DOMAIN_PREFIXES: Final[Mapping[str, str]] = MappingProxyType(
         gov1_wheel.WHEEL_BUILD_PROVENANCE_SCHEMA: "SMART-ADS:WHEEL-BUILD:V1\n",
         gov1_wheel.WHEEL_BOUNDARY_REPORT_SCHEMA: "SMART-ADS:WHEEL-BOUNDARY:V1\n",
         gov1_mcp.MCP_REJECTION_REPORT_SCHEMA: "SMART-ADS:MCP-REJECTION:V1\n",
+        gov1_convergence.NEGATIVE_SECURITY_SCHEMA: "SMART-ADS:NEGATIVE-SECURITY:V1\n",
+        gov1_convergence.CERTIFICATION_7A_SCHEMA: "SMART-ADS:CERTIFICATION-7A:V1\n",
+        gov1_convergence.GOV1_CONVERGENCE_SCHEMA: "SMART-ADS:GOV1-CONVERGENCE:V1\n",
     }
 )
 
@@ -718,6 +722,10 @@ def _verify_boundary_provenance_cross_bindings(
 
 def run_gov1(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     try:
+        if args.command in gov1_cli_7a.SEVEN_A_CLI_COMMANDS:
+            return gov1_cli_7a.dispatch_7a_cli_command(
+                args, verify_sig_fn=_verify_cli_p1_envelope_signature
+            )
         return _run_gov1(args)
     except (OSError, TypeError, UnicodeError) as exc:
         raise ValueError(
@@ -1482,10 +1490,7 @@ def cmd_gov1(args: argparse.Namespace) -> int:
     return code
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python3 -m tools.governance.cli")
-    sub = parser.add_subparsers(dest="command", required=True)
-
+def _register_crypto_and_store_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_keygen = sub.add_parser("keygen-instructions")
     p_keygen.set_defaults(func=cmd_keygen_instructions)
 
@@ -1520,86 +1525,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_get.add_argument("--locator", required=True)
     p_get.set_defaults(func=cmd_store_get)
 
-    p_ta = sub.add_parser("build-trust-anchor")
-    p_ta.add_argument("--params", required=True)
-    p_ta.add_argument("--out", required=True)
-    p_ta.set_defaults(func=cmd_build_trust_anchor)
 
-    p_reg = sub.add_parser("build-registry")
-    p_reg.add_argument("--params", required=True)
-    p_reg.add_argument("--out", required=True)
-    p_reg.set_defaults(func=cmd_build_registry)
-
-    p_pol = sub.add_parser("build-policy")
-    p_pol.add_argument("--params", required=True)
-    p_pol.add_argument("--out", required=True)
-    p_pol.set_defaults(func=cmd_build_policy)
+def _register_gate2_and_run_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
+    for cmd_name, handler in (
+        ("build-trust-anchor", cmd_build_trust_anchor),
+        ("build-registry", cmd_build_registry),
+        ("build-policy", cmd_build_policy),
+        ("build-receipt", cmd_build_receipt),
+        ("build-run-context", cmd_build_run_context),
+        ("build-delivery-mode", cmd_build_delivery_mode),
+    ):
+        p = sub.add_parser(cmd_name)
+        p.add_argument("--params", required=True)
+        p.add_argument("--out", required=True)
+        p.set_defaults(func=handler)
 
     p_merge = sub.add_parser("build-merge-evidence")
     p_merge.add_argument("--params", required=True)
     p_merge.add_argument(
         "--protection-json",
-        help=(
-            "Offline substitute for the live 'gh api' branch-protection check. "
-            "Requires --offline-protection-ack; use only when the live check is "
-            "genuinely unavailable."
-        ),
+        help="Offline substitute for the live 'gh api' branch-protection check. Requires --offline-protection-ack.",
     )
     p_merge.add_argument(
         "--offline-protection-ack",
-        help=(
-            "Required alongside --protection-json. Must be the literal string "
-            "I_UNDERSTAND_THIS_IS_NOT_LIVE_EVIDENCE, so the offline path cannot "
-            "be used casually."
-        ),
+        help="Required alongside --protection-json; must equal I_UNDERSTAND_THIS_IS_NOT_LIVE_EVIDENCE.",
     )
-    p_merge.add_argument(
-        "--repository",
-        help="owner/repo used for the live 'gh api repos/<repo>/branches/<ref>' check",
-    )
-    p_merge.add_argument(
-        "--ref",
-        help="branch ref used for the live 'gh api repos/<repo>/branches/<ref>' check",
-    )
+    p_merge.add_argument("--repository", help="owner/repo used for live 'gh api' check")
+    p_merge.add_argument("--ref", help="branch ref used for live 'gh api' check")
     p_merge.add_argument("--out", required=True)
     p_merge.set_defaults(func=cmd_build_merge_evidence)
 
-    p_receipt = sub.add_parser("build-receipt")
-    p_receipt.add_argument("--params", required=True)
-    p_receipt.add_argument("--out", required=True)
-    p_receipt.set_defaults(func=cmd_build_receipt)
 
-    p_runctx = sub.add_parser("build-run-context")
-    p_runctx.add_argument("--params", required=True)
-    p_runctx.add_argument("--out", required=True)
-    p_runctx.set_defaults(func=cmd_build_run_context)
-
-    p_delivery = sub.add_parser("build-delivery-mode")
-    p_delivery.add_argument("--params", required=True)
-    p_delivery.add_argument("--out", required=True)
-    p_delivery.set_defaults(func=cmd_build_delivery_mode)
-
+def _register_legacy_and_decomposition_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_resolve_legacy = sub.add_parser("resolve-legacy-step2")
     p_resolve_legacy.add_argument("--legacy-repo", required=True)
     p_resolve_legacy.add_argument("--baseline", required=True)
-    p_resolve_legacy.add_argument(
-        "--w1-gate-sha",
-        default=None,
-        help=(
-            "Override the W1-GATE protected-merge SHA used to resolve ancestry and "
-            "tree presence. Defaults to the real ADR-pinned constant; only meant to "
-            "be overridden by tests against a fixture repo."
-        ),
-    )
-    p_resolve_legacy.add_argument(
-        "--wave1-merges",
-        default=None,
-        help=(
-            "Path to a JSON object {'W1A':sha,'W1B-G':sha,'W1B-P':sha} overriding the "
-            "wave-1 protected-merge SHAs. Defaults to the real ADR-pinned constants; "
-            "only meant to be overridden by tests against a fixture repo."
-        ),
-    )
+    p_resolve_legacy.add_argument("--w1-gate-sha", default=None)
+    p_resolve_legacy.add_argument("--wave1-merges", default=None)
     p_resolve_legacy.add_argument("--out", required=True)
     p_resolve_legacy.set_defaults(func=cmd_resolve_legacy_step2)
 
@@ -1615,9 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
         "prepare-decomposition-review",
         "prepare-decomposition-dispositions",
     ):
-        p_dec = sub.add_parser(
-            command, help="local unratified draft; never a signable envelope"
-        )
+        p_dec = sub.add_parser(command, help="local unratified draft; never a signable envelope")
         p_dec.add_argument("--legacy-repo", required=True)
         if command != "verify-decomposition-manifest":
             p_dec.add_argument("--out", required=True)
@@ -1628,12 +1588,12 @@ def build_parser() -> argparse.ArgumentParser:
             p_dec.add_argument("--in", dest="input", required=True)
         p_dec.set_defaults(func=cmd_decomposition)
 
+
+def _register_etapa7_part1_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_build_sbx = sub.add_parser("build-sealed-sandbox-profile")
     p_build_sbx.add_argument("--params", required=True)
     p_build_sbx.add_argument("--seccomp-profile", required=True)
-    p_build_sbx.add_argument(
-        "--mode", choices=("candidate", "envelope"), default="candidate"
-    )
+    p_build_sbx.add_argument("--mode", choices=("candidate", "envelope"), default="candidate")
     p_build_sbx.add_argument("--signer-key-id", default=None)
     p_build_sbx.add_argument("--registry-locator", default=None)
     p_build_sbx.add_argument("--out", required=True)
@@ -1649,9 +1609,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_prov.add_argument("--repo", required=True)
     p_build_prov.add_argument("--wheel-out", default=None)
     p_build_prov.add_argument("--params", required=True)
-    p_build_prov.add_argument(
-        "--mode", choices=("candidate", "envelope"), default="candidate"
-    )
+    p_build_prov.add_argument("--mode", choices=("candidate", "envelope"), default="candidate")
     p_build_prov.add_argument("--signer-key-id", default=None)
     p_build_prov.add_argument("--registry-locator", default=None)
     p_build_prov.add_argument("--out", required=True)
@@ -1664,14 +1622,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_prov.add_argument("--pubkey-raw-base64", default=None)
     p_verify_prov.set_defaults(func=cmd_gov1)
 
+
+def _register_etapa7_part2_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_build_bound = sub.add_parser("build-wheel-boundary-report")
     p_build_bound.add_argument("--wheel", required=True)
     p_build_bound.add_argument("--provenance", default=None)
     p_build_bound.add_argument("--provenance-locator", default=None)
     p_build_bound.add_argument("--params", required=True)
-    p_build_bound.add_argument(
-        "--mode", choices=("candidate", "envelope"), default="candidate"
-    )
+    p_build_bound.add_argument("--mode", choices=("candidate", "envelope"), default="candidate")
     p_build_bound.add_argument("--signer-key-id", default=None)
     p_build_bound.add_argument("--registry-locator", default=None)
     p_build_bound.add_argument("--out", required=True)
@@ -1691,9 +1649,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_build_mcp.add_argument("--sandbox-profile", default=None)
     p_build_mcp.add_argument("--sandbox-profile-locator", default=None)
     p_build_mcp.add_argument("--params", required=True)
-    p_build_mcp.add_argument(
-        "--mode", choices=("candidate", "envelope"), default="candidate"
-    )
+    p_build_mcp.add_argument("--mode", choices=("candidate", "envelope"), default="candidate")
     p_build_mcp.add_argument("--signer-key-id", default=None)
     p_build_mcp.add_argument("--registry-locator", default=None)
     p_build_mcp.add_argument("--out", required=True)
@@ -1708,6 +1664,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_mcp.add_argument("--sandbox-pubkey-raw-base64", default=None)
     p_verify_mcp.set_defaults(func=cmd_gov1)
 
+
+def _register_pre_pr2_gate_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p_verify_conv = sub.add_parser("verify-pr1-gov1-convergence")
     p_verify_conv.add_argument("--repo", required=True)
     p_verify_conv.add_argument("--wheel", required=True)
@@ -1719,6 +1677,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify_conv.add_argument("--out", default=None)
     p_verify_conv.set_defaults(func=cmd_gov1)
 
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python3 -m tools.governance.cli")
+    sub = parser.add_subparsers(dest="command", required=True)
+    _register_crypto_and_store_subparsers(sub)
+    _register_gate2_and_run_subparsers(sub)
+    _register_legacy_and_decomposition_subparsers(sub)
+    _register_etapa7_part1_subparsers(sub)
+    _register_etapa7_part2_subparsers(sub)
+    _register_pre_pr2_gate_subparser(sub)
+    gov1_cli_7a.register_7a_subparsers(sub, cmd_gov1)
     return parser
 
 

@@ -6,7 +6,9 @@ future decomposition-owner profile.
 from __future__ import annotations
 
 import base64
+import copy
 from pathlib import Path
+from typing import Any
 
 from tools.governance import p1
 from tools.governance.decomposition_scope import LEGACY_SOURCE_IDENTITY
@@ -189,6 +191,47 @@ def historical_prerequisites(root: Path = REPO_ROOT) -> dict:
             'proposed_runtime_verifier': 'tools.governance.decomposition_runtime.AdmissionVerifier',
             'contract_ratification': 'NOT_RATIFIED', 'signable': False,
             'scope': 'historical offline prerequisites; not authority for new effects'}
+
+
+def verified_run_context_identity(root: Path = REPO_ROOT) -> dict[str, Any]:
+    """Return authenticated Gate-2/run-context/epoch-1..3 locators without mutating `historical_prerequisites`."""
+    prereq = historical_prerequisites(root)
+    gov = root / 'docs/governance'
+    store = Store(gov / 'cell-objects')
+    anchor = _load(gov / 'trust-anchor/cell_trust_anchor_config.json')
+    anchor_pub = base64.b64decode(ANCHOR_PUBLIC)
+    manual = store.get(_load(gov / 'run-context/params/delivery_mode_store_put.out'),
+                       expected_type='smart_ads/delivery_mode_decision_receipt/v1')
+    run_loc = _load(gov / 'run-context/params/run_context_store_put.out')
+    reg2_param = _load(gov / 'run-context/params/registry_epoch2_store_put.out')
+    if canonicalize(manual['run_context_locator']) != canonicalize(run_loc):
+        raise ValueError('governance: run_context_store_put.out diverges from manual decision receipt')
+    run = store.get(run_loc, expected_type='smart_ads/migration_run_context/v1')
+    gate = store.get(run['gate2_receipt_locator'], expected_type='smart_ads/gate2_approval_receipt/v1')
+    gate2_reg_loc = gate['integrity']['key_registry_snapshot_locator']
+    run_reg_loc = run['integrity']['key_registry_snapshot_locator']
+    reg3_loc = prereq['registry_locator']
+    if (canonicalize(run_reg_loc) != canonicalize(reg2_param)
+            or canonicalize(manual['integrity']['key_registry_snapshot_locator']) != canonicalize(run_reg_loc)):
+        raise ValueError('governance: run-context epoch-2 registry locator mismatch')
+    regs: list[dict[str, Any]] = []
+    for expected_epoch, loc in ((1, gate2_reg_loc), (2, run_reg_loc), (3, reg3_loc)):
+        reg = _registry(store, loc, anchor_pub)
+        if _int(reg['epoch'], 'registry epoch') != expected_epoch or reg.get('trust_anchor_id') != anchor['trust_anchor_id']:
+            raise ValueError(f'governance: unexpected registry epoch or anchor at epoch {expected_epoch}')
+        if not timestamp(anchor['validity']['from']) <= timestamp(reg['issued_at_utc']) < timestamp(anchor['validity']['until']):
+            raise ValueError(f'governance: epoch-{expected_epoch} registry issued outside anchor validity')
+        if regs and timestamp(reg['issued_at_utc']) < timestamp(regs[-1]['issued_at_utc']):
+            raise ValueError('governance: historical registry issuance time goes backwards')
+        if regs:
+            _continues(regs[-1], reg)
+        regs.append(reg)
+    return {
+        'run_context_locator': copy.deepcopy(run_loc),
+        'gate2_registry_locator': copy.deepcopy(gate2_reg_loc),
+        'run_registry_locator': copy.deepcopy(run_reg_loc),
+        'prerequisite_epoch3_registry_locator': copy.deepcopy(reg3_loc),
+    }
 
 
 def inspect_governance(root: Path = REPO_ROOT) -> dict:

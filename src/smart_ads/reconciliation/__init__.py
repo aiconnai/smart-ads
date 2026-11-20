@@ -1,7 +1,7 @@
-"""Pure 7B reconciliation math and truth tables (ADR-0001 section 5.4).
+"""Pure 7A/7B certification, reconciliation math, and truth tables (ADR-0001 §§3.2, 5.1, 5.4).
 
-Re-exports the public API (`__all__`) of the `bundle_7b` facade and of `tolerance`. The
-internal `bundle_*` modules are reached only through the facade.
+Re-exports the public API (`__all__`) of `bundle_7b`, `certification_7a`, and `tolerance`. The
+internal `bundle_*` modules are reached only through the `bundle_7b` facade.
 """
 from __future__ import annotations
 
@@ -46,6 +46,29 @@ from smart_ads.reconciliation.bundle_7b import (
     select_fact_evidence,
     verify_certification_7b_record,
 )
+from smart_ads.reconciliation.certification_7a import (
+    ADAPTER_ARTIFACT_PATHS,
+    CERTIFICATION_7A_RECORD_SCHEMA,
+    CORPUS_CAMPAIGN_PAIR_KEYS,
+    CORPUS_CASE_KEYS,
+    CORPUS_CLOCK_READING_KEYS,
+    CORPUS_GIT_PATH,
+    CORPUS_HTTP_RESPONSE_KEYS,
+    CORPUS_PRIVATE_BINDING_KEYS,
+    CORPUS_TOP_LEVEL_KEYS,
+    Certification7ACapabilityBinding,
+    Certification7AFixtureCase,
+    Certification7AFixtureEvidence,
+    Certification7ARecord,
+    MAPPING_ARTIFACT_PATHS,
+    PARSER_ARTIFACT_PATHS,
+    PIPEBOARD_7A_CORPUS_SCHEMA,
+    compute_7a_case_execution_binding_digest,
+    compute_adapter_code_digest,
+    compute_mapping_rules_digest,
+    compute_parser_code_digest,
+    verify_certification_7a_record,
+)
 from smart_ads.reconciliation.tolerance import (
     DECIMAL_SCALE,
     PHASE1_7B_MONEY_CURRENCY,
@@ -63,12 +86,25 @@ from smart_ads.reconciliation.tolerance import (
 )
 
 __all__ = [
+    "ADAPTER_ARTIFACT_PATHS",
     "AuthorizationBinding",
     "Bundle7BDefectError",
     "CANDIDATE_DRIVER_ID",
     "CANDIDATE_PROVIDER_TARGET_REF",
+    "CERTIFICATION_7A_RECORD_SCHEMA",
     "CERTIFICATION_7B_RECORD_SCHEMA",
+    "CORPUS_CAMPAIGN_PAIR_KEYS",
+    "CORPUS_CASE_KEYS",
+    "CORPUS_CLOCK_READING_KEYS",
+    "CORPUS_GIT_PATH",
+    "CORPUS_HTTP_RESPONSE_KEYS",
+    "CORPUS_PRIVATE_BINDING_KEYS",
+    "CORPUS_TOP_LEVEL_KEYS",
     "CandidateExecution",
+    "Certification7ACapabilityBinding",
+    "Certification7AFixtureCase",
+    "Certification7AFixtureEvidence",
+    "Certification7ARecord",
     "Certification7BRecord",
     "ComparableValueType",
     "ComparisonSide",
@@ -79,13 +115,16 @@ __all__ = [
     "FactEvidenceSelector",
     "FactReconciliation",
     "Gate3CertificationFingerprint",
+    "MAPPING_ARTIFACT_PATHS",
     "MAXIMUM_RETRIEVAL_SKEW_SECONDS",
     "MetricPairKey",
     "MetricVerificationStatus",
     "NATIVE_REQUEST_PROJECTION_SCHEMA",
     "NativeRequestProjection",
     "NativeToCanonicalAlgorithm",
+    "PARSER_ARTIFACT_PATHS",
     "PHASE1_7B_MONEY_CURRENCY",
+    "PIPEBOARD_7A_CORPUS_SCHEMA",
     "RECONCILE_OUTCOME_CODES",
     "REFERENCE_PROVIDER_TARGET_REF",
     "REFERENCE_WORKLOAD_REF",
@@ -104,9 +143,13 @@ __all__ = [
     "check_native_request",
     "collection_result_locator",
     "compare_sides",
+    "compute_7a_case_execution_binding_digest",
+    "compute_adapter_code_digest",
     "compute_canonical_fact_key_digest",
     "compute_logical_fact_reconciliation_digest",
+    "compute_mapping_rules_digest",
     "compute_pair_universe",
+    "compute_parser_code_digest",
     "compute_row_universe",
     "compute_row_universe_digest",
     "expected_pair_universe",
@@ -114,5 +157,6 @@ __all__ = [
     "require_same_fingerprint",
     "resolve_fact_evidence",
     "select_fact_evidence",
+    "verify_certification_7a_record",
     "verify_certification_7b_record",
 ]

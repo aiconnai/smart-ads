@@ -36,6 +36,8 @@ from tools.governance.gov1_sandbox import (
     wrap_local_candidate,
 )
 from tools.governance.gov1_wheel import (
+    IsolatedWheelProbeRunner,
+    _require_optional_probe_runner,
     inspect_wheel_boundary,
     verify_contiguous_zip_layout,
 )
@@ -1023,143 +1025,92 @@ def _verify_envelope_integrity(envelope: dict[str, Any], *, label: str) -> None:
             )
 
 
-def execute_mcp_rejection_matrix_on_wheel(wheel_path: Path) -> dict[str, Any]:
-    """Execute the 11-case ADR-0001 §3.3 MCP rejection matrix and 64 KiB boundary against an isolated wheel."""
-    _verify_cpython_312_runtime()
-    whl_file = _resolve_regular_wheel_file(wheel_path)
-    boundary = inspect_wheel_boundary(whl_file)
-
-    wheel_bytes = whl_file.read_bytes()
-    if digest(wheel_bytes) != boundary["wheel_digest"]:
-        raise ValueError(
-            "wheel_path: concurrent modification detected against inspect_wheel_boundary digest"
-        )
-    if (
-        boundary.get("archive_allowlist_passed") is not True
-        or boundary.get("ast_boundary_scan_passed") is not True
-        or boundary.get("isolated_venv_import_passed") is not True
-    ):
-        raise ValueError("wheel_path: wheel boundary inspection did not pass")
-
-    expected_member_paths = {
-        entry["path"] for entry in boundary["sorted_record_entries"]
+def _create_mcp_clean_venv(
+    tmp_root: Path, governance_repo_root: Path
+) -> tuple[Path, Path, dict[str, str]]:
+    if tmp_root.is_relative_to(governance_repo_root):
+        raise ValueError("clean_venv: temporary directory must reside outside repository")
+    venv_dir = tmp_root / "venv"
+    probe_cwd = tmp_root / "cwd"
+    probe_cwd.mkdir(parents=True, exist_ok=True)
+    venv.EnvBuilder(system_site_packages=False, with_pip=False, clear=True, symlinks=os.name != "nt").create(venv_dir)
+    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    clean_env = {
+        "HOME": "/nonexistent", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+        "PATH": _clean_system_path(), "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
+        "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1", "TMPDIR": str(probe_cwd), "TZ": "UTC",
     }
-    governance_repo_root = Path(__file__).resolve().parents[2]
+    try:
+        purelib_proc = subprocess.run(
+            [str(venv_python), "-I", "-B", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            cwd=str(probe_cwd), env=clean_env, capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"clean_venv: failed to query purelib: {exc}") from exc
+    if purelib_proc.returncode != 0:
+        raise ValueError(f"clean_venv: failed to query purelib: {purelib_proc.stderr.strip()}")
+    purelib_path = Path(purelib_proc.stdout.strip()).resolve()
+    if not purelib_path.is_relative_to(venv_dir.resolve()):
+        raise ValueError("clean_venv: purelib resolved outside venv root")
+    return venv_python, purelib_path, clean_env
 
+
+def _run_local_clean_venv_mcp_probe(
+    *,
+    wheel_bytes: bytes,
+    expected_member_paths: frozenset[str],
+    expected_schema_bundle_digest: str,
+) -> dict[str, Any]:
+    governance_repo_root = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix="gov1-mcp-venv-") as raw_tmp:
         tmp_root = Path(raw_tmp).resolve()
-        if tmp_root.is_relative_to(governance_repo_root):
-            raise ValueError(
-                "clean_venv: temporary directory must reside outside repository"
-            )
-
-        venv_dir = tmp_root / "venv"
-        probe_cwd = tmp_root / "cwd"
-        probe_cwd.mkdir(parents=True, exist_ok=True)
-        venv.EnvBuilder(
-            system_site_packages=False,
-            with_pip=False,
-            clear=True,
-            symlinks=os.name != "nt",
-        ).create(venv_dir)
-        venv_python = venv_dir / (
-            "Scripts/python.exe" if os.name == "nt" else "bin/python"
-        )
-
-        clean_env = {
-            "HOME": "/nonexistent",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "PATH": _clean_system_path(),
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONHASHSEED": "0",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONSAFEPATH": "1",
-            "TMPDIR": str(probe_cwd),
-            "TZ": "UTC",
-        }
-
+        venv_python, purelib_path, clean_env = _create_mcp_clean_venv(tmp_root, governance_repo_root)
+        _extract_verified_wheel_to_purelib(wheel_bytes, purelib_path, set(expected_member_paths))
+        cmd = [
+            str(venv_python), "-I", "-B", "-c", _MCP_MATRIX_PROBE_SCRIPT,
+            str(purelib_path), str(governance_repo_root),
+            str(governance_repo_root / "src"), expected_schema_bundle_digest,
+        ]
         try:
-            purelib_proc = subprocess.run(
-                [
-                    str(venv_python),
-                    "-I",
-                    "-B",
-                    "-c",
-                    "import sysconfig; print(sysconfig.get_path('purelib'))",
-                ],
-                cwd=str(probe_cwd),
-                env=clean_env,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+            probe_proc = subprocess.run(cmd, cwd=clean_env["TMPDIR"], env=clean_env, capture_output=True, text=True, timeout=60)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(f"clean_venv: failed to query purelib: {exc}") from exc
-
-        if purelib_proc.returncode != 0:
-            raise ValueError(
-                f"clean_venv: failed to query purelib: {purelib_proc.stderr.strip()}"
-            )
-        purelib_path = Path(purelib_proc.stdout.strip()).resolve()
-        if not purelib_path.is_relative_to(venv_dir.resolve()):
-            raise ValueError("clean_venv: purelib resolved outside venv root")
-
-        _extract_verified_wheel_to_purelib(
-            wheel_bytes, purelib_path, expected_member_paths
-        )
-
-        try:
-            probe_proc = subprocess.run(
-                [
-                    str(venv_python),
-                    "-I",
-                    "-B",
-                    "-c",
-                    _MCP_MATRIX_PROBE_SCRIPT,
-                    str(purelib_path),
-                    str(governance_repo_root),
-                    str(governance_repo_root / "src"),
-                    boundary["schema_bundle_digest"],
-                ],
-                cwd=str(probe_cwd),
-                env=clean_env,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ValueError(
-                f"clean_venv: isolated MCP matrix probe failed or timed out: {exc}"
-            ) from exc
-
+            raise ValueError(f"clean_venv: isolated MCP matrix probe failed or timed out: {exc}") from exc
         if probe_proc.returncode != 0:
-            raise ValueError(
-                f"clean_venv: isolated MCP matrix probe failed: {probe_proc.stderr.strip()}"
-            )
-
+            raise ValueError(f"clean_venv: isolated MCP matrix probe failed: {probe_proc.stderr.strip()}")
     probe_out = loads_strict(probe_proc.stdout)
     if not isinstance(probe_out, dict):
         raise ValueError("clean_venv: MCP matrix probe returned non-object JSON")
-    exact_fields(
-        probe_out,
-        {
-            "schema_bundle_digest",
-            "allowed_methods",
-            "body_64k_boundary_verified",
-            "cases",
-        },
-        "clean_venv.mcp_probe",
+    return probe_out
+
+
+def execute_mcp_rejection_matrix_on_wheel(
+    wheel_path: Path, *, probe_runner: IsolatedWheelProbeRunner | None = None
+) -> dict[str, Any]:
+    """Execute the 11-case ADR-0001 §3.3 MCP rejection matrix and 64 KiB boundary against an isolated wheel."""
+    _verify_cpython_312_runtime()
+    runner = _require_optional_probe_runner(probe_runner)
+    whl_file = _resolve_regular_wheel_file(wheel_path)
+    boundary = inspect_wheel_boundary(whl_file, probe_runner=runner)
+    wheel_bytes = whl_file.read_bytes()
+    if digest(wheel_bytes) != boundary["wheel_digest"]:
+        raise ValueError("wheel_path: concurrent modification detected against inspect_wheel_boundary digest")
+    if not all(boundary.get(k) is True for k in ("archive_allowlist_passed", "ast_boundary_scan_passed", "isolated_venv_import_passed")):
+        raise ValueError("wheel_path: wheel boundary inspection did not pass")
+    expected_member_paths = frozenset(entry["path"] for entry in boundary["sorted_record_entries"])
+    probe_fn = runner.run_mcp_matrix_probe if runner is not None else _run_local_clean_venv_mcp_probe
+    probe_out = probe_fn(
+        wheel_bytes=wheel_bytes, expected_member_paths=expected_member_paths,
+        expected_schema_bundle_digest=boundary["schema_bundle_digest"],
     )
+    if not isinstance(probe_out, dict):
+        raise ValueError("clean_venv: MCP matrix probe returned non-object JSON")
+    exact_fields(probe_out, {"schema_bundle_digest", "allowed_methods", "body_64k_boundary_verified", "cases"}, "clean_venv.mcp_probe")
     if probe_out["schema_bundle_digest"] != boundary["schema_bundle_digest"]:
         raise ValueError("clean_venv: schema_bundle_digest mismatch")
-
     return _validate_execution_dict(
         {
-            "wheel_digest": boundary["wheel_digest"],
-            "schema_bundle_digest": boundary["schema_bundle_digest"],
-            "allowed_methods": probe_out["allowed_methods"],
-            "body_64k_boundary_verified": probe_out["body_64k_boundary_verified"],
+            "wheel_digest": boundary["wheel_digest"], "schema_bundle_digest": boundary["schema_bundle_digest"],
+            "allowed_methods": probe_out["allowed_methods"], "body_64k_boundary_verified": probe_out["body_64k_boundary_verified"],
             "cases": probe_out["cases"],
         },
         label="mcp_execution",
@@ -1267,92 +1218,59 @@ def build_mcp_rejection_matrix_report_candidate(
     return wrap_local_candidate(MCP_REJECTION_REPORT_SCHEMA, payload)
 
 
-def verify_mcp_rejection_matrix_report(
-    artifact: dict[str, Any], *, wheel_path: Path
-) -> dict[str, Any]:
-    """Materially verify `mcp_rejection_matrix_report/v1` by re-executing the matrix on `wheel_path`."""
+def _unwrap_and_validate_mcp_report_payload(
+    artifact: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
     if not isinstance(artifact, dict):
-        raise ValueError(
-            "verify_mcp_rejection_matrix_report: artifact must be a JSON object"
-        )
-
+        raise ValueError("verify_mcp_rejection_matrix_report: artifact must be a JSON object")
     if artifact.get("artifact_kind") == LOCAL_CANDIDATE_KIND:
         if "$schema" in artifact or "integrity" in artifact:
-            raise ValueError(
-                "verify_mcp_rejection_matrix_report: local candidate must not contain envelope fields"
-            )
-        payload = unwrap_local_candidate(
-            artifact, expected_schema=MCP_REJECTION_REPORT_SCHEMA
-        )
-        exact_fields(
-            payload,
-            _REPORT_CANDIDATE_PAYLOAD_FIELDS,
-            "mcp_rejection_matrix_report_candidate_payload",
-        )
+            raise ValueError("verify_mcp_rejection_matrix_report: local candidate must not contain envelope fields")
+        payload = unwrap_local_candidate(artifact, expected_schema=MCP_REJECTION_REPORT_SCHEMA)
+        exact_fields(payload, _REPORT_CANDIDATE_PAYLOAD_FIELDS, "mcp_rejection_matrix_report_candidate_payload")
         verify_local_candidate_ref(
-            payload["sealed_sandbox_profile_candidate_ref"],
-            expected_schema=SANDBOX_PROFILE_SCHEMA,
+            payload["sealed_sandbox_profile_candidate_ref"], expected_schema=SANDBOX_PROFILE_SCHEMA
         )
         mode = "candidate"
-    elif (
-        artifact.get("$schema") == MCP_REJECTION_REPORT_SCHEMA
-        and "artifact_kind" not in artifact
-    ):
-        exact_fields(
-            artifact,
-            _REPORT_ENVELOPE_FIELDS,
-            "mcp_rejection_matrix_report_envelope",
-        )
+    elif artifact.get("$schema") == MCP_REJECTION_REPORT_SCHEMA and "artifact_kind" not in artifact:
+        exact_fields(artifact, _REPORT_ENVELOPE_FIELDS, "mcp_rejection_matrix_report_envelope")
         _verify_envelope_integrity(artifact, label="mcp_rejection_matrix_report")
-        payload = {
-            k: copy.deepcopy(v)
-            for k, v in artifact.items()
-            if k not in {"$schema", "integrity"}
-        }
-        exact_fields(
-            payload,
-            _REPORT_ENVELOPE_PAYLOAD_FIELDS,
-            "mcp_rejection_matrix_report_envelope_payload",
-        )
-        validate_locator(
-            payload["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA
-        )
+        payload = {k: copy.deepcopy(v) for k, v in artifact.items() if k not in {"$schema", "integrity"}}
+        exact_fields(payload, _REPORT_ENVELOPE_PAYLOAD_FIELDS, "mcp_rejection_matrix_report_envelope_payload")
+        validate_locator(payload["sealed_sandbox_profile_locator"], SANDBOX_PROFILE_SCHEMA)
         mode = "envelope"
     else:
         raise ValueError(
-            "verify_mcp_rejection_matrix_report: expected mcp_rejection_matrix_report/v1 "
-            "envelope or gov1_local_candidate"
+            "verify_mcp_rejection_matrix_report: expected mcp_rejection_matrix_report/v1 envelope or gov1_local_candidate"
         )
-
     validate_locator(payload["migration_run_context_locator"], _RUN_CONTEXT_SCHEMA)
     _require_strict_str(payload["build_run_id"], "mcp_report.build_run_id")
-    executed_at_utc = _require_timestamp_utc(
-        payload["executed_at_utc"], "mcp_report.executed_at_utc"
-    )
+    _require_timestamp_utc(payload["executed_at_utc"], "mcp_report.executed_at_utc")
     _require_git_oid(payload["source_commit_sha"], "mcp_report.source_commit_sha")
-    _require_sha256_digest(
-        payload["build_backend_digest"], "mcp_report.build_backend_digest"
-    )
+    _require_sha256_digest(payload["build_backend_digest"], "mcp_report.build_backend_digest")
+    return mode, payload
 
+
+def verify_mcp_rejection_matrix_report(
+    artifact: dict[str, Any],
+    *,
+    wheel_path: Path,
+    probe_runner: IsolatedWheelProbeRunner | None = None,
+) -> dict[str, Any]:
+    """Materially verify `mcp_rejection_matrix_report/v1` by re-executing the matrix on `wheel_path`."""
+    runner = _require_optional_probe_runner(probe_runner)
+    mode, payload = _unwrap_and_validate_mcp_report_payload(artifact)
     declared_execution = _validate_execution_dict(
-        {k: payload[k] for k in _EXECUTION_FIELDS},
-        label="mcp_report.execution",
+        {k: payload[k] for k in _EXECUTION_FIELDS}, label="mcp_report.execution"
     )
     loads_strict(canonicalize(payload).decode("utf-8"))
-
     whl_file = _resolve_regular_wheel_file(wheel_path)
-    wheel_bytes = whl_file.read_bytes()
-    actual_wheel_digest = digest(wheel_bytes)
-    if actual_wheel_digest != declared_execution["wheel_digest"]:
-        raise ValueError(
-            "verify_mcp_rejection_matrix_report: wheel_digest mismatch against wheel_path"
-        )
-
-    live_execution = execute_mcp_rejection_matrix_on_wheel(whl_file)
+    if digest(whl_file.read_bytes()) != declared_execution["wheel_digest"]:
+        raise ValueError("verify_mcp_rejection_matrix_report: wheel_digest mismatch against wheel_path")
+    live_execution = execute_mcp_rejection_matrix_on_wheel(whl_file, probe_runner=runner)
     if (
         live_execution["wheel_digest"] != declared_execution["wheel_digest"]
-        or live_execution["schema_bundle_digest"]
-        != declared_execution["schema_bundle_digest"]
+        or live_execution["schema_bundle_digest"] != declared_execution["schema_bundle_digest"]
         or live_execution["allowed_methods"] != declared_execution["allowed_methods"]
         or live_execution["body_64k_boundary_verified"] is not True
         or live_execution["cases"] != declared_execution["cases"]
@@ -1361,13 +1279,12 @@ def verify_mcp_rejection_matrix_report(
         raise ValueError(
             "verify_mcp_rejection_matrix_report: declared report diverges from live wheel matrix execution"
         )
-
     return {
         "mode": mode,
         "schema": MCP_REJECTION_REPORT_SCHEMA,
         "wheel_digest": live_execution["wheel_digest"],
         "schema_bundle_digest": live_execution["schema_bundle_digest"],
-        "executed_at_utc": executed_at_utc,
+        "executed_at_utc": payload["executed_at_utc"],
         "payload": copy.deepcopy(payload),
     }
 

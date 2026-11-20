@@ -22,14 +22,24 @@ from typing import Any
 
 import pytest
 
+import smart_ads
 from smart_ads.analytics import cells, certification, formulas, intelligence, lattice, policy, results
-from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity
+from smart_ads.contracts import git_provenance, negative_security
+from smart_ads.contracts.jcs import (
+    ADR_P1_DOMAIN_PREFIXES,
+    ArtifactLocator,
+    P1Integrity,
+    p1_content_digest,
+)
 from smart_ads.contracts.numerics import PHASE1_BASE_METRICS
+from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.contracts.schemas import CORE_SCHEMA_DESCRIPTORS
 import smart_ads.contracts.schemas as schemas_module
 from smart_ads.reconciliation import bundle_7b, tolerance
+import smart_ads.reconciliation.certification_7a as certification_7a
 from tests.unit._bundle_7b_builders import CLICKS, native_dict, profile_dict
 from tests.unit._bundle_7b_world import build_world
+from tests.unit.test_certification_7a_record import build_valid_7a_world
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -44,6 +54,9 @@ P1_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/tolerance_profile/v1": tolerance.ToleranceProfile,
     "smart_ads/native_request_projection/v1": bundle_7b.NativeRequestProjection,
     "smart_ads/certification_7b_record/v1": bundle_7b.Certification7BRecord,
+    "smart_ads/git_artifact_provenance/v1": git_provenance.GitArtifactProvenance,
+    "smart_ads/negative_security_test_report/v1": negative_security.NegativeSecurityTestReport,
+    "smart_ads/certification_7a_record/v1": certification_7a.Certification7ARecord,
 }
 EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/regression_fixture/v1": lattice.RegressionFixtureV1,
@@ -70,6 +83,7 @@ SCHEMA_ID_CONSTANTS: tuple[tuple[str, str], ...] = (
     (bundle_7b.FACT_RECONCILIATION_SCHEMA, "smart_ads/fact_reconciliation/v1"),
     (bundle_7b.NATIVE_REQUEST_PROJECTION_SCHEMA, "smart_ads/native_request_projection/v1"),
     (bundle_7b.CERTIFICATION_7B_RECORD_SCHEMA, "smart_ads/certification_7b_record/v1"),
+    (certification_7a.CERTIFICATION_7A_RECORD_SCHEMA, "smart_ads/certification_7a_record/v1"),
 )
 
 PRE_PR2_SCHEMA_IDS = frozenset(
@@ -94,8 +108,8 @@ PACKAGE_SUBMODULES: dict[str, tuple[str, ...]] = {
     "smart_ads.analytics": (
         "cells", "certification", "formulas", "intelligence", "lattice", "policy", "results",
     ),
-    # The 7B facade, never the internal bundle_* modules.
-    "smart_ads.reconciliation": ("bundle_7b", "tolerance"),
+    # The 7A/7B public facades and tolerance, never the internal bundle_* modules.
+    "smart_ads.reconciliation": ("bundle_7b", "certification_7a", "tolerance"),
 }
 # Names two submodules export as different objects; not re-exported at package level.
 WITHHELD_AMBIGUOUS: dict[str, frozenset[str]] = {
@@ -246,12 +260,33 @@ def _reconciliation_instances() -> dict[str, Any]:
     }
 
 
+def _pr3_7a_instances() -> dict[str, Any]:
+    world_7a = build_valid_7a_world()
+    git_prov = git_provenance.GitArtifactProvenance(
+        repository="aiconnai/smart-ads",
+        commit_sha="a" * 40,
+        path="src/smart_ads/reconciliation/certification_7a.py",
+        git_blob_oid="b" * 40,
+        file_content_sha256="sha256:" + ("c" * 64),
+        resolved_at_utc="2026-09-07T10:00:00Z",
+        integrity=UNSIGNED,
+    )
+    neg_rep = dataclasses.replace(world_7a.negative_report, integrity=UNSIGNED)
+    cert_rec = dataclasses.replace(world_7a.record, integrity=UNSIGNED)
+    return {
+        "smart_ads/git_artifact_provenance/v1": git_prov,
+        "smart_ads/negative_security_test_report/v1": neg_rep,
+        "smart_ads/certification_7a_record/v1": cert_rec,
+    }
+
+
 @pytest.fixture(scope="module")
 def instances() -> dict[str, Any]:
     built = {
         **_analysis_instances(),
         **_formula_and_policy_instances(),
         **_reconciliation_instances(),
+        **_pr3_7a_instances(),
     }
     assert set(built) == set(PR2_SCHEMA_TYPES)
     for schema_id, obj in built.items():
@@ -262,13 +297,13 @@ def instances() -> dict[str, Any]:
 # ---------------------------------------------------------------- descriptor registry shape
 
 
-def test_registry_has_28_unique_descriptors_sorted_by_utf8_schema_id() -> None:
+def test_registry_has_31_unique_descriptors_sorted_by_utf8_schema_id() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
-    assert len(CORE_SCHEMA_DESCRIPTORS) == 28
+    assert len(CORE_SCHEMA_DESCRIPTORS) == 31
     assert len(set(schema_ids)) == len(schema_ids)
     assert schema_ids == _utf8_sorted(schema_ids)
     assert set(schema_ids) == PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)
-    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 15
+    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 18
 
 
 def test_every_descriptor_is_immutable_with_sorted_unique_fields() -> None:
@@ -345,38 +380,49 @@ def _declared_key_constants() -> list[tuple[str, frozenset[str], frozenset[str] 
     """(schema id, full key constant, core key constant or None) for types that declare them."""
     with_integrity = {"integrity"}
     return [
-        (
-            "smart_ads/analysis_policy/v1",
-            frozenset(policy.AnalysisPolicy.KEYS),
-            frozenset(policy.AnalysisPolicy.CORE_KEYS),
-        ),
-        (
-            "smart_ads/finding/v1",
-            frozenset(intelligence.Finding.KEYS),
-            frozenset(intelligence.Finding.CORE_KEYS),
-        ),
-        (
-            "smart_ads/certification_record/v1",
-            frozenset(certification.AnalyticalCertificationRecord.KEYS),
-            frozenset(certification.AnalyticalCertificationRecord.CORE_KEYS),
-        ),
-        (
-            "smart_ads/native_request_projection/v1",
-            frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS) | with_integrity,
-            frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS),
-        ),
-        (
-            "smart_ads/certification_7b_record/v1",
-            frozenset(bundle_7b.Certification7BRecord.CORE_KEYS) | with_integrity,
-            frozenset(bundle_7b.Certification7BRecord.CORE_KEYS),
-        ),
-        (
-            "smart_ads/fact_evidence_selector/v1",
-            frozenset(bundle_7b.FactEvidenceSelector.KEYS),
-            None,
-        ),
+        ("smart_ads/analysis_policy/v1", frozenset(policy.AnalysisPolicy.KEYS), frozenset(policy.AnalysisPolicy.CORE_KEYS)),
+        ("smart_ads/finding/v1", frozenset(intelligence.Finding.KEYS), frozenset(intelligence.Finding.CORE_KEYS)),
+        ("smart_ads/certification_record/v1", frozenset(certification.AnalyticalCertificationRecord.KEYS), frozenset(certification.AnalyticalCertificationRecord.CORE_KEYS)),
+        ("smart_ads/native_request_projection/v1", frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS) | with_integrity, frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS)),
+        ("smart_ads/certification_7b_record/v1", frozenset(bundle_7b.Certification7BRecord.CORE_KEYS) | with_integrity, frozenset(bundle_7b.Certification7BRecord.CORE_KEYS)),
+        ("smart_ads/git_artifact_provenance/v1", frozenset(git_provenance.GitArtifactProvenance.KEYS), frozenset(git_provenance.GitArtifactProvenance.CORE_KEYS)),
+        ("smart_ads/negative_security_test_report/v1", frozenset(negative_security.NegativeSecurityTestReport.KEYS), frozenset(negative_security.NegativeSecurityTestReport.CORE_KEYS)),
+        ("smart_ads/certification_7a_record/v1", frozenset(certification_7a.Certification7ARecord.KEYS), frozenset(certification_7a.Certification7ARecord.CORE_KEYS)),
+        ("smart_ads/fact_evidence_selector/v1", frozenset(bundle_7b.FactEvidenceSelector.KEYS), None),
         ("smart_ads/fact_reconciliation/v1", frozenset(bundle_7b.FactReconciliation.KEYS), None),
     ]
+
+
+_PR3_P1_SCHEMA_IDS = frozenset(
+    {
+        "smart_ads/git_artifact_provenance/v1",
+        "smart_ads/negative_security_test_report/v1",
+        "smart_ads/certification_7a_record/v1",
+    }
+)
+
+
+@pytest.mark.parametrize("schema_id", sorted(_PR3_P1_SCHEMA_IDS))
+def test_p1_types_enforce_require_signed_roundtrip(
+    schema_id: str, instances: dict[str, Any]
+) -> None:
+    cls = P1_SCHEMA_TYPES[schema_id]
+    unsigned_dict = {**instances[schema_id].to_dict(), "integrity": UNSIGNED.to_dict()}
+    with pytest.raises(ClosedValidationError):
+        cls.from_dict(unsigned_dict, require_signed=True)
+    without_integrity = {k: v for k, v in unsigned_dict.items() if k != "integrity"}
+    with pytest.raises(ClosedValidationError):
+        cls.from_dict(without_integrity, require_signed=True)
+    signed_dict = {
+        **unsigned_dict,
+        "integrity": {
+            **UNSIGNED.to_dict(),
+            "content_digest": p1_content_digest(unsigned_dict),
+            "signature_base64": ("A" * 86) + "==",
+        },
+    }
+    parsed = cls.from_dict(signed_dict, require_signed=True)
+    assert parsed.to_dict() == signed_dict
 
 
 def test_class_key_constants_match_descriptor_and_a_real_to_dict(
@@ -462,21 +508,24 @@ _FRESH_IMPORT_CHECK = """
 import sys
 for name in sys.argv[1:]:
     __import__(name)
-for name in ("smart_ads.analytics", "smart_ads.reconciliation"):
+for name in ("smart_ads.analytics", "smart_ads.reconciliation", "smart_ads.adapters.pipeboard"):
     module = sys.modules[name]
     missing = [n for n in module.__all__ if not hasattr(module, n)]
     if missing:
         raise SystemExit(f"{name}: unresolved {missing}")
 """
-# A fresh interpreter does not inherit pytest's in-process pythonpath; CI has no editable install.
-_SRC_ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
+# Resolve smart_ads from the exact package root selected by the parent pytest process
+# (src/ in host/CI and site-packages in isolated wheel Docker suites).
+_SMART_ADS_IMPORT_ROOT = str(Path(smart_ads.__file__).resolve().parents[1])
+_SRC_ENV = {**os.environ, "PYTHONPATH": _SMART_ADS_IMPORT_ROOT}
 
 
 @pytest.mark.parametrize(
     "order",
     [
-        ("smart_ads.analytics", "smart_ads.reconciliation"),
-        ("smart_ads.reconciliation", "smart_ads.analytics"),
+        ("smart_ads.analytics", "smart_ads.reconciliation", "smart_ads.adapters.pipeboard"),
+        ("smart_ads.reconciliation", "smart_ads.analytics", "smart_ads.adapters.pipeboard"),
+        ("smart_ads.adapters.pipeboard", "smart_ads.reconciliation", "smart_ads.analytics"),
         ("smart_ads.contracts.schemas", "smart_ads.reconciliation", "smart_ads.analytics"),
         ("smart_ads.analytics.lattice", "smart_ads.reconciliation.tolerance"),
     ],
@@ -498,7 +547,8 @@ def test_contracts_schemas_loads_without_the_analysis_or_reconciliation_layers()
         "import sys\n"
         "import smart_ads.contracts.schemas\n"
         "loaded = [m for m in sys.modules if m.startswith(('smart_ads.analytics', "
-        "'smart_ads.reconciliation'))]\n"
+        "'smart_ads.reconciliation', 'smart_ads.adapters', 'smart_ads.application', "
+        "'smart_ads.domain', 'smart_ads.ports'))]\n"
         "if loaded:\n"
         "    raise SystemExit(f'unexpected: {loaded}')\n"
     )
