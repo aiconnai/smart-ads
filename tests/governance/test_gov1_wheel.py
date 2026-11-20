@@ -1380,4 +1380,40 @@ def test_validate_sorted_record_entries_rejects_malformed_pep427_hashes(
         )
 
 
+def test_wheel_archive_rejects_non_lf_record_separators_before_csv_and_cd_nul_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel_path, _ = gov1_wheel.build_reproducible_wheel(REPO_ROOT, tmp_path / "sep_out")
+    orig_bytes = wheel_path.read_bytes()
+    members, _, _, _ = gov1_wheel._read_and_validate_wheel_archive(orig_bytes)
+
+    def _forbid_csv_reader(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("csv.reader must not be reached on malformed RECORD separators")
+
+    with monkeypatch.context() as mp:
+        mp.setattr(gov1_wheel.csv, "reader", _forbid_csv_reader)
+        for bad_sep in ("\x0b" * 2000, "\u2028" * 2000, "\x85" * 2000, "a,b,1\ra,b,2\n", "a,b,1\n" * 513):
+            bad_members = {**members, gov1_wheel.EXPECTED_SELF_RECORD_PATH: bad_sep.encode("utf-8")}
+            with pytest.raises(ValueError, match="RECORD"):
+                gov1_wheel._validate_wheel_record(bad_members)
+
+    cd_off = int.from_bytes(orig_bytes[-6:-2], "little")
+    cd_size = int.from_bytes(orig_bytes[-10:-6], "little")
+    fn0_len = int.from_bytes(orig_bytes[cd_off + 28 : cd_off + 30], "little")
+    nul_cd_bytes = (
+        orig_bytes[: cd_off + 28]
+        + (fn0_len + 2).to_bytes(2, "little")
+        + orig_bytes[cd_off + 30 : cd_off + 46 + fn0_len]
+        + b"\x00x"
+        + orig_bytes[cd_off + 46 + fn0_len : -10]
+        + (cd_size + 2).to_bytes(4, "little")
+        + orig_bytes[-6:]
+    )
+    with zipfile.ZipFile(io.BytesIO(nul_cd_bytes), "r") as zf:
+        assert zf.infolist()[0].orig_filename.endswith("\x00x")
+        assert "\x00" not in zf.infolist()[0].filename
+    with pytest.raises(ValueError, match="contains NUL"):
+        gov1_wheel._read_and_validate_wheel_archive(nul_cd_bytes)
+
+
 

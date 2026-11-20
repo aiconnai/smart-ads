@@ -161,8 +161,11 @@ def _verify_pep427_record(members: Mapping[str, bytes]) -> tuple[list[dict[str, 
         record_text = raw_rec.decode("utf-8")
     except UnicodeDecodeError:
         raise ClosedValidationError("wheel RECORD: invalid UTF-8") from None
-    lines = record_text.splitlines()
-    if not lines or len(lines) > _MAX_WHEEL_ENTRIES or "\x00" in record_text or any(not ln or len(ln) > _MAX_WHEEL_RECORD_LINE_CHARS for ln in lines):
+    norm = record_text.replace("\r\n", "\n")
+    if "\r" in norm or any((ord(ch) < 32 and ch != "\n") or ch in "\x7f\x85\u2028\u2029" for ch in norm):
+        raise ClosedValidationError("wheel RECORD: forbidden CR, control, or non-LF line separator")
+    norm = norm[:-1] if norm.endswith("\n") else norm
+    if not norm or norm.count("\n") >= _MAX_WHEEL_ENTRIES or (bool(lines := norm.split("\n")) and any(not ln or len(ln) > _MAX_WHEEL_RECORD_LINE_CHARS for ln in lines)):
         raise ClosedValidationError("wheel RECORD: empty, blank, or oversized CSV row")
     seen: set[str] = set()
     entries: list[dict[str, Any]] = []

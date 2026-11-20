@@ -2155,11 +2155,15 @@ def verify_contiguous_zip_layout(
     if cursor != cd_offset:
         raise ValueError("wheel archive: unreferenced trailing gap between local entries and central directory")
     cd_cursor, cd_end = cd_offset, cd_offset + cd_size
-    for _ in range(cd_count):
+    for idx in range(cd_count):
         if cd_cursor + 46 > cd_end or raw_bytes[cd_cursor : cd_cursor + 4] != b"PK\x01\x02":
             raise ValueError("wheel archive: corrupt central directory header")
         cd_fname_len, cd_extra_len, cd_comment_len = struct.unpack_from("<HHH", raw_bytes, cd_cursor + 28)
-        cd_cursor += 46 + cd_fname_len + cd_extra_len + cd_comment_len
+        cd_next = cd_cursor + 46 + cd_fname_len + cd_extra_len + cd_comment_len
+        cd_raw_name = raw_bytes[cd_cursor + 46 : cd_cursor + 46 + cd_fname_len]
+        if cd_next > cd_end or infos[idx].orig_filename != infos[idx].filename or b"\x00" in cd_raw_name or cd_raw_name != infos[idx].filename.encode("utf-8"):
+            raise ValueError("wheel archive: central directory filename contains NUL or mismatches normalized UTF-8 filename")
+        cd_cursor = cd_next
     if cd_cursor != cd_end:
         raise ValueError("wheel archive: non-contiguous central directory byte span")
 
@@ -2280,15 +2284,18 @@ def _validate_wheel_record(
         record_text = raw_record.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("wheel RECORD: invalid UTF-8") from exc
-    if "\x00" in record_text or not record_text.strip():
-        raise ValueError("wheel RECORD: empty or contains NUL byte")
-    if record_text.count("\n") > 512 or record_text.count("\r") > 512:
-        raise ValueError("wheel RECORD: exceeds 512 rows ceiling")
-    lines = record_text.splitlines()
-    if not (1 <= len(lines) <= 512) or any(not (1 <= len(raw_line) <= 4096) for raw_line in lines):
-        raise ValueError("wheel RECORD: blank, > 4096-char, or > 512 lines in RECORD")
+    norm = record_text.replace("\r\n", "\n")
+    if "\r" in norm or any((ord(ch) < 32 and ch != "\n") or ch in "\x7f\x85\u2028\u2029" for ch in norm):
+        raise ValueError("wheel RECORD: forbidden CR, control, or non-LF line separator")
+    if norm.endswith("\n"):
+        norm = norm[:-1]
+    if not norm or norm.count("\n") >= 512:
+        raise ValueError("wheel RECORD: empty or exceeds 512 rows ceiling")
+    lines = norm.split("\n")
+    if any(not (1 <= len(raw_line) <= 4096) for raw_line in lines):
+        raise ValueError("wheel RECORD: blank or > 4096-char line in RECORD")
     try:
-        record_rows = list(csv.reader(io.StringIO(record_text, newline="")))
+        record_rows = list(csv.reader(lines))
     except csv.Error as exc:
         raise ValueError(f"wheel RECORD: invalid CSV syntax: {exc}") from exc
     if not (1 <= len(record_rows) <= 512):

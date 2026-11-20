@@ -553,6 +553,12 @@ def test_verifier_enforces_wheel_zip_deflate_record_and_member_binding() -> None
     ex_b_loc, _ = _put_signed(w_ex.store, {**copy.deepcopy(w_ex.store[w_ex.record.wheel_boundary_report_locator]), "sorted_record_entries": ex_ent, "sorted_record_digest": jcs_sha256(ex_ent)})
     with pytest.raises(ClosedValidationError, match="unallowlisted|member"):
         _verify_world(w_ex, record=_mut_rec(w_ex.record, wheel_boundary_report_locator=ex_b_loc))
+    cd_o, cd_sz = int.from_bytes(w.wheel_bytes[-6:-2], "little"), int.from_bytes(w.wheel_bytes[-10:-6], "little")
+    fn0 = int.from_bytes(w.wheel_bytes[cd_o + 28 : cd_o + 30], "little")
+    nul_cd_whl = w.wheel_bytes[: cd_o + 28] + (fn0 + 2).to_bytes(2, "little") + w.wheel_bytes[cd_o + 30 : cd_o + 46 + fn0] + b"\x00x" + w.wheel_bytes[cd_o + 46 + fn0 : -10] + (cd_sz + 2).to_bytes(4, "little") + w.wheel_bytes[-6:]
+    _verify_world(w)
+    with pytest.raises(ClosedValidationError, match="wheel_bytes"):
+        _verify_world(build_valid_7a_world(wheel_bytes=nul_cd_whl))
 
 
 def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None:
@@ -587,7 +593,7 @@ def test_verifier_bounds_deflate_bomb_archive_total_and_rfc4180_record() -> None
     over_256k_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=b"\xff" * 270_000)
     with pytest.raises(ClosedValidationError, match="256 KiB"):
         _verify_world(build_valid_7a_world(wheel_bytes=over_256k_whl))
-    for bad_csv, exp_pat in ((b'"unclosed,sha256=abc,1\n', "unclosed"), (b'"a""b",sha256=abc,1\n', "unallowlisted|unknown member"), (b"a,b,c," + (b"x," * 1000) + b"\n", "3 CSV columns"), (("a" * 4097 + ",sha256=abc,1\n").encode("utf-8"), "oversized"), (b"a,b,1\n" * 513, "oversized")):
+    for bad_csv, exp_pat in ((b'"unclosed,sha256=abc,1\n', "unclosed"), (b'"a""b",sha256=abc,1\n', "unallowlisted|unknown member"), (b"a,b,c," + (b"x," * 1000) + b"\n", "3 CSV columns"), (("a" * 4097 + ",sha256=abc,1\n").encode("utf-8"), "oversized"), (b"a,b,1\n" * 513, "oversized"), ((("a,b,1\x0b" * 2000) + "\n").encode("utf-8"), "non-LF|separator"), ((("a,b,1\u2028" * 2000) + "\n").encode("utf-8"), "non-LF|separator"), (b"a,b,1\ra,b,2\n", "CR|separator")):
         bad_csv_whl = _build_deterministic_wheel_bytes(w.resolved_git_blobs, custom_record_raw=bad_csv)
         with pytest.raises(ClosedValidationError, match=exp_pat):
             _verify_world(build_valid_7a_world(wheel_bytes=bad_csv_whl))
@@ -653,7 +659,7 @@ def test_verifier_rejects_regression_fixture_and_inventory_date_mismatch() -> No
 
 def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
     w = build_valid_7a_world()
-    for field_mut in ("scope", "hmac", "dup_bnd"):
+    for field_mut, exp_m in (("scope", "scope"), ("hmac", "HMAC|derivation"), ("dup_bnd", r"corpus\.private_account_bindings: duplicate")):
         corpus_doc = loads_strict_json(w.corpus_bytes)
         if field_mut == "scope":
             corpus_doc["cases"][0]["collection_request"]["resource_scope_ref"] = "scope:other-scope"
@@ -665,7 +671,7 @@ def test_verifier_rejects_cross_scope_hmac_and_batch_tampering() -> None:
         p = GitArtifactProvenance(CORPUS_GIT_PATH[0], _COMMIT_SHA, CORPUS_GIT_PATH[1], compute_git_blob_oid(bad_bytes), "sha256:" + hashlib.sha256(bad_bytes).hexdigest(), "2026-09-07T10:00:04Z")
         c_loc, _ = _put_signed(store2, p.to_dict())
         bad_ev = replace(w.record.fixture_evidence, corpus_git_locator=c_loc, corpus_digest=p.file_content_sha256)
-        with pytest.raises(ClosedValidationError):
+        with pytest.raises(ClosedValidationError, match=exp_m):
             _verify_world(w, record=_mut_rec(w.record, fixture_evidence=bad_ev), object_resolver=store2.__getitem__, corpus_bytes=bad_bytes, resolved_git_blobs={**w.resolved_git_blobs, CORPUS_GIT_PATH[1]: bad_bytes})
 
     c1 = w.record.fixture_evidence.cases[1]
