@@ -1,19 +1,10 @@
 """Host OCI/cgroup-v2 eligibility probe, premask namespace sealer, and live kernel readback."""
 from __future__ import annotations
 
-import ast
-from collections.abc import Mapping
+import ast, contextlib, errno, os, platform, re, shutil, signal, stat, subprocess, sys, time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import os
 from pathlib import Path
-import platform
-import re
-import shutil
-import signal
-import stat
-import subprocess
-import sys
-import time
 from typing import Any, Final
 
 from tools.governance.gov1_7a_negative import (
@@ -151,6 +142,54 @@ def _probe_runc_binary(runc_binary: str) -> tuple[bool, str | None]:
     return (True, proc.stdout.splitlines()[0].strip()) if proc.returncode == 0 and proc.stdout.strip() else (False, None)
 
 
+def _validate_exec_traversable_dir(path: Path) -> Path:
+    raw_p = Path(path)
+    if ".." in raw_p.parts:
+        raise ValueError(f"work root path must not contain '..': {raw_p}")
+    abs_p = Path(os.path.abspath(raw_p))
+    cur = Path(abs_p.anchor)
+    chain = [cur]
+    for part in abs_p.parts[1:]:
+        cur = cur / part
+        chain.append(cur)
+    for anc in chain:
+        st = os.stat(anc, follow_symlinks=False)
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+            raise ValueError(f"work root component is symlink or non-directory: {anc}")
+        if (st.st_mode & 0o001) == 0:
+            raise ValueError(f"work root ancestor {anc} lacks world-execute (o+x) for userns")
+    if not os.access(abs_p, os.W_OK | os.X_OK):
+        raise ValueError(f"work root directory not writable/searchable: {abs_p}")
+    if (os.statvfs(abs_p).f_flag & getattr(os, "ST_NOEXEC", 0)) != 0:
+        raise ValueError(f"work root directory is mounted ST_NOEXEC: {abs_p}")
+    return abs_p
+
+
+def select_exec_work_root_parent(explicit_parent: Path | None = None, candidates: Sequence[Path] = (Path("/tmp"), Path("/var/tmp"))) -> Path:
+    """Select a non-symlink, writable, non-`ST_NOEXEC`, `o+x`-ancestor work-root parent."""
+    if explicit_parent is not None:
+        try:
+            return _validate_exec_traversable_dir(Path(explicit_parent))
+        except OSError as exc:
+            raise ValueError(f"invalid work_root_parent {explicit_parent}: {exc}") from exc
+    if isinstance(candidates, (str, bytes, bytearray)) or not isinstance(candidates, Sequence) or not candidates:
+        raise ValueError("candidates: expected non-empty Sequence[Path]")
+    errors: list[str] = []
+    for cand in candidates:
+        try:
+            return _validate_exec_traversable_dir(Path(cand))
+        except (ValueError, OSError) as exc:
+            errors.append(f"{cand}: {exc}")
+    raise ValueError(f"no exec-capable, userns-traversable work root parent found ({'; '.join(errors)})")
+
+
+def _dir_cgroup_caps(d: Path) -> tuple[bool, bool]:
+    if d.is_symlink() or not d.is_dir():
+        return False, False
+    swap = not (d / "memory.swap.max").is_symlink() and (d / "memory.swap.max").is_file()
+    return swap, all(not (d / n).is_symlink() and (d / n).is_file() for n in ("memory.peak", "pids.peak"))
+
+
 def _probe_cgroup_v2(cg_root: Path, eff_euid: int) -> tuple[bool, list[str], list[str]]:
     ctrl_file = cg_root / "cgroup.controllers"
     if ctrl_file.is_symlink() or not ctrl_file.is_file():
@@ -161,38 +200,43 @@ def _probe_cgroup_v2(cg_root: Path, eff_euid: int) -> tuple[bool, list[str], lis
         return False, [], []
     if not _REQUIRED_CONTROLLERS.issubset(controllers):
         return False, controllers, ["missing_cgroup_controllers"]
-    swap_ok = (cg_root / "memory.swap.max").is_file() or (cg_root / "smart_ads_7a/memory.swap.max").is_file()
-    if not swap_ok:
-        try:
-            swap_ok = any(p.is_dir() and not p.is_symlink() and (p / "memory.swap.max").is_file() for p in cg_root.iterdir())
-        except OSError:
-            swap_ok = False
-    if not swap_ok and eff_euid == 0:
+    s0, p0 = _dir_cgroup_caps(cg_root)
+    s1, p1 = _dir_cgroup_caps(cg_root / "smart_ads_7a")
+    swap_ok, peak_ok = (s0 or s1), (p0 or p1)
+    if not (swap_ok and peak_ok):
+        with contextlib.suppress(OSError):
+            for child in cg_root.iterdir():
+                cs, cp = _dir_cgroup_caps(child)
+                swap_ok, peak_ok = (swap_ok or cs), (peak_ok or cp)
+    if not (swap_ok and peak_ok) and eff_euid == 0:
         parent, probe_leaf = cg_root / "smart_ads_7a", cg_root / "smart_ads_7a" / f".swap_probe_{os.getpid()}"
+        parent_existed = parent.exists()
         try:
             parent.mkdir(mode=0o755, exist_ok=True)
             for sc in (cg_root / "cgroup.subtree_control", parent / "cgroup.subtree_control"):
                 if sc.exists():
                     sc.write_text("+cpu +memory +pids\n", encoding="utf-8")
             probe_leaf.mkdir(mode=0o755, exist_ok=True)
-            swap_ok = (probe_leaf / "memory.swap.max").exists()
+            ls, lp = _dir_cgroup_caps(probe_leaf)
+            swap_ok, peak_ok = (swap_ok or ls), (peak_ok or lp)
         except OSError:
-            swap_ok = False
+            pass
         finally:
-            try:
-                if probe_leaf.exists():
-                    os.rmdir(probe_leaf)
-            except OSError:
-                pass
-    return swap_ok, controllers, ([] if swap_ok else ["memory_swap_max_unavailable"])
+            for cleanup_d in (probe_leaf, *(() if parent_existed else (parent,))):
+                with contextlib.suppress(OSError):
+                    if cleanup_d.exists():
+                        os.rmdir(cleanup_d)
+    reasons = [*(("memory_swap_max_unavailable",) if not swap_ok else ()), *(("cgroup_peak_files_unavailable",) if not peak_ok else ())]
+    return (swap_ok and peak_ok), controllers, reasons
 
 
 def probe_7a_oci_host(
     *, base_oci_dir: Path | None = None, cgroup_root: Path = Path("/sys/fs/cgroup"),
     runc_binary: str = "runc", sys_platform: str | None = None,
     machine: str | None = None, euid: int | None = None,
+    work_root_parent: Path | None = None,
 ) -> dict[str, Any]:
-    """Probe Linux amd64 root, `runc`, cgroup-v2 controllers + swap, and optional base OCI layout."""
+    """Probe Linux amd64 root, `runc`, cgroup-v2 controllers + swap/peaks, work root, and optional base OCI."""
     if (sys_platform is not None and type(sys_platform) is not str) or (machine is not None and type(machine) is not str):
         raise ValueError("sys_platform and machine must be str or None")
     if (euid is not None and type(euid) is not int) or type(runc_binary) is not str or not runc_binary.strip():
@@ -207,6 +251,12 @@ def probe_7a_oci_host(
     for extra in (*(("euid_not_root",) if eff_euid != 0 else ()), *(("runc_unavailable",) if not runc_ok else ()), *cg_reasons):
         if extra not in reasons:
             reasons.append(extra)
+    if work_root_parent is not None or (sys_platform is None and sys.platform == "linux"):
+        try:
+            select_exec_work_root_parent(work_root_parent)
+        except ValueError:
+            if "work_root_noexec_or_untraversable" not in reasons:
+                reasons.append("work_root_noexec_or_untraversable")
     base_verified: bool | None = None
     if base_oci_dir is not None:
         try:
@@ -298,10 +348,17 @@ def _check_namespaces_status_and_fds(pid_dir: Path, self_dir: Path, *, expect_se
     raw_fds = os.listdir(pid_dir / "fd")
     if any(not (x.isascii() and x.isdigit()) for x in raw_fds) or not ({int(x) for x in raw_fds} <= {0, 1, 2}):
         raise ValueError(f"container has open FDs above 2: {sorted(raw_fds)!r}")
-    if (pid_dir / "environ").is_file():
-        items = [seg.decode("utf-8") for seg in (pid_dir / "environ").read_bytes().split(b"\x00") if seg]
-        if any("=" not in it for it in items) or dict(it.split("=", 1) for it in items) != dict(_EXACT_ENV):
-            raise ValueError("proc/environ mismatch against exact 7A environment")
+    env_path = pid_dir / "environ"
+    if env_path.is_symlink() or not env_path.is_file():
+        raise ValueError("proc/environ missing or symlink")
+    raw_env = env_path.read_bytes()
+    if raw_env.endswith(b"\x00"):
+        raw_env = raw_env[:-1]
+    if not raw_env:
+        raise ValueError("proc/environ is empty")
+    items = [seg.decode("utf-8") for seg in raw_env.split(b"\x00")]
+    if any(not it or "=" not in it for it in items) or len(items) != len(_EXACT_ENV) or dict(it.split("=", 1) for it in items) != dict(_EXACT_ENV):
+        raise ValueError("proc/environ mismatch against exact 7A environment")
 
 
 def _check_netns_and_loopback_absent(pid_dir: Path, proc_root: Path, container_pid: int) -> None:
@@ -400,6 +457,13 @@ def _read_cgroup_and_rlimits(pid_dir: Path, lease: CgroupV2Lease) -> tuple[int, 
         if not (txt.isascii() and txt.isdigit()):
             raise ValueError(f"cgroup {fname} invalid integer: {txt!r}")
         raw_vals.append(int(txt))
+    for peak_name in ("memory.peak", "pids.peak"):
+        peak_p = lease.cgroup_dir / peak_name
+        if peak_p.is_symlink() or not peak_p.is_file():
+            raise ValueError(f"cgroup {peak_name} missing or symlink at {peak_p}")
+        peak_txt = peak_p.read_text(encoding="utf-8").strip()
+        if not (peak_txt.isascii() and peak_txt.isdigit()):
+            raise ValueError(f"cgroup {peak_name} invalid integer: {peak_txt!r}")
     cpu_soft, fsize_soft, fsize_hard = -1, -1, -1
     for ln in (pid_dir / "limits").read_text(encoding="utf-8").splitlines():
         if ln.startswith("Max cpu time") and len(cols := ln[len("Max cpu time") :].split()) >= 2 and cols[0].isdigit():
@@ -451,13 +515,18 @@ def _walk_tmp_max_regular_file_bytes(tmp_fd: int) -> int:
         while stack:
             cur_fd = stack.pop()
             try:
-                with os.scandir(os.dup(cur_fd)) as entries:
+                with os.scandir(cur_fd) as entries:
                     for entry in entries:
-                        st = os.stat(entry.name, dir_fd=cur_fd, follow_symlinks=False)
-                        if stat.S_ISREG(st.st_mode) and st.st_size > max_bytes:
-                            max_bytes = st.st_size
-                        elif stat.S_ISDIR(st.st_mode):
-                            stack.append(os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | no_follow, dir_fd=cur_fd))
+                        try:
+                            st = os.stat(entry.name, dir_fd=cur_fd, follow_symlinks=False)
+                            if stat.S_ISREG(st.st_mode) and st.st_size > max_bytes:
+                                max_bytes = st.st_size
+                            elif stat.S_ISDIR(st.st_mode):
+                                stack.append(os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | no_follow, dir_fd=cur_fd))
+                        except OSError as exc:
+                            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                                continue
+                            raise
             finally:
                 os.close(cur_fd)
     finally:
@@ -474,21 +543,28 @@ def harvest_cgroup_and_tmp_usage(
         raise ValueError("invalid lease or tmp_fd")
     if type(stdout_bytes) is not int or stdout_bytes < 0 or type(stderr_bytes) is not int or stderr_bytes < 0:
         raise ValueError("stdout_bytes and stderr_bytes must be non-negative ints")
-    cpu_stat = _parse_cgroup_kv_int_file(lease.cgroup_dir / "cpu.stat", "cpu.stat")
-    mem_ev = _parse_cgroup_kv_int_file(lease.cgroup_dir / "memory.events", "memory.events")
-    pids_ev = _parse_cgroup_kv_int_file(lease.cgroup_dir / "pids.events", "pids.events")
-    if "usage_usec" not in cpu_stat or "oom" not in mem_ev or "oom_kill" not in mem_ev or "max" not in pids_ev:
-        raise ValueError("cgroup stat/events missing required keys")
-    mem_peak = int((lease.cgroup_dir / "memory.peak").read_text(encoding="utf-8").strip())
-    pids_peak = int((lease.cgroup_dir / "pids.peak").read_text(encoding="utf-8").strip())
+    try:
+        cpu_stat = _parse_cgroup_kv_int_file(lease.cgroup_dir / "cpu.stat", "cpu.stat")
+        mem_ev = _parse_cgroup_kv_int_file(lease.cgroup_dir / "memory.events", "memory.events")
+        pids_ev = _parse_cgroup_kv_int_file(lease.cgroup_dir / "pids.events", "pids.events")
+        if "usage_usec" not in cpu_stat or "oom" not in mem_ev or "oom_kill" not in mem_ev or "max" not in pids_ev:
+            raise ValueError("cgroup stat/events missing required keys")
+        for pk in ("memory.peak", "pids.peak"):
+            if (lease.cgroup_dir / pk).is_symlink() or not (lease.cgroup_dir / pk).is_file():
+                raise ValueError(f"{pk}: missing cgroup file {lease.cgroup_dir / pk}")
+        mem_peak = int((lease.cgroup_dir / "memory.peak").read_text(encoding="utf-8").strip())
+        pids_peak = int((lease.cgroup_dir / "pids.peak").read_text(encoding="utf-8").strip())
+        vfs = os.fstatvfs(tmp_fd)
+        max_file = _walk_tmp_max_regular_file_bytes(tmp_fd)
+    except OSError as exc:
+        raise ValueError(f"cgroup/tmp usage harvest I/O failed: {exc}") from exc
     oom_delta, oom_kill_delta, pids_max_delta = mem_ev["oom"] - lease.baseline_oom, mem_ev["oom_kill"] - lease.baseline_oom_kill, pids_ev["max"] - lease.baseline_pids_max
     if oom_delta < 0 or oom_kill_delta < 0 or pids_max_delta < 0:
         raise ValueError("monotonic cgroup event delta regression")
-    vfs = os.fstatvfs(tmp_fd)
     return {
         "cpu_time_us": cpu_stat["usage_usec"], "memory_peak_bytes": mem_peak, "pids_peak": pids_peak,
         "tmpfs_peak_bytes": (vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize, "tmpfs_peak_inodes": vfs.f_files - vfs.f_ffree,
-        "max_file_bytes": _walk_tmp_max_regular_file_bytes(tmp_fd), "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
+        "max_file_bytes": max_file, "stdout_bytes": stdout_bytes, "stderr_bytes": stderr_bytes,
         "oom_delta": oom_delta, "oom_kill_delta": oom_kill_delta, "pids_max_delta": pids_max_delta,
     }
 
@@ -524,5 +600,6 @@ _verify_helper_scripts()
 
 __all__ = [
     "CgroupV2Lease", "LiveContainerReadback", "create_7a_leaf_cgroup", "harvest_cgroup_and_tmp_usage",
-    "probe_7a_oci_host", "readback_live_container_state", "seal_container_premask_namespaces", "terminate_whole_cgroup",
+    "probe_7a_oci_host", "readback_live_container_state", "seal_container_premask_namespaces",
+    "select_exec_work_root_parent", "terminate_whole_cgroup",
 ]

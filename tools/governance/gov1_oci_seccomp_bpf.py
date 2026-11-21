@@ -42,6 +42,7 @@ STAGE7_PEP517_EXTRA_SYSCALLS: Final[frozenset[str]] = frozenset(
     {
         "chdir",
         "chmod",
+        "clock_nanosleep",
         "clone",
         "clone3",
         "close_range",
@@ -53,6 +54,7 @@ STAGE7_PEP517_EXTRA_SYSCALLS: Final[frozenset[str]] = frozenset(
         "fchmodat",
         "fork",
         "fstatfs",
+        "nanosleep",
         "prctl",
         "statfs",
         "utimensat",

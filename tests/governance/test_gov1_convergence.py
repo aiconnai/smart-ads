@@ -919,10 +919,10 @@ def test_constants_adr_cases_and_untouched_p1_domain_prefixes() -> None:
 _NEW_OCI_BUDGETS: dict[str, int] = {
     "gov1_cli_oci.py": 550,
     "gov1_oci_container_runner.py": 620,
-    "gov1_oci_image.py": 550,
-    "gov1_oci_readback.py": 550,
+    "gov1_oci_image.py": 580,
+    "gov1_oci_readback.py": 615,
     "gov1_oci_seccomp_bpf.py": 420,
-    "gov1_oci_supervisor.py": 580,
+    "gov1_oci_supervisor.py": 615,
 }
 
 

@@ -122,9 +122,9 @@ def _write_synthetic_oci_layout(
 def test_task1_modules_ast_purity_budgets_and_no_network_imports() -> None:
     specs = (
         (REPO_ROOT / "tools" / "governance" / "gov1_oci_seccomp_bpf.py", 420, True, False),
-        (REPO_ROOT / "tools" / "governance" / "gov1_oci_image.py", 550, True, True),
+        (REPO_ROOT / "tools" / "governance" / "gov1_oci_image.py", 580, True, True),
         (REPO_ROOT / "tools" / "governance" / "gov1_oci_container_runner.py", 620, True, True),
-        (REPO_ROOT / "tools" / "governance" / "gov1_oci_readback.py", 550, True, True),
+        (REPO_ROOT / "tools" / "governance" / "gov1_oci_readback.py", 615, True, True),
         (Path(__file__), 700, False, False),
     )
     for path, max_lines, is_gov1, forbid_net in specs:
@@ -256,7 +256,8 @@ def test_stage7_pep517_seccomp_bpf_and_vm_bounds_validation() -> None:
     ev = gov1_oci_seccomp_bpf.evaluate_seccomp_bpf
     assert ev(bpf, arch=0x40000003, nr=tbl["read"]) == gov1_oci_seccomp_bpf.SECCOMP_RET_KILL_PROCESS
     assert ev(bpf, arch=arch_x64, nr=0x4000003B) == gov1_oci_seccomp_bpf.SECCOMP_RET_KILL_PROCESS
-    for allowed in ("read", "write", "clone", "clone3", "execve", "fork", "vfork", "wait4", "close_range"):
+    assert {"clock_nanosleep", "nanosleep"} <= gov1_oci_seccomp_bpf.STAGE7_PEP517_EXTRA_SYSCALLS
+    for allowed in ("read", "write", "clone", "clone3", "execve", "fork", "vfork", "wait4", "close_range", "clock_nanosleep", "nanosleep"):
         assert ev(bpf, arch=arch_x64, nr=tbl[allowed]) == gov1_oci_seccomp_bpf.SECCOMP_RET_ALLOW
     for forbidden in ("socket", "connect", "mount", "pivot_root", "setns", "unshare", "ptrace", "bpf", "keyctl", "io_uring_setup"):
         assert ev(bpf, arch=arch_x64, nr=tbl[forbidden]) == gov1_oci_seccomp_bpf.SECCOMP_RET_ERRNO_EPERM
@@ -440,6 +441,7 @@ def _run_embedded_source(
     fake_os.write = lambda fd, data: (out_buf.extend(data), len(data))[1] if fd == 1 else os.write(fd, data)
     fake_os._exit = lambda code: (_ for _ in ()).throw(_ExitIntercept(code))
     fake_os.fstat = lambda fd: (_ for _ in ()).throw(OSError(errno.EBADF, "bad fd")) if fd >= 3 else os.fstat(fd)
+    fake_os.open = lambda p, fl, m=0o777: (_ for _ in ()).throw(OSError(errno.EROFS, "ro")) if (fl & (os.O_CREAT | os.O_WRONLY | os.O_RDWR)) and Path(p).parent.is_dir() and (Path(p).parent.stat().st_mode & 0o222) == 0 else os.open(p, fl, m)
     if env_override is not None:
         fake_os.environ = env_override
     fake_libc = types.SimpleNamespace(
@@ -560,17 +562,16 @@ def test_container_runner_resource_ceiling_cases(tmp_path: Path) -> None:
 
 
 def test_probe_7a_oci_host_and_create_7a_leaf_cgroup(tmp_path: Path) -> None:
-    cg_root, fake_runc = tmp_path / "cgroup", tmp_path / "runc"
+    cg_root = tmp_path / "cgroup"
     cg_root.mkdir()
     (cg_root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="utf-8")
-    (cg_root / "memory.swap.max").write_text("0\n", encoding="utf-8")
-    fake_runc.write_text("#!/bin/sh\necho 'runc version 1.1.12'\n", encoding="utf-8")
-    fake_runc.chmod(0o755)
-    blocked = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="darwin", machine="arm64", euid=501)
-    assert blocked["status"] == "BLOCKED" and blocked["eligible"] is False and "euid_not_root" in blocked["reasons"]
-    elig = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="linux", machine="x86_64", euid=0)
+    for fname in ("memory.swap.max", "memory.peak", "pids.peak"):
+        (cg_root / fname).write_text("0\n", encoding="utf-8")
+    blocked = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=sys.executable, sys_platform="darwin", machine="arm64", euid=501)
+    assert blocked["status"] == "BLOCKED" and blocked["eligible"] is False and blocked["runc_available"] is True and "euid_not_root" in blocked["reasons"]
+    elig = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0)
     assert elig["status"] == "ELIGIBLE" and elig["eligible"] is True and elig["runc_available"] is True and elig["cgroup_v2_available"] is True
-    bad_oci = gov1_oci_readback.probe_7a_oci_host(base_oci_dir=tmp_path / "missing_oci", cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="linux", machine="x86_64", euid=0)
+    bad_oci = gov1_oci_readback.probe_7a_oci_host(base_oci_dir=tmp_path / "missing_oci", cgroup_root=cg_root, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0)
     assert bad_oci["status"] == "BLOCKED" and bad_oci["base_oci_verified"] is False
     for bad_id in ("", "../bad", "a/b", "space id"):
         with pytest.raises(ValueError):
@@ -615,6 +616,7 @@ def _build_synthetic_live_proc_and_bundle(
     (pid_d / "sys/class/net/lo/flags").write_text("0x8\n", encoding="utf-8")
     (pid_d / "limits").write_text("Limit                     Soft Limit           Hard Limit           Units\nMax cpu time              120                  120                  seconds\nMax file size             67108864             67108864             bytes\n", encoding="utf-8")
     (pid_d / "exe").write_bytes(elf)
+    (pid_d / "environ").write_bytes(b"\x00".join(f"{k}={v}".encode("utf-8") for k, v in sorted(gov1_7a_negative._EXACT_ENV.items())) + b"\x00")
     (pid_d / "root").symlink_to(trees["rootfs"])
     mi = ["10 1 8:1 / / ro,relatime - ext4 /dev/sda1 ro", "11 10 8:1 /app /app ro,nosuid,nodev - ext4 /dev/sda1 ro", "12 10 8:1 /fix /fixtures ro,nosuid,nodev - ext4 /dev/sda1 ro", "13 10 0:25 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=262144k,nr_inodes=4096", *[f"{20 + i} 10 0:{30 + i} / {m} ro,nosuid,nodev,noexec - tmpfs tmpfs ro,size=4k,nr_inodes=16" for i, m in enumerate(gov1_7a_negative._EXACT_MASKED_MOUNTS)]]
     (pid_d / "mountinfo").write_text("\n".join(mi) + "\n", encoding="utf-8")

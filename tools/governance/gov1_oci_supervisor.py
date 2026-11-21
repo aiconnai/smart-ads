@@ -184,20 +184,34 @@ def _wait_or_kill_proc(proc: Any) -> int:
         proc.kill()
         return 137 if (rc := proc.wait(timeout=5.0)) is None else int(rc)
 
+def _await_runc_pid_file(pid_file: Path, proc: Any, deadline: float) -> int:
+    while True:
+        if pid_file.is_symlink():
+            raise ValueError(f"runc pid-file symlink forbidden at {pid_file}")
+        if pid_file.is_file():
+            break
+        if proc.poll() is not None and not pid_file.is_file():
+            raise ValueError(f"runc exited before creating pid-file at {pid_file}")
+        if time.monotonic() >= deadline:
+            raise ValueError(f"timed out waiting for runc pid-file at {pid_file}")
+        time.sleep(0.005)
+    if pid_file.is_symlink():
+        raise ValueError(f"runc pid-file symlink forbidden at {pid_file}")
+    raw_pid = pid_file.read_text(encoding="utf-8").strip()
+    if not (raw_pid.isascii() and raw_pid.isdigit()) or int(raw_pid) <= 1:
+        raise ValueError(f"invalid container PID in pid-file: {raw_pid!r}")
+    return int(raw_pid)
+
 def _handshake_and_ready_gate(*, proc: Any, fds: dict[str, int | None], pid_file: Path, lease: CgroupV2Lease, composite_spec: CompositeOciBundleSpec, bundle_trees: Mapping[str, Path], seccomp_mode_byte: bytes, seccomp_profile: dict[str, Any] | None, ready_validator: Callable[[LiveContainerReadback], None] | None, hooks: RuncSubrunHooks) -> LiveContainerReadback:
     deadline, stdout_r, stdin_w = time.monotonic() + _STARTUP_TIMEOUT_S, fds["stdout_r"], fds["stdin_w"]
     if stdout_r is None or stdin_w is None:
         raise ValueError("missing supervisor handshake pipe FDs")
     _read_banner_with_deadline(stdout_r, fds["stderr_r"], crun.PREMASK_BANNER, deadline, "PREMASK")
-    if pid_file.is_symlink() or not pid_file.is_file():
-        raise ValueError(f"runc pid-file missing or symlink at {pid_file}")
-    raw_pid = pid_file.read_text(encoding="utf-8").strip()
-    if not (raw_pid.isascii() and raw_pid.isdigit()) or int(raw_pid) <= 1:
-        raise ValueError(f"invalid container PID in pid-file: {raw_pid!r}")
-    hooks.seal_premask(int(raw_pid))
+    cont_pid = _await_runc_pid_file(pid_file, proc, deadline)
+    hooks.seal_premask(cont_pid)
     _write_all_fd(stdin_w, seccomp_mode_byte)
     _read_banner_with_deadline(stdout_r, fds["stderr_r"], crun.READY_BANNER, deadline, "READY")
-    live_rb = hooks.readback_state(container_pid=int(raw_pid), lease=lease, composite_spec=composite_spec, bundle_trees=bundle_trees, expect_seccomp=(seccomp_mode_byte != crun.SECCOMP_MODE_SKIP), seccomp_profile=seccomp_profile)
+    live_rb = hooks.readback_state(container_pid=cont_pid, lease=lease, composite_spec=composite_spec, bundle_trees=bundle_trees, expect_seccomp=(seccomp_mode_byte != crun.SECCOMP_MODE_SKIP), seccomp_profile=seccomp_profile)
     fds["tmp_fd"] = live_rb.tmp_fd
     if ready_validator is not None:
         try:
@@ -251,7 +265,7 @@ def _cleanup_subrun_resources(*, fds: dict[str, int | None], proc: Any | None, l
     if bundle_dir.is_symlink() or bundle_dir.exists():
         hooks.cleanup_bundle(bundle_dir)
 
-def _execute_runc_subrun(*, instance_id: str, composite_spec: CompositeOciBundleSpec, bundles_root: Path, runc_root_dir: Path, cgroup_root: Path, runc_binary: str, process_args: Sequence[str], seccomp_mode_byte: bytes, task_spec: Mapping[str, Any] | None = None, ready_only: bool = False, extra_app_files: Mapping[str, bytes] | None = None, seccomp_profile: dict[str, Any] | None = None, ready_validator: Callable[[LiveContainerReadback], None] | None = None, hooks: RuncSubrunHooks = RuncSubrunHooks()) -> SubrunExecutionResult:
+def _execute_runc_subrun(*, instance_id: str, composite_spec: CompositeOciBundleSpec, bundles_root: Path, runc_root_dir: Path, cgroup_root: Path, runc_binary: str, process_args: Sequence[str], seccomp_mode_byte: bytes, task_spec: Mapping[str, Any] | None = None, ready_only: bool = False, extra_app_files: Mapping[str, bytes] | None = None, extra_app_modes: Mapping[str, int] | None = None, seccomp_profile: dict[str, Any] | None = None, ready_validator: Callable[[LiveContainerReadback], None] | None = None, hooks: RuncSubrunHooks = RuncSubrunHooks()) -> SubrunExecutionResult:
     if seccomp_mode_byte not in (crun.SECCOMP_MODE_7A, crun.SECCOMP_MODE_SKIP, crun.SECCOMP_MODE_STAGE7_PEP517):
         raise ValueError(f"unsupported seccomp_mode_byte: {seccomp_mode_byte!r}")
     bundle_dir = bundles_root / instance_id
@@ -259,7 +273,8 @@ def _execute_runc_subrun(*, instance_id: str, composite_spec: CompositeOciBundle
     lease, proc = None, None
     try:
         lease = hooks.create_cgroup(instance_id, cgroup_root=cgroup_root)
-        trees = hooks.materialize_bundle(composite_spec=composite_spec, bundle_dir=bundle_dir, extra_app_files=extra_app_files)
+        mat_kw = {"extra_app_modes": extra_app_modes} if extra_app_modes is not None else {}
+        trees = hooks.materialize_bundle(composite_spec=composite_spec, bundle_dir=bundle_dir, extra_app_files=extra_app_files, **mat_kw)
         (bundle_dir / "config.json").write_bytes(canonicalize(build_runc_oci_config_json(cgroup_rel_path=lease.cgroup_rel_path, bundle_trees=trees, process_args=process_args)))
         os.chmod(bundle_dir / "config.json", 0o444)
         fds["stdin_r"], fds["stdin_w"] = os.pipe()
@@ -287,14 +302,22 @@ def _execute_runc_subrun(*, instance_id: str, composite_spec: CompositeOciBundle
     finally:
         _cleanup_subrun_resources(fds=fds, proc=proc, lease=lease, bundle_dir=bundle_dir, runc_binary=runc_binary, runc_root_dir=runc_root_dir, instance_id=instance_id, hooks=hooks)
 
-def _prepare_supervisor_work_dirs(work_dir: Path) -> tuple[Path, Path, Path]:
+def _prepare_supervisor_work_dirs(work_dir: Path, *, require_exec_traversable: bool = False) -> tuple[Path, Path, Path]:
     w_root = Path(work_dir)
     bundles_dir, runc_root = w_root / "bundles", w_root / "runc-root"
     if w_root.is_symlink() or bundles_dir.is_symlink() or runc_root.is_symlink():
         raise ValueError(f"work_dir or subdirectories must not be symlinks: {w_root}")
+    existed = w_root.exists()
     for d, mode in ((w_root, 0o755), (bundles_dir, 0o755), (runc_root, 0o700)):
         d.mkdir(parents=(d is w_root), mode=mode, exist_ok=True)
         os.chmod(d, mode)
+    if require_exec_traversable:
+        try:
+            oci_rb.select_exec_work_root_parent(w_root)
+        except ValueError:
+            if not existed:
+                oci_img.cleanup_runc_bundle_trees(w_root)
+            raise
     return w_root, bundles_dir, runc_root
 
 def _validate_sandbox_profile_payload(sandbox_profile_payload: object) -> tuple[str, bytes, bytes]:
@@ -344,7 +367,7 @@ class LinuxRuncSealedOciSupervisor(SealedOciSupervisorPort):
             raise ValueError("composite_spec must be CompositeOciBundleSpec and runc_binary non-empty str")
         self.composite_spec, self.build_run_id = composite_spec, neg7a._strict_str(build_run_id, "build_run_id")
         neg7a._opaque_ref_str(f"sandbox:oci-pos-7a-{self.build_run_id}-00", "build_run_id", expected_prefix="sandbox")
-        self._work_dir, self._bundles_dir, self._runc_root = _prepare_supervisor_work_dirs(work_dir)
+        self._work_dir, self._bundles_dir, self._runc_root = _prepare_supervisor_work_dirs(work_dir, require_exec_traversable=(hooks is None))
         self._seccomp_profile = copy.deepcopy(seccomp_profile) if seccomp_profile is not None else None
         self._cgroup_root, self._runc_binary = Path(cgroup_root), runc_binary
         self._hooks = RuncSubrunHooks() if hooks is None else hooks
@@ -484,7 +507,7 @@ class OciIsolatedWheelProbeRunner(IsolatedWheelProbeRunner):
         if type(runc_binary) is not str or not runc_binary.strip():
             raise ValueError("runc_binary: expected non-empty str")
         self._base_oci_dir = Path(base_oci_dir)
-        self._work_dir, self._bundles_dir, self._runc_root = _prepare_supervisor_work_dirs(work_dir)
+        self._work_dir, self._bundles_dir, self._runc_root = _prepare_supervisor_work_dirs(work_dir, require_exec_traversable=(hooks is None))
         self._seccomp_profile = copy.deepcopy(seccomp_profile) if seccomp_profile is not None else gov1_sandbox.build_default_7a_seccomp_profile()
         self._cgroup_root, self._runc_binary, self._hooks = Path(cgroup_root), runc_binary, (RuncSubrunHooks() if hooks is None else hooks)
         self._base_exp = (expected_manifest_digest, expected_config_digest, expected_layer_digests, expected_diff_ids)
@@ -509,9 +532,9 @@ class OciIsolatedWheelProbeRunner(IsolatedWheelProbeRunner):
         self._probe_spec = CompositeOciBundleSpec(out_dir, oci_img._write_composite_oci_files(out_dir, v_base, overlays), run_bin_dig, sec_dig, py_sha, run_sha)
         return self._probe_spec
 
-    def _run_probe(self, *, prefix: str, process_args: Sequence[str], seccomp_mode_byte: bytes, task_spec: Mapping[str, Any], extra_app_files: Mapping[str, bytes]) -> dict[str, Any]:
+    def _run_probe(self, *, prefix: str, process_args: Sequence[str], seccomp_mode_byte: bytes, task_spec: Mapping[str, Any], extra_app_files: Mapping[str, bytes], extra_app_modes: Mapping[str, int] | None = None) -> dict[str, Any]:
         self._seq += 1
-        res = _execute_runc_subrun(instance_id=f"s7-{prefix}-{self._seq:04d}", composite_spec=self._ensure_probe_composite_spec(), bundles_root=self._bundles_dir, runc_root_dir=self._runc_root, cgroup_root=self._cgroup_root, runc_binary=self._runc_binary, process_args=process_args, seccomp_mode_byte=seccomp_mode_byte, task_spec=task_spec, extra_app_files=extra_app_files, seccomp_profile=self._seccomp_profile, hooks=self._hooks)
+        res = _execute_runc_subrun(instance_id=f"s7-{prefix}-{self._seq:04d}", composite_spec=self._ensure_probe_composite_spec(), bundles_root=self._bundles_dir, runc_root_dir=self._runc_root, cgroup_root=self._cgroup_root, runc_binary=self._runc_binary, process_args=process_args, seccomp_mode_byte=seccomp_mode_byte, task_spec=task_spec, extra_app_files=extra_app_files, extra_app_modes=extra_app_modes, seccomp_profile=self._seccomp_profile, hooks=self._hooks)
         if res.termination["cause"] != "clean_exit" or res.termination["exit_code"] != 0:
             raise ValueError(f"Stage-7 probe {prefix!r} did not exit cleanly: {res.termination!r}")
         if not isinstance(parsed := loads_strict(res.stdout_data.decode("utf-8")), dict):
@@ -560,9 +583,10 @@ class OciIsolatedWheelProbeRunner(IsolatedWheelProbeRunner):
         if type(source_date_epoch) is not int or not (0 <= source_date_epoch <= gov1_wheel.MAX_JCS_SAFE_INT):
             raise ValueError("source_date_epoch: expected non-negative safe integer")
         extra = self._stage_pep517_extra_files(snapshot_files, snapshot_modes, verified_backend_site_dir)
+        modes = {f"stage/{rel_p}": (0o555 if snapshot_modes[rel_p] == "100755" else 0o444) for rel_p in snapshot_files}
         closure_mods = sorted({spec[3] for spec in gov1_wheel.PINNED_UV_LOCK_CLOSURE_SPECS.values()} | {gov1_wheel.EXPECTED_BUILD_BACKEND}, key=lambda s: s.encode("utf-8"))
         task = {"kind": "pep517_build", "source_date_epoch": source_date_epoch, "closure_mods_csv": ",".join(closure_mods), "runner_bootstrap": gov1_wheel._PEP517_RUNNER_BOOTSTRAP, "driver_script": gov1_wheel._PEP517_DRIVER_SCRIPT}
-        out = self._run_probe(prefix="pep517", process_args=_RUNNER_ARGV, seccomp_mode_byte=crun.SECCOMP_MODE_STAGE7_PEP517, task_spec=task, extra_app_files=extra)
+        out = self._run_probe(prefix="pep517", process_args=_RUNNER_ARGV, seccomp_mode_byte=crun.SECCOMP_MODE_STAGE7_PEP517, task_spec=task, extra_app_files=extra, extra_app_modes=modes)
         exact_fields(out, {"wheel_name", "wheel_b64"}, "pep517_wheel_build")
         if out["wheel_name"] != gov1_wheel.EXPECTED_WHEEL_FILENAME or type(out["wheel_b64"]) is not str:
             raise ValueError(f"pep517_wheel_build: unexpected wheel_name {out.get('wheel_name')!r}")

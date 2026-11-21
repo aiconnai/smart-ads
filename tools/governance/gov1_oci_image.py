@@ -14,6 +14,7 @@ import re
 import shutil
 import tarfile
 from typing import Any, Final
+import zlib
 
 from tools.governance import gov1_7a_runner, gov1_wheel
 from tools.governance.gov1_oci_seccomp_bpf import compile_seccomp_profile_to_bpf
@@ -91,7 +92,7 @@ def _verify_layer_blob_and_diff_id(blobs_dir: Path, layer_desc: Mapping[str, Any
         with gzip.open(blob_path, "rb") as gz_fh:
             while chunk := gz_fh.read(1048576):
                 diff_hasher.update(chunk)
-    except (OSError, EOFError) as exc:
+    except (OSError, EOFError, zlib.error, tarfile.TarError) as exc:
         raise ValueError(f"layer gzip stream invalid for {exp_digest}: {exc}") from exc
     if f"sha256:{diff_hasher.hexdigest()}" != exp_diff_id:
         raise ValueError(f"layer diff_id SHA-256 mismatch for {exp_digest}")
@@ -303,9 +304,12 @@ def _extract_gzip_tar_layers(layer_paths: Sequence[Path], dest_root: Path, *, st
     dest_root.mkdir(parents=True, mode=0o755, exist_ok=True)
     dir_modes: dict[Path, int] = {dest_root: 0o555}
     for layer_path in layer_paths:
-        with gzip.open(layer_path, "rb") as gz_fh, tarfile.open(fileobj=gz_fh, mode="r|*") as tf:
-            for member in tf:
-                _extract_tar_member(tf, member, dest_root, dir_modes, strip_prefix=strip_prefix)
+        try:
+            with gzip.open(layer_path, "rb") as gz_fh, tarfile.open(fileobj=gz_fh, mode="r|*") as tf:
+                for member in tf:
+                    _extract_tar_member(tf, member, dest_root, dir_modes, strip_prefix=strip_prefix)
+        except (OSError, EOFError, zlib.error, tarfile.TarError) as exc:
+            raise ValueError(f"layer tar/gzip stream invalid for {layer_path}: {exc}") from exc
     return dir_modes
 
 
@@ -370,24 +374,27 @@ def _build_7a_overlay_layers(
 def _scan_single_layer_for_target(layer_path: Path, wanted: str) -> tuple[str, bytes | str | None]:
     w_parts = tuple(wanted.split("/"))
     state: tuple[str, bytes | str | None] = ("absent", None)
-    with gzip.open(layer_path, "rb") as gz_fh, tarfile.open(fileobj=gz_fh, mode="r|*") as tf:
-        for member in tf:
-            if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE):
-                continue
-            parts = _split_tar_member_parts(member.name)
-            if not parts:
-                continue
-            p_dirs, leaf = parts[:-1], parts[-1]
-            if (leaf == ".wh..wh..opq" and w_parts[: len(p_dirs)] == p_dirs and len(w_parts) > len(p_dirs)) or (leaf.startswith(".wh.") and len(p_dirs) < len(w_parts) and (*p_dirs, leaf[4:]) == w_parts[: len(p_dirs) + 1]):
-                state = ("whited_out", None)
-            elif parts == w_parts:
-                if member.issym() or member.islnk():
-                    state = ("sym" if member.issym() else "lnk", member.linkname)
-                elif member.isfile():
-                    fh = tf.extractfile(member)
-                    state = ("reg", b"" if fh is None else fh.read())
-                else:
-                    state = ("other", None)
+    try:
+        with gzip.open(layer_path, "rb") as gz_fh, tarfile.open(fileobj=gz_fh, mode="r|*") as tf:
+            for member in tf:
+                if member.type in (tarfile.XHDTYPE, tarfile.XGLTYPE):
+                    continue
+                parts = _split_tar_member_parts(member.name)
+                if not parts:
+                    continue
+                p_dirs, leaf = parts[:-1], parts[-1]
+                if (leaf == ".wh..wh..opq" and w_parts[: len(p_dirs)] == p_dirs and len(w_parts) > len(p_dirs)) or (leaf.startswith(".wh.") and len(p_dirs) < len(w_parts) and (*p_dirs, leaf[4:]) == w_parts[: len(p_dirs) + 1]):
+                    state = ("whited_out", None)
+                elif parts == w_parts:
+                    if member.issym() or member.islnk():
+                        state = ("sym" if member.issym() else "lnk", member.linkname)
+                    elif member.isfile():
+                        fh = tf.extractfile(member)
+                        state = ("reg", b"" if fh is None else fh.read())
+                    else:
+                        state = ("other", None)
+    except (OSError, EOFError, zlib.error, tarfile.TarError) as exc:
+        raise ValueError(f"layer tar/gzip stream invalid for {layer_path}: {exc}") from exc
     return state
 
 
@@ -476,9 +483,20 @@ def _verify_composite_layout_layers(spec: CompositeOciBundleSpec) -> list[Path]:
     return [_verify_layer_blob_and_diff_id(blobs_dir, ld, str(ld.get("digest", "")), str(di)) for ld, di in zip(manifest["layers"], diff_ids, strict=True)]
 
 
-def _write_extra_app_files(app_dir: Path, extra_app_files: Mapping[str, bytes], dir_modes: dict[Path, int]) -> None:
+def _write_extra_app_files(
+    app_dir: Path,
+    extra_app_files: Mapping[str, bytes],
+    dir_modes: dict[Path, int],
+    extra_app_modes: Mapping[str, int] | None = None,
+) -> None:
     if not isinstance(extra_app_files, Mapping):
         raise ValueError("extra_app_files: expected Mapping[str, bytes]")
+    if extra_app_modes is not None:
+        if not isinstance(extra_app_modes, Mapping) or not set(extra_app_modes.keys()).issubset(extra_app_files.keys()):
+            raise ValueError("extra_app_modes: expected Mapping subset of extra_app_files")
+        for m_rel, m_val in extra_app_modes.items():
+            if type(m_val) is not int or m_val not in (0o444, 0o555):
+                raise ValueError(f"extra_app_modes[{m_rel!r}]: expected 0o444 or 0o555, got {m_val!r}")
     for rel_path in sorted(extra_app_files.keys()):
         source_path(rel_path)
         raw = extra_app_files[rel_path]
@@ -495,11 +513,15 @@ def _write_extra_app_files(app_dir: Path, extra_app_files: Mapping[str, bytes], 
         leaf_path = cur / parts[-1]
         _remove_existing_entry(leaf_path, dir_modes)
         leaf_path.write_bytes(raw)
-        os.chmod(leaf_path, 0o444)
+        os.chmod(leaf_path, 0o444 if extra_app_modes is None else extra_app_modes.get(rel_path, 0o444))
 
 
 def materialize_runc_bundle_trees(
-    *, composite_spec: CompositeOciBundleSpec, bundle_dir: Path, extra_app_files: Mapping[str, bytes] | None = None
+    *,
+    composite_spec: CompositeOciBundleSpec,
+    bundle_dir: Path,
+    extra_app_files: Mapping[str, bytes] | None = None,
+    extra_app_modes: Mapping[str, int] | None = None,
 ) -> dict[str, Path]:
     """Extract verified composite OCI layers into `bundle_dir/oci_extracted/{rootfs,app,fixtures}`."""
     if not isinstance(composite_spec, CompositeOciBundleSpec):
@@ -516,8 +538,8 @@ def materialize_runc_bundle_trees(
     rootfs_dir, app_dir, fixtures_dir = oci_extracted / "rootfs", oci_extracted / "app", oci_extracted / "fixtures"
     _finalize_dir_modes(rootfs_dir, _extract_gzip_tar_layers(layer_paths[:-2], rootfs_dir))
     app_modes = _extract_gzip_tar_layers([layer_paths[-2]], app_dir, strip_prefix="app")
-    if extra_app_files is not None:
-        _write_extra_app_files(app_dir, extra_app_files, app_modes)
+    if extra_app_files is not None or extra_app_modes is not None:
+        _write_extra_app_files(app_dir, {} if extra_app_files is None else extra_app_files, app_modes, extra_app_modes)
     _finalize_dir_modes(app_dir, app_modes)
     _finalize_dir_modes(fixtures_dir, _extract_gzip_tar_layers([layer_paths[-1]], fixtures_dir, strip_prefix="fixtures"))
     return {"bundle_dir": b_root, "oci_extracted": oci_extracted, "rootfs": rootfs_dir, "app": app_dir, "fixtures": fixtures_dir}

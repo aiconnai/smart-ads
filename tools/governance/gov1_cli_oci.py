@@ -402,6 +402,20 @@ def _build_pipeline_summary(*, out_path: Path, eff_run_id: str, run_ctx: Mapping
     return summary
 
 
+def _resolve_pipeline_work_parent(work_root_parent: Path | None, *, live_mode: bool) -> str | None:
+    if live_mode:
+        return str(oci_rb.select_exec_work_root_parent(work_root_parent))
+    if work_root_parent is not None:
+        wp = Path(work_root_parent)
+        if wp.is_symlink() or not wp.is_dir():
+            raise ValueError(f"run-etapa11-oci-candidates: invalid --work-root-parent {wp}")
+        return str(wp)
+    try:
+        return str(oci_rb.select_exec_work_root_parent())
+    except ValueError:
+        return "/tmp" if Path("/tmp").is_dir() else None
+
+
 def run_etapa11_oci_candidates_pipeline(
     *, repo_root: Path, base_oci_dir: Path, out_dir: Path, legacy_repo: Path | None = None,
     legacy_blobs_dir: Path | None = None, build_run_id: str | None = None, verify_ephemeral_d4: bool = False,
@@ -412,19 +426,26 @@ def run_etapa11_oci_candidates_pipeline(
 ) -> dict[str, Any]:
     """Execute the full Etapa 11 OCI candidate convergence pipeline without touching `docs/**`."""
     repo_dir, base_dir, out_path, leg_repo, leg_blobs, eff_run_id = _validate_pipeline_inputs(repo_root=repo_root, base_oci_dir=base_oci_dir, out_dir=out_dir, legacy_repo=legacy_repo, legacy_blobs_dir=legacy_blobs_dir, build_run_id=build_run_id)
-    probe_res = host_probe_fn(base_oci_dir=base_dir, cgroup_root=Path(cgroup_root), runc_binary=runc_binary)
+    probe_kw = {"work_root_parent": work_root_parent} if (subrun_hooks is None and work_root_parent is not None) else {}
+    probe_res = host_probe_fn(base_oci_dir=base_dir, cgroup_root=Path(cgroup_root), runc_binary=runc_binary, **probe_kw)
     if probe_res.get("status") != "ELIGIBLE":
         return {"status": "BLOCKED", "host_probe": probe_res}
+    try:
+        w_parent = _resolve_pipeline_work_parent(work_root_parent, live_mode=(subrun_hooks is None))
+    except ValueError:
+        if subrun_hooks is not None:
+            raise
+        reasons = [*probe_res.get("reasons", []), *(("work_root_noexec_or_untraversable",) if "work_root_noexec_or_untraversable" not in probe_res.get("reasons", []) else ())]
+        return {"status": "BLOCKED", "host_probe": {**probe_res, "status": "BLOCKED", "eligible": False, "reasons": reasons}}
     run_ctx = decomposition_governance.verified_run_context_identity(repo_dir)["run_context_locator"]
     adr_bytes = (repo_dir / "docs" / "adr" / "ADR-0001-smart-ads-read-gateway.md").read_bytes()
     profiles, valid_until_utc = {p["schema"]: p for p in profile_proposals(adr_bytes)}, _compute_valid_until_utc()
-    w_parent = str(work_root_parent) if work_root_parent is not None else ("/tmp" if Path("/tmp").is_dir() else None)
     work_root = Path(tempfile.mkdtemp(prefix="smart-ads-etapa11-oci-", dir=w_parent))
     try:
         os.chmod(work_root, 0o755)
         out_path.mkdir(parents=True, exist_ok=True)
         store = Store(out_path / "ephemeral-store")
-        with _ephemeral_d4_keyring(valid_until_utc, key_root_parent=key_root_parent) as (_key_dir, keys):
+        with _ephemeral_d4_keyring(valid_until_utc, key_root_parent=(key_root_parent if key_root_parent is not None else work_root.parent)) as (_key_dir, keys):
             config, reg_s, reg_loc = _mint_ephemeral_registry_and_config(store, profiles, keys, valid_until_utc)
             st = _execute_oci_stages(repo_dir=repo_dir, base_dir=base_dir, out_path=out_path, work_root=work_root, store=store, profiles=profiles, keys=keys, reg_loc=reg_loc, run_ctx=run_ctx, eff_run_id=eff_run_id, valid_until_utc=valid_until_utc, leg_repo=leg_repo, leg_blobs=leg_blobs, cgroup_root=Path(cgroup_root), runc_binary=runc_binary, subrun_hooks=subrun_hooks, exp_kw=_oci_exp_kwargs(base_oci_expectations))
             cands, cand_files = _build_and_persist_seven_candidates(out_path / "candidates", run_ctx, eff_run_id, st)
@@ -441,6 +462,7 @@ def register_oci_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_probe.add_argument("--base-oci-dir", default=None)
     p_probe.add_argument("--cgroup-root", default="/sys/fs/cgroup")
     p_probe.add_argument("--runc-binary", default="runc")
+    p_probe.add_argument("--work-root-parent", default=None)
     p_probe.add_argument("--out", default=None)
     p_probe.set_defaults(func=cmd_oci)
 
@@ -451,20 +473,23 @@ def register_oci_subparsers(sub: argparse._SubParsersAction[Any]) -> None:
     p_run.add_argument("--legacy-repo", default=None)
     p_run.add_argument("--legacy-blobs-dir", default=None)
     p_run.add_argument("--build-run-id", default=None)
+    p_run.add_argument("--work-root-parent", default=None)
     p_run.add_argument("--verify-ephemeral-d4", action="store_true")
     p_run.set_defaults(func=cmd_oci)
 
 
 def cmd_oci(args: argparse.Namespace) -> int:
     try:
+        w_parent = Path(args.work_root_parent) if getattr(args, "work_root_parent", None) is not None else None
         if args.command == "probe-7a-oci-host":
-            result = probe_7a_oci_host(base_oci_dir=Path(args.base_oci_dir) if args.base_oci_dir is not None else None, cgroup_root=Path(args.cgroup_root), runc_binary=args.runc_binary)
+            p_kw = {"work_root_parent": w_parent} if w_parent is not None else {}
+            result = probe_7a_oci_host(base_oci_dir=Path(args.base_oci_dir) if args.base_oci_dir is not None else None, cgroup_root=Path(args.cgroup_root), runc_binary=args.runc_binary, **p_kw)
             if args.out is not None:
                 _write_json_atomic(Path(args.out), result, allow_overwrite=False)
             _print_canonical_json(result)
             return 0 if result.get("status") == "ELIGIBLE" else 1
         if args.command == "run-etapa11-oci-candidates":
-            summary = run_etapa11_oci_candidates_pipeline(repo_root=Path(args.repo), base_oci_dir=Path(args.base_oci_dir), out_dir=Path(args.out_dir), legacy_repo=Path(args.legacy_repo) if args.legacy_repo is not None else None, legacy_blobs_dir=Path(args.legacy_blobs_dir) if args.legacy_blobs_dir is not None else None, build_run_id=args.build_run_id, verify_ephemeral_d4=bool(args.verify_ephemeral_d4))
+            summary = run_etapa11_oci_candidates_pipeline(repo_root=Path(args.repo), base_oci_dir=Path(args.base_oci_dir), out_dir=Path(args.out_dir), legacy_repo=Path(args.legacy_repo) if args.legacy_repo is not None else None, legacy_blobs_dir=Path(args.legacy_blobs_dir) if args.legacy_blobs_dir is not None else None, build_run_id=args.build_run_id, verify_ephemeral_d4=bool(args.verify_ephemeral_d4), work_root_parent=w_parent)
             _print_canonical_json(summary)
             return 0 if summary.get("status") == "PASS" else 1
         raise ValueError(f"gov1: unsupported OCI subcommand {args.command!r}")

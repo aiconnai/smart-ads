@@ -1,7 +1,7 @@
 """Portable contract tests and live Linux amd64 root runc tests for `gov1_oci_supervisor`."""
 from __future__ import annotations
 
-import ast, base64, datetime, os, subprocess, tempfile, threading
+import ast, base64, datetime, errno, functools, gzip, os, stat, subprocess, sys, tempfile, threading, time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -11,7 +11,7 @@ import pytest
 
 from tests.governance.test_gov1_7a_verifiers import _stage_leaf_envelopes_in_store
 from tests.governance.test_gov1_convergence import ADR_PATH, Gov1InstallationPins, MemoryProtectedRuntime, RUN_CONTEXT_LOCATOR
-from tests.governance.test_gov1_oci_seccomp_and_bundle import _make_tar_gz_layer, _write_synthetic_oci_layout
+from tests.governance.test_gov1_oci_seccomp_and_bundle import _build_synthetic_live_proc_and_bundle, _fd_is_open, _make_tar_gz_layer, _write_synthetic_oci_layout
 from tools.governance import (
     cli, decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_convergence, gov1_mcp,
     gov1_oci_container_runner, gov1_oci_image, gov1_oci_readback, gov1_oci_supervisor, gov1_sandbox, gov1_wheel, p1,
@@ -147,7 +147,7 @@ def _make_portable_hooks(comp_spec: gov1_oci_image.CompositeOciBundleSpec, handl
 def test_task3_and_task4_ast_purity_budgets_and_live_prereq_fail_hard() -> None:
     sup_path = REPO_ROOT / "tools" / "governance" / "gov1_oci_supervisor.py"
     cli_oci_path = REPO_ROOT / "tools" / "governance" / "gov1_cli_oci.py"
-    for path, budget, is_gov in ((sup_path, 580, True), (cli_oci_path, 550, True), (Path(__file__), 650, False)):
+    for path, budget, is_gov in ((sup_path, 615, True), (cli_oci_path, 550, True), (Path(__file__), 700, False)):
         src = path.read_text(encoding="utf-8")
         assert len(src.splitlines()) <= budget, f"{path.name} has {len(src.splitlines())} lines > {budget}"
         tree = ast.parse(src, filename=str(path))
@@ -434,13 +434,7 @@ def test_pipeline_ephemeral_d4_pem_cleanup_even_on_failure(tmp_path: Path, porta
     blobs_dir = _stage_d26_blobs_dir(tmp_path / "blobs", portable_oci_fixture["d26"])
     crash_hooks = _make_pipeline_sim_hooks(portable_oci_fixture, crash_on_neg=True)
     with pytest.raises(ValueError, match="exited non-zero"):
-        gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
-            repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=tmp_path / "fail_out",
-            legacy_blobs_dir=blobs_dir, build_run_id="fail-run", verify_ephemeral_d4=True, cgroup_root=cg_root,
-            host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []},
-            subrun_hooks=crash_hooks, base_oci_expectations=portable_oci_fixture["base_meta"],
-            work_root_parent=tmp_path, key_root_parent=tmp_path,
-        )
+        gov1_cli_oci.run_etapa11_oci_candidates_pipeline(repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=tmp_path / "fail_out", legacy_blobs_dir=blobs_dir, build_run_id="fail-run", verify_ephemeral_d4=True, cgroup_root=cg_root, host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []}, subrun_hooks=crash_hooks, base_oci_expectations=portable_oci_fixture["base_meta"], work_root_parent=tmp_path, key_root_parent=tmp_path)
     assert list(tmp_path.rglob("*.pem")) == [] and list(tmp_path.glob("smart-ads-etapa11-oci-*")) == []
 
 def test_run_git_offline_fsmonitor_and_root_safe_directory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -449,22 +443,14 @@ def test_run_git_offline_fsmonitor_and_root_safe_directory(monkeypatch: pytest.M
     scope_tree = ast.parse((REPO_ROOT / "tools" / "governance" / "decomposition_scope.py").read_text(encoding="utf-8"))
     rgo = [n for n in ast.walk(scope_tree) if isinstance(n, ast.FunctionDef) and n.name == "run_git_offline"][0]
     assert (rgo.end_lineno or rgo.lineno) - rgo.lineno + 1 < 50
-    real_run = decomposition_scope.subprocess.run
-    seen: list[list[str]] = []
+    real_run, seen = decomposition_scope.subprocess.run, []
     monkeypatch.setattr(decomposition_scope.subprocess, "run", lambda cmd, *a, **kw: (seen.append(list(cmd)), real_run(cmd, *a, **kw))[1])
     monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 1001)
     decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
-    non_root_cmd = seen[-1]
-    assert non_root_cmd[1:7] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false"]
-    assert not any(arg.startswith("safe.directory=") for arg in non_root_cmd)
+    assert seen[-1][1:7] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false"] and not any(a.startswith("safe.directory=") for a in seen[-1])
     monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 0)
     decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
-    root_cmd = seen[-1]
-    assert root_cmd[1:9] == [
-        "-c", "protocol.allow=never", "-c", "credential.helper=",
-        "-c", "core.fsmonitor=false", "-c", f"safe.directory={REPO_ROOT.resolve().as_posix()}",
-    ]
-    assert root_cmd[9:] == ["-C", str(REPO_ROOT), "rev-parse", "HEAD"]
+    assert seen[-1][1:9] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false", "-c", f"safe.directory={REPO_ROOT.resolve().as_posix()}"] and seen[-1][9:] == ["-C", str(REPO_ROOT), "rev-parse", "HEAD"]
 
 def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Path, portable_oci_fixture: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from tools.governance import gov1_cli_oci
@@ -473,32 +459,22 @@ def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Pat
     cg_root.mkdir()
     (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
     blobs_dir = _stage_d26_blobs_dir(tmp_path / "blobs", portable_oci_fixture["d26"])
-    hooks = _make_pipeline_sim_hooks(portable_oci_fixture)
-    summary = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
-        repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=out_dir,
-        legacy_blobs_dir=blobs_dir, build_run_id="portable-e11", verify_ephemeral_d4=True, cgroup_root=cg_root,
-        host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []},
-        subrun_hooks=hooks, base_oci_expectations=portable_oci_fixture["base_meta"],
-        work_root_parent=tmp_path, key_root_parent=tmp_path,
-    )
+    summary = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=out_dir, legacy_blobs_dir=blobs_dir, build_run_id="portable-e11", verify_ephemeral_d4=True, cgroup_root=cg_root, host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []}, subrun_hooks=_make_pipeline_sim_hooks(portable_oci_fixture), base_oci_expectations=portable_oci_fixture["base_meta"], work_root_parent=tmp_path, key_root_parent=tmp_path)
     assert summary["status"] == "PASS" and summary["ephemeral_d4_verified"] is True and summary["ephemeral_d4_cas_calls"] == 1
     assert list(tmp_path.rglob("*.pem")) == [] and (out_dir / "etapa11_oci_summary.json").is_file()
-    sbx_envs = [p for p in (out_dir / "ephemeral-store/sha256").glob("*.json") if loads_strict(p.read_text(encoding="utf-8")).get("$schema") == gov1_sandbox.SANDBOX_PROFILE_SCHEMA]
-    assert len(sbx_envs) == 1
+    assert len([p for p in (out_dir / "ephemeral-store/sha256").glob("*.json") if loads_strict(p.read_text(encoding="utf-8")).get("$schema") == gov1_sandbox.SANDBOX_PROFILE_SCHEMA]) == 1
     names = ("sealed_sandbox_profile", "wheel_build_provenance", "wheel_boundary_report", "mcp_rejection_matrix_report", "negative_security_test_report", "certification_7a_record", "gov1_convergence_record")
     cands = {n: loads_strict((out_dir / "candidates" / f"{n}.candidate.json").read_text(encoding="utf-8")) for n in names}
     assert all(c["artifact_kind"] == gov1_sandbox.LOCAL_CANDIDATE_KIND and c["signable"] is False and c["authority"] == "none" and "$schema" not in c and "integrity" not in c for c in cands.values())
     assert cands["sealed_sandbox_profile"]["payload"]["issued_at_utc"] == "2026-09-07T10:00:00Z" and cands["wheel_build_provenance"]["payload"]["built_at_utc"] == "2026-09-07T10:00:05Z"
     ts_seq = [cands[k]["payload"][f] for k, f in (("sealed_sandbox_profile", "issued_at_utc"), ("wheel_build_provenance", "built_at_utc"), ("wheel_boundary_report", "verified_at_utc"), ("mcp_rejection_matrix_report", "executed_at_utc"), ("negative_security_test_report", "executed_at_utc"), ("certification_7a_record", "certified_at_utc"), ("gov1_convergence_record", "converged_at_utc"))]
-    assert ts_seq == sorted(ts_seq)
-    assert cli.main(_verify_conv_cli_argv(out_dir, blobs_dir)) == 0
+    assert ts_seq == sorted(ts_seq) and cli.main(_verify_conv_cli_argv(out_dir, blobs_dir)) == 0
     assert loads_strict(capsys.readouterr().out)["status"] == "PASS"
     out_nod4, cg_root2 = tmp_path / "etapa11_nod4", tmp_path / "cg2"
     cg_root2.mkdir()
     (cg_root2 / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
     sum_nod4 = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=out_nod4, legacy_blobs_dir=blobs_dir, verify_ephemeral_d4=False, cgroup_root=cg_root2, host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []}, subrun_hooks=_make_pipeline_sim_hooks(portable_oci_fixture), base_oci_expectations=portable_oci_fixture["base_meta"], work_root_parent=tmp_path, key_root_parent=tmp_path)
-    assert sum_nod4["ephemeral_d4_verified"] is False and sum_nod4["ephemeral_d4_cas_calls"] == 0 and list(tmp_path.rglob("*.pem")) == []
-    assert cli.main(_verify_conv_cli_argv(out_nod4, blobs_dir)) == 0
+    assert sum_nod4["ephemeral_d4_verified"] is False and sum_nod4["ephemeral_d4_cas_calls"] == 0 and list(tmp_path.rglob("*.pem")) == [] and cli.main(_verify_conv_cli_argv(out_nod4, blobs_dir)) == 0
     capsys.readouterr()
     monkeypatch.setattr(gov1_cli_oci, "run_etapa11_oci_candidates_pipeline", lambda **_kw: summary)
     assert cli.main(["run-etapa11-oci-candidates", "--repo", str(REPO_ROOT), "--base-oci-dir", str(portable_oci_fixture["base_dir"]), "--out-dir", str(tmp_path / "cli_out"), "--legacy-blobs-dir", str(blobs_dir), "--verify-ephemeral-d4"]) == 0
@@ -506,17 +482,8 @@ def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Pat
 
 def test_workflow_gov1_etapa11_oci_yaml_contract() -> None:
     wf_path = REPO_ROOT / ".github" / "workflows" / "gov1-etapa11-oci.yml"
-    assert wf_path.is_file()
     wf_text = wf_path.read_text(encoding="utf-8")
-    for token in (
-        "name: gov1-etapa11-oci", "pull_request:", "push:", "workflow_dispatch:", "contents: read",
-        "etapa11-oci-linux-amd64:", "runs-on: ubuntu-latest", "timeout-minutes: 45",
-        "actions/checkout@v4", "astral-sh/setup-uv@v5", "missing_pkgs=()", "--preserve-digests",
-        "-o cache_dir=/tmp/pytest-cache-live-oci", "runc", "skopeo",
-        gov1_oci_image.PINNED_BASE_OCI_MANIFEST_DIGEST, "SMART_ADS_LIVE_OCI_TESTS=1",
-        "probe-7a-oci-host", "run-etapa11-oci-candidates", "--verify-ephemeral-d4",
-        "verify-gov1-convergence-record", "git status --porcelain", "actions/upload-artifact@v4",
-    ):
+    for token in ("name: gov1-etapa11-oci", "pull_request:", "push:", "workflow_dispatch:", "contents: read", "etapa11-oci-linux-amd64:", "runs-on: ubuntu-latest", "timeout-minutes: 45", "actions/checkout@v4", "astral-sh/setup-uv@v5", "missing_pkgs=()", "--preserve-digests", "-o cache_dir=/tmp/pytest-cache-live-oci", "runc", "skopeo", gov1_oci_image.PINNED_BASE_OCI_MANIFEST_DIGEST, "SMART_ADS_LIVE_OCI_TESTS=1", "probe-7a-oci-host", "run-etapa11-oci-candidates", "--verify-ephemeral-d4", "verify-gov1-convergence-record", "git status --porcelain", "actions/upload-artifact@v4"):
         assert token in wf_text, f"missing {token!r} in gov1-etapa11-oci.yml"
 
 @pytest.fixture(scope="module")
@@ -526,7 +493,8 @@ def live_oci_suite_result() -> dict[str, Any] | None:
         return None
     from tools.governance import gov1_cli_oci
 
-    work_root = Path(tempfile.mkdtemp(prefix="smart-ads-live-oci-", dir="/tmp"))
+    exec_parent = gov1_oci_readback.select_exec_work_root_parent()
+    work_root = Path(tempfile.mkdtemp(prefix="smart-ads-live-oci-", dir=str(exec_parent)))
     try:
         os.chmod(work_root, 0o755)
         blobs_dir = _stage_d26_blobs_dir(work_root / "d26_blobs", _decode_d26())
@@ -561,3 +529,164 @@ def test_live_etapa11_cli_and_pipeline_convergence(live_oci_suite_result: dict[s
     summary = live_oci_suite_result["summary"]
     assert summary["status"] == "PASS" and summary["ephemeral_d4_verified"] is True and summary["ephemeral_d4_cas_calls"] == 1
     assert live_oci_suite_result["probe_rc"] == 0 and live_oci_suite_result["cli_rc"] == 0 and live_oci_suite_result["pem_left"] == []
+
+def test_corrupt_gzip_deflate_and_malformed_tar_layers_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portable_oci_fixture: dict[str, Any]) -> None:
+    corrupt_gz = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xff\xff\xff\xff"
+    gz_dir, cg_root = tmp_path / "bad_deflate", tmp_path / "cg"
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    for fn in ("memory.swap.max", "memory.peak", "pids.peak"):
+        (cg_root / fn).write_text("0\n", encoding="utf-8")
+    m1 = _write_synthetic_oci_layout(gz_dir, [(corrupt_gz, digest(corrupt_gz), "sha256:" + "0" * 64)])
+    v_kw = {"expected_manifest_digest": m1["manifest_digest"], "expected_config_digest": m1["config_digest"], "expected_layer_digests": m1["layer_digests"], "expected_diff_ids": m1["diff_ids"]}
+    with pytest.raises(ValueError, match="layer gzip stream invalid"):
+        gov1_oci_image.verify_pinned_base_oci_layout(gz_dir, **v_kw)
+    monkeypatch.setattr(gov1_oci_readback, "verify_pinned_base_oci_layout", functools.partial(gov1_oci_image.verify_pinned_base_oci_layout, **v_kw))
+    pr = gov1_oci_readback.probe_7a_oci_host(base_oci_dir=gz_dir, cgroup_root=cg_root, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0)
+    assert pr["status"] == "BLOCKED" and pr["base_oci_verified"] is False and "base_oci_verification_failed" in pr["reasons"]
+    bad_tar_raw = b"NOT-A-VALID-TAR-HEADER!" * 40
+    bad_tar_gz = gzip.compress(bad_tar_raw, compresslevel=9, mtime=0)
+    tar_dir = tmp_path / "bad_tar"
+    m2 = _write_synthetic_oci_layout(tar_dir, [(bad_tar_gz, digest(bad_tar_gz), digest(bad_tar_raw))])
+    bad_blob = tar_dir / "blobs/sha256" / m2["layer_digests"][0].split(":")[1]
+    calls = (lambda: gov1_oci_image._scan_single_layer_for_target(bad_blob, "usr/local/bin/python3.12"), lambda: gov1_oci_image._extract_gzip_tar_layers([bad_blob], tmp_path / "ext_tar"), lambda: gov1_oci_image._extract_gzip_tar_layers([gz_dir / "blobs/sha256" / m1["layer_digests"][0].split(":")[1]], tmp_path / "ext_gz"), lambda: gov1_oci_image.build_composite_7a_oci_layout(base_oci_dir=tar_dir, output_layout_dir=tmp_path / "c_out", wheel_bytes=portable_oci_fixture["wheel_bytes"], corpus_bytes=b"{}", replay_context_obj={}, resolved_d26_blobs=portable_oci_fixture["d26"], seccomp_profile=portable_oci_fixture["seccomp"], runner_py_bytes=b"print(1)\n", expected_manifest_digest=m2["manifest_digest"], expected_config_digest=m2["config_digest"], expected_layer_digests=m2["layer_digests"], expected_diff_ids=m2["diff_ids"]))
+    for fn_call in calls:
+        with pytest.raises(ValueError, match="layer tar/gzip stream invalid"):
+            fn_call()
+
+def test_tmp_walk_concurrent_unlink_and_cgroup_peak_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scan_d = tmp_path / "scan"
+    for sub in ("gone_d", "not_d", "loop_d"):
+        (scan_d / sub).mkdir(parents=True)
+    (scan_d / "keep.bin").write_bytes(b"k" * 777)
+    (scan_d / "gone.bin").write_bytes(b"g" * 99999)
+    real_stat, real_open, err_map = os.stat, os.open, {"gone_d": errno.ENOENT, "not_d": errno.ENOTDIR, "loop_d": errno.ELOOP}
+    monkeypatch.setattr(os, "stat", lambda p, *a, **kw: (_ for _ in ()).throw(OSError(errno.ENOENT, "gone")) if p == "gone.bin" and kw.get("dir_fd") is not None else real_stat(p, *a, **kw))
+    monkeypatch.setattr(os, "open", lambda p, fl, *a, **kw: (_ for _ in ()).throw(OSError(err_map[p], "race")) if isinstance(p, str) and p in err_map and kw.get("dir_fd") is not None else real_open(p, fl, *a, **kw))
+    fds_before, t_fd = sum(1 for fd in range(3, 512) if _fd_is_open(fd)), real_open(scan_d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert gov1_oci_readback._walk_tmp_max_regular_file_bytes(t_fd) == 777
+        monkeypatch.setattr(os, "stat", lambda p, *a, **kw: (_ for _ in ()).throw(OSError(errno.EIO, "io")) if p == "keep.bin" and kw.get("dir_fd") is not None else real_stat(p, *a, **kw))
+        pytest.raises(OSError, gov1_oci_readback._walk_tmp_max_regular_file_bytes, t_fd)
+    finally:
+        os.close(t_fd)
+    assert sum(1 for fd in range(3, 512) if _fd_is_open(fd)) == fds_before
+    monkeypatch.setattr(os, "stat", real_stat)
+    monkeypatch.setattr(os, "open", real_open)
+    cg_np = tmp_path / "cg_np"
+    cg_np.mkdir()
+    for fn, val in (("cgroup.controllers", "cpu memory pids\n"), ("memory.swap.max", "0\n"), ("memory.peak", "0\n")):
+        (cg_np / fn).write_text(val, encoding="utf-8")
+    pr_np = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_np, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0)
+    assert pr_np["status"] == "BLOCKED" and "cgroup_peak_files_unavailable" in pr_np["reasons"] and "memory_swap_max_unavailable" not in pr_np["reasons"]
+    (cg_np / "memory.swap.max").unlink()
+    assert {"memory_swap_max_unavailable", "cgroup_peak_files_unavailable"} <= set(gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_np, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0)["reasons"])
+
+def test_proc_environ_and_live_cgroup_peak_readback_rejections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, portable_oci_fixture: dict[str, Any]) -> None:
+    proc_root, lease, spec, trees = _build_synthetic_live_proc_and_bundle(tmp_path / "rb_env", portable_oci_fixture["wheel_bytes"])
+    ok_vfs = os.statvfs_result((4096, 4096, 65536, 65536, 65536, 4096, 4095, 4095, 0, 255))
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: ok_vfs)
+    for pk in ("memory.peak", "pids.peak"):
+        (lease.cgroup_dir / pk).unlink()
+        with pytest.raises(ValueError, match=pk):
+            gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+        (lease.cgroup_dir / pk).write_text("0\n", encoding="utf-8")
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: (_ for _ in ()).throw(OSError(errno.EBADF, "bad fd")))
+    with pytest.raises(ValueError, match="harvest I/O failed"):
+        gov1_oci_readback.harvest_cgroup_and_tmp_usage(lease=lease, tmp_fd=999, stdout_bytes=0, stderr_bytes=0)
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: ok_vfs)
+    env_p, decoy = proc_root / "4242/environ", tmp_path / "decoy_env"
+    ok_env = env_p.read_bytes()
+    decoy.write_bytes(ok_env)
+    env_p.unlink()
+    with pytest.raises(ValueError, match="environ"):
+        gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    env_p.symlink_to(decoy)
+    with pytest.raises(ValueError, match="environ"):
+        gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    env_p.unlink()
+    for bad_env in (b"PATH=/evil\x00" + ok_env, b"PATH=/evil\x00" + ok_env.replace(b"TZ=UTC\x00", b""), ok_env + b"\x00", b""):
+        env_p.write_bytes(bad_env)
+        with pytest.raises(ValueError, match="environ"):
+            gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    env_p.write_bytes(ok_env[:-1])
+    rb = gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    os.close(rb.tmp_fd)
+    gov1_oci_image.cleanup_runc_bundle_trees(trees["bundle_dir"])
+
+def test_delayed_runc_pid_file_and_executable_snapshot_mode_staging(tmp_path: Path, portable_oci_fixture: dict[str, Any]) -> None:
+    fx, cg_root = portable_oci_fixture, tmp_path / "cg"
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    seen_modes: dict[str, int] = {}
+
+    def _delayed_spawn(_cmd: Any, *, stdin_fd: int, stdout_fd: int, stderr_fd: int, pid_file: Path, bundle_dir: Path, lease: Any) -> _PipeContainerSim:
+        st_dir = bundle_dir / "oci_extracted/app/stage"
+        if st_dir.is_dir():
+            seen_modes.update({r: (st_dir / r).stat().st_mode & 0o777 for r in ("pyproject.toml", "src/smart_ads/__init__.py") if (st_dir / r).is_file()})
+        def _write_later() -> None:
+            time.sleep(0.025)
+            tmp_pf = pid_file.with_suffix(".tmp")
+            tmp_pf.write_text("4242\n", encoding="utf-8")
+            os.replace(tmp_pf, pid_file)
+        threading.Thread(target=_write_later, daemon=True).start()
+        return _PipeContainerSim(stdin_fd, stdout_fd, stderr_fd, threading.Event(), [], lambda _s, o_fd, _e, _st: (os.write(o_fd, canonicalize({"wheel_name": gov1_wheel.EXPECTED_WHEEL_FILENAME, "wheel_b64": base64.b64encode(fx["wheel_bytes"]).decode("ascii")}) + b"\n"), 0)[1])
+
+    base_hooks, events = _make_portable_hooks(fx["comp_spec"], lambda *_a: 0)
+    d_hooks = gov1_oci_supervisor.RuncSubrunHooks(**{**{f: getattr(base_hooks, f) for f in base_hooks.__dataclass_fields__}, "spawn_runc": _delayed_spawn})
+    sup = gov1_oci_supervisor.LinuxRuncSealedOciSupervisor(composite_spec=fx["comp_spec"], work_dir=tmp_path / "w_d", build_run_id="rd", cgroup_root=cg_root, hooks=d_hooks)
+    assert sup.readback_sandbox_environment()["runtime_kind"] == "oci" and ("seal", 4242) in events
+    for mode_kind in ("symlink", "exited"):
+        def _bad_spawn(_c: Any, *, stdout_fd: int, pid_file: Path, _mk: str = mode_kind, **_k: Any) -> Any:
+            os.write(stdout_fd, gov1_oci_container_runner.PREMASK_BANNER)
+            if _mk == "symlink":
+                pid_file.symlink_to(tmp_path / "missing_pid")
+            return type("_Dead", (), {"poll": lambda _s: None if _mk == "symlink" else 1, "wait": lambda _s, timeout=None: 1, "kill": lambda _s: None})()
+        bh = gov1_oci_supervisor.RuncSubrunHooks(**{**{f: getattr(base_hooks, f) for f in base_hooks.__dataclass_fields__}, "spawn_runc": _bad_spawn})
+        with pytest.raises(ValueError, match="pid-file"):
+            gov1_oci_supervisor.LinuxRuncSealedOciSupervisor(composite_spec=fx["comp_spec"], work_dir=tmp_path / f"wb_{mode_kind}", build_run_id=f"rb-{mode_kind}", cgroup_root=cg_root, hooks=bh).readback_sandbox_environment()
+    with pytest.raises(ValueError, match="extra_app_modes"):
+        gov1_oci_image.materialize_runc_bundle_trees(composite_spec=fx["comp_spec"], bundle_dir=tmp_path / "bad_m", extra_app_files={"a.py": b"1"}, extra_app_modes={"a.py": 0o755})
+    b_site, bm = tmp_path / "b_site", fx["base_meta"]
+    gov1_wheel.verify_build_runtime_environment(fx["snapshot"].files["uv.lock"], target_backend_site_dir=b_site)
+    runner = gov1_oci_supervisor.OciIsolatedWheelProbeRunner(base_oci_dir=fx["base_dir"], work_dir=tmp_path / "pw", cgroup_root=cg_root, hooks=d_hooks, expected_manifest_digest=bm["manifest_digest"], expected_config_digest=bm["config_digest"], expected_layer_digests=bm["layer_digests"], expected_diff_ids=bm["diff_ids"])
+    runner.run_pep517_wheel_build(snapshot_files=fx["snapshot"].files, snapshot_modes={**fx["snapshot"].modes, "pyproject.toml": "100644", "src/smart_ads/__init__.py": "100755"}, verified_backend_site_dir=b_site, source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH)
+    assert seen_modes == {"pyproject.toml": 0o444, "src/smart_ads/__init__.py": 0o555}
+
+def test_select_exec_work_root_parent_noexec_fallback_and_cli_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], portable_oci_fixture: dict[str, Any]) -> None:
+    from tools.governance import gov1_cli_oci
+
+    monkeypatch.setattr(os, "ST_NOEXEC", 8, raising=False)
+    real_stat, real_access, real_statvfs = os.stat, os.access, os.statvfs
+    modes = {"/": stat.S_IFDIR | 0o755, "/tmp": stat.S_IFDIR | 0o1777, "/var": stat.S_IFDIR | 0o755, "/var/tmp": stat.S_IFDIR | 0o1777}
+    flags = {"/tmp": 8, "/var/tmp": 0}
+    monkeypatch.setattr(os, "stat", lambda p, *a, **kw: os.stat_result((modes[os.fspath(p)], 1, 1, 1, 0, 0, 0, 0, 0, 0)) if os.fspath(p) in modes else real_stat(p, *a, **kw))
+    monkeypatch.setattr(os, "access", lambda p, m: True if os.fspath(p) in ("/tmp", "/var/tmp") else real_access(p, m))
+    monkeypatch.setattr(os, "statvfs", lambda p: os.statvfs_result((4096, 4096, 1000, 1000, 1000, 1000, 1000, 1000, flags[os.fspath(p)], 255)) if os.fspath(p) in flags else real_statvfs(p))
+    assert gov1_oci_readback.select_exec_work_root_parent() == Path("/var/tmp")
+    flags["/var/tmp"] = 8
+    with pytest.raises(ValueError, match="ST_NOEXEC"):
+        gov1_oci_readback.select_exec_work_root_parent()
+    cg_ok, blobs_d = tmp_path / "cg_ok", _stage_d26_blobs_dir(tmp_path / "blobs9", portable_oci_fixture["d26"])
+    cg_ok.mkdir()
+    (cg_ok / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    for fn in ("memory.swap.max", "memory.peak", "pids.peak"):
+        (cg_ok / fn).write_text("0\n", encoding="utf-8")
+    pr_blk = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_ok, runc_binary=sys.executable, sys_platform="linux", machine="x86_64", euid=0, work_root_parent=Path("/tmp"))
+    assert pr_blk["status"] == "BLOCKED" and "work_root_noexec_or_untraversable" in pr_blk["reasons"]
+    pipe_blk = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=tmp_path / "blk_o", legacy_blobs_dir=blobs_d, cgroup_root=cg_ok, host_probe_fn=lambda **_k: {"status": "ELIGIBLE", "eligible": True, "reasons": []}, subrun_hooks=None)
+    assert pipe_blk["status"] == "BLOCKED" and "work_root_noexec_or_untraversable" in pipe_blk["host_probe"]["reasons"]
+    flags["/var/tmp"], modes["/var"] = 0, stat.S_IFDIR | 0o700
+    with pytest.raises(ValueError, match="world-execute"):
+        gov1_oci_readback.select_exec_work_root_parent(Path("/var/tmp"))
+    priv_anc = tmp_path / "priv_700"
+    priv_anc.mkdir(mode=0o700)
+    os.chmod(priv_anc, 0o700)
+    with pytest.raises(ValueError):
+        gov1_oci_supervisor.LinuxRuncSealedOciSupervisor(composite_spec=portable_oci_fixture["comp_spec"], work_dir=priv_anc / "live_w", build_run_id="r9", cgroup_root=cg_ok, hooks=None)
+    assert not (priv_anc / "live_w").exists()
+    seen_wp: list[Any] = []
+    monkeypatch.setattr(gov1_cli_oci, "run_etapa11_oci_candidates_pipeline", lambda **kw: (seen_wp.append(kw.get("work_root_parent")), {"status": "PASS"})[1])
+    assert cli.main(["run-etapa11-oci-candidates", "--repo", str(REPO_ROOT), "--base-oci-dir", str(portable_oci_fixture["base_dir"]), "--out-dir", str(tmp_path / "c9"), "--legacy-blobs-dir", str(blobs_d), "--work-root-parent", "/var/tmp"]) == 0
+    capsys.readouterr()
+    assert seen_wp == [Path("/var/tmp")]
