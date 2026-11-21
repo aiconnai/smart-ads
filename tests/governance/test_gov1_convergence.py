@@ -921,6 +921,7 @@ _NEW_OCI_BUDGETS: dict[str, int] = {
     "gov1_oci_image.py": 550,
     "gov1_oci_readback.py": 550,
     "gov1_oci_seccomp_bpf.py": 420,
+    "gov1_oci_supervisor.py": 580,
 }
 
 
@@ -939,6 +940,7 @@ def test_zero_ast_assert_across_all_gov1_modules() -> None:
         "gov1_oci_image.py",
         "gov1_oci_readback.py",
         "gov1_oci_seccomp_bpf.py",
+        "gov1_oci_supervisor.py",
         "gov1_sandbox.py",
         "gov1_wheel.py",
     ]
