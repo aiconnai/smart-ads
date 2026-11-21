@@ -1,0 +1,133 @@
+name: gov1-etapa11-oci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  etapa11-oci-linux-amd64:
+    name: etapa11-oci-linux-amd64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv and frozen CPython 3.12 environment
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+
+      - name: Sync frozen Python 3.12 dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen --python 3.12
+
+      - name: Ensure runc, skopeo, and cgroup-v2 controllers
+        run: |
+          missing_pkgs=()
+          command -v runc >/dev/null 2>&1 || missing_pkgs+=(runc)
+          command -v skopeo >/dev/null 2>&1 || missing_pkgs+=(skopeo)
+          if [ "${#missing_pkgs[@]}" -gt 0 ]; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${missing_pkgs[@]}"
+          fi
+          uname -m
+          runc --version
+          skopeo --version
+          cat /sys/fs/cgroup/cgroup.controllers
+
+      - name: Fetch pinned linux/amd64 python:3.12-slim-bookworm OCI layout
+        run: |
+          skopeo copy \
+            --preserve-digests \
+            --override-os linux \
+            --override-arch amd64 \
+            docker://docker.io/library/python@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4 \
+            oci:/tmp/smart-ads-base-oci:3.12-slim-bookworm
+
+      - name: Materialize pinned d26c73d legacy blobs
+        run: |
+          uv run --frozen --python 3.12 python - <<'PY'
+          import base64
+          import json
+          from pathlib import Path
+
+          fixture_path = Path("tests/certification_7a/fixtures/pinned_d26c73d_blobs.json")
+          doc = json.loads(fixture_path.read_text(encoding="utf-8"))
+          dest = Path("/tmp/smart-ads-d26-blobs")
+          dest.mkdir(parents=True, exist_ok=True)
+          for filename, raw_b64 in sorted(doc["blobs"].items()):
+              (dest / filename).write_bytes(base64.b64decode(raw_b64))
+          PY
+
+      - name: Run portable OCI governance suites unprivileged
+        run: |
+          uv run --frozen --python 3.12 pytest \
+            tests/governance/test_gov1_oci_seccomp_and_bundle.py \
+            tests/governance/test_gov1_oci_runtime.py \
+            -q
+
+      - name: Execute live root/cgroup-v2 OCI suites, candidate pipeline, and CLI verification
+        run: |
+          PYTHON_BIN="$(uv run --frozen --python 3.12 which python)"
+          sudo -E env "PATH=$PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            SMART_ADS_LIVE_OCI_TESTS=1 \
+            SMART_ADS_BASE_OCI_DIR=/tmp/smart-ads-base-oci \
+            "$PYTHON_BIN" -m pytest -o cache_dir=/tmp/pytest-cache-live-oci tests/governance/test_gov1_oci_runtime.py -v
+
+          sudo -E env "PATH=$PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$PYTHON_BIN" -m tools.governance.cli probe-7a-oci-host \
+            --base-oci-dir /tmp/smart-ads-base-oci
+
+          sudo -E env "PATH=$PATH" \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$PYTHON_BIN" -m tools.governance.cli run-etapa11-oci-candidates \
+            --repo "$PWD" \
+            --base-oci-dir /tmp/smart-ads-base-oci \
+            --out-dir /tmp/etapa11-oci-out \
+            --legacy-blobs-dir /tmp/smart-ads-d26-blobs \
+            --verify-ephemeral-d4
+
+          sudo chown -R "$(id -u):$(id -g)" /tmp/etapa11-oci-out
+          test -z "$(find /tmp/etapa11-oci-out -name '*.pem' -print -quit)"
+
+          uv run --frozen --python 3.12 python -m tools.governance.cli verify-gov1-convergence-record \
+            --in /tmp/etapa11-oci-out/candidates/gov1_convergence_record.candidate.json \
+            --store-root /tmp/etapa11-oci-out/ephemeral-store \
+            --wheel /tmp/etapa11-oci-out/wheel/smart_ads-0.1.0-py3-none-any.whl \
+            --corpus "$PWD/tests/certification_7a/fixtures/pipeboard_7a_corpus_v1.json" \
+            --repo "$PWD" \
+            --seccomp-profile /tmp/etapa11-oci-out/seccomp_profile.json \
+            --legacy-blobs-dir /tmp/smart-ads-d26-blobs \
+            --sandbox-profile /tmp/etapa11-oci-out/candidates/sealed_sandbox_profile.candidate.json \
+            --provenance /tmp/etapa11-oci-out/candidates/wheel_build_provenance.candidate.json \
+            --boundary-report /tmp/etapa11-oci-out/candidates/wheel_boundary_report.candidate.json \
+            --mcp-rejection-report /tmp/etapa11-oci-out/candidates/mcp_rejection_matrix_report.candidate.json \
+            --negative-report /tmp/etapa11-oci-out/candidates/negative_security_test_report.candidate.json \
+            --certification-7a-record /tmp/etapa11-oci-out/candidates/certification_7a_record.candidate.json
+
+      - name: Verify worktree and docs remain completely untouched
+        run: |
+          test -z "$(git status --porcelain)"
+
+      - name: Upload Etapa 11 OCI candidates artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: etapa11-oci-candidates
+          if-no-files-found: error
+          path: |
+            /tmp/etapa11-oci-out/wheel/
+            /tmp/etapa11-oci-out/seccomp_profile.json
+            /tmp/etapa11-oci-out/ephemeral-store/
+            /tmp/etapa11-oci-out/candidates/
+            /tmp/etapa11-oci-out/etapa11_oci_summary.json
+            !/tmp/etapa11-oci-out/**/*.pem

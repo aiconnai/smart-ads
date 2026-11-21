@@ -86,8 +86,15 @@ def run_git_offline(
     repo: Path, *args: str, check: bool = True
 ) -> subprocess.CompletedProcess[bytes]:
     git_bin, env = _resolve_git_env()
-    command = [git_bin, '-c', 'protocol.allow=never', '-c', 'credential.helper=',
-               '-C', str(repo), *args]
+    command = [
+        git_bin,
+        '-c', 'protocol.allow=never',
+        '-c', 'credential.helper=',
+        '-c', 'core.fsmonitor=false',
+    ]
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        command.extend(['-c', f'safe.directory={Path(repo).resolve().as_posix()}'])
+    command.extend(['-C', str(repo), *args])
     try:
         result = subprocess.run(command, env=env, capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as exc:
