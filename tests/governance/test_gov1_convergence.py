@@ -917,6 +917,7 @@ def test_constants_adr_cases_and_untouched_p1_domain_prefixes() -> None:
 
 
 _NEW_OCI_BUDGETS: dict[str, int] = {
+    "gov1_cli_oci.py": 550,
     "gov1_oci_container_runner.py": 620,
     "gov1_oci_image.py": 550,
     "gov1_oci_readback.py": 550,
@@ -933,6 +934,7 @@ def test_zero_ast_assert_across_all_gov1_modules() -> None:
         "gov1_7a_replay_helpers.py",
         "gov1_7a_runner.py",
         "gov1_cli_7a.py",
+        "gov1_cli_oci.py",
         "gov1_convergence.py",
         "gov1_d4_helpers.py",
         "gov1_mcp.py",

@@ -27,6 +27,7 @@ from tools.governance import (
     artifacts,
     decomposition as dec,
     gov1_cli_7a,
+    gov1_cli_oci,
     gov1_convergence,
     gov1_mcp,
     gov1_sandbox,
@@ -1688,6 +1689,7 @@ def build_parser() -> argparse.ArgumentParser:
     _register_etapa7_part2_subparsers(sub)
     _register_pre_pr2_gate_subparser(sub)
     gov1_cli_7a.register_7a_subparsers(sub, cmd_gov1)
+    gov1_cli_oci.register_oci_subparsers(sub)
     return parser
 
 

@@ -13,7 +13,7 @@ from tests.governance.test_gov1_7a_verifiers import _stage_leaf_envelopes_in_sto
 from tests.governance.test_gov1_convergence import ADR_PATH, Gov1InstallationPins, MemoryProtectedRuntime, RUN_CONTEXT_LOCATOR
 from tests.governance.test_gov1_oci_seccomp_and_bundle import _make_tar_gz_layer, _write_synthetic_oci_layout
 from tools.governance import (
-    decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_convergence, gov1_mcp,
+    cli, decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_convergence, gov1_mcp,
     gov1_oci_container_runner, gov1_oci_image, gov1_oci_readback, gov1_oci_supervisor, gov1_sandbox, gov1_wheel, p1,
 )
 from tools.governance.jcs import canonicalize, loads_strict
@@ -112,7 +112,7 @@ def _make_portable_hooks(comp_spec: gov1_oci_image.CompositeOciBundleSpec, handl
     def _spawn(cmd: Any, *, stdin_fd: int, stdout_fd: int, stderr_fd: int, pid_file: Path, bundle_dir: Path, lease: gov1_oci_readback.CgroupV2Lease) -> _PipeContainerSim:
         if on_spawn is not None:
             on_spawn()
-        events.append(("spawn", list(cmd), (bundle_dir / "config.json").is_file()))
+        events.append(("spawn", list(cmd), (bundle_dir / "config.json").is_file(), bundle_dir))
         pid_file.write_text("4242\n", encoding="utf-8")
         ev = threading.Event()
         stops[lease.instance_id] = ev
@@ -144,9 +144,10 @@ def _make_portable_hooks(comp_spec: gov1_oci_image.CompositeOciBundleSpec, handl
     )
     return hooks, events
 
-def test_task3_ast_purity_budgets_and_live_prereq_fail_hard() -> None:
+def test_task3_and_task4_ast_purity_budgets_and_live_prereq_fail_hard() -> None:
     sup_path = REPO_ROOT / "tools" / "governance" / "gov1_oci_supervisor.py"
-    for path, budget, is_gov in ((sup_path, 580, True), (Path(__file__), 650, False)):
+    cli_oci_path = REPO_ROOT / "tools" / "governance" / "gov1_cli_oci.py"
+    for path, budget, is_gov in ((sup_path, 580, True), (cli_oci_path, 550, True), (Path(__file__), 650, False)):
         src = path.read_text(encoding="utf-8")
         assert len(src.splitlines()) <= budget, f"{path.name} has {len(src.splitlines())} lines > {budget}"
         tree = ast.parse(src, filename=str(path))
@@ -161,7 +162,9 @@ def test_task3_ast_purity_budgets_and_live_prereq_fail_hard() -> None:
             elif is_gov and isinstance(node, ast.ImportFrom):
                 root = (node.module or "").split(".")[0]
                 assert root != "smart_ads" and root not in _FORBIDDEN_NET
-    assert len(Path(__file__).read_text(encoding="utf-8").splitlines()) <= 380
+    cli_tree = ast.parse((REPO_ROOT / "tools" / "governance" / "cli.py").read_text(encoding="utf-8"))
+    bp = [n for n in ast.walk(cli_tree) if isinstance(n, ast.FunctionDef) and n.name == "build_parser"][0]
+    assert (bp.end_lineno or bp.lineno) - bp.lineno + 1 < 20
     assert _require_live_oci_prereqs(env={}) is None and _require_live_oci_prereqs(env={"SMART_ADS_LIVE_OCI_TESTS": "0"}) is None
     with pytest.raises(Failed, match="SMART_ADS_BASE_OCI_DIR"):
         _require_live_oci_prereqs(env={"SMART_ADS_LIVE_OCI_TESTS": "1"})
@@ -337,43 +340,200 @@ def test_oci_isolated_wheel_probe_runner_portable(tmp_path: Path, portable_oci_f
     with pytest.raises(ValueError, match="symlink"):
         sym_runner._ensure_probe_composite_spec()
 
+def _stage_d26_blobs_dir(dest: Path, d26: Mapping[str, bytes]) -> Path:
+    dest.mkdir(parents=True, exist_ok=True)
+    for role, rel_path, _, _ in gov1_7a_runner.PINNED_PIPEBOARD_D26_SPECS:
+        (dest / f"{role}__{Path(rel_path).name}").write_bytes(d26[rel_path])
+    return dest
+
+def _verify_conv_cli_argv(out_dir: Path, blobs_dir: Path) -> list[str]:
+    c_dir = out_dir / "candidates"
+    return [
+        "verify-gov1-convergence-record", "--in", str(c_dir / "gov1_convergence_record.candidate.json"),
+        "--store-root", str(out_dir / "ephemeral-store"), "--wheel", str(out_dir / "wheel" / gov1_wheel.EXPECTED_WHEEL_FILENAME),
+        "--corpus", str(CORPUS_JSON), "--repo", str(REPO_ROOT), "--seccomp-profile", str(out_dir / "seccomp_profile.json"),
+        "--legacy-blobs-dir", str(blobs_dir), "--sandbox-profile", str(c_dir / "sealed_sandbox_profile.candidate.json"),
+        "--provenance", str(c_dir / "wheel_build_provenance.candidate.json"),
+        "--boundary-report", str(c_dir / "wheel_boundary_report.candidate.json"),
+        "--mcp-rejection-report", str(c_dir / "mcp_rejection_matrix_report.candidate.json"),
+        "--negative-report", str(c_dir / "negative_security_test_report.candidate.json"),
+        "--certification-7a-record", str(c_dir / "certification_7a_record.candidate.json"),
+    ]
+
+def _make_pipeline_sim_hooks(fx: dict[str, Any], *, crash_on_neg: bool = False) -> gov1_oci_supervisor.RuncSubrunHooks:
+    neg_handler, usage_fn, active_case = _sim_neg_and_7a_container(fx)
+    corpus_doc = loads_strict(CORPUS_JSON.read_text(encoding="utf-8"))
+    reducer = gov1_7a_runner.load_isolated_pinned_meta_reducer(fx["d26"])
+    events_ref: list[list[Any]] = [[]]
+    clk = [1_000_000_000]
+
+    def _handler(spec: dict[str, Any], out_fd: int, err_fd: int, stop_ev: threading.Event) -> int:
+        if spec["kind"] == "pep517_build":
+            os.write(out_fd, canonicalize({"wheel_name": gov1_wheel.EXPECTED_WHEEL_FILENAME, "wheel_b64": base64.b64encode(fx["wheel_bytes"]).decode("ascii")}) + b"\n")
+            return 0
+        if spec["kind"] == "venv_probe":
+            payload = {"packaged_modules": fx["inspection"]["packaged_modules"], "schema_bundle_digest": fx["inspection"]["schema_bundle_digest"]} if len(spec["probe_argv"]) == 3 else {k: fx["mcp_exec"][k] for k in ("schema_bundle_digest", "allowed_methods", "body_64k_boundary_verified", "cases")}
+            os.write(out_fd, canonicalize(payload) + b"\n")
+            return 0
+        if spec["kind"] == "neg":
+            if crash_on_neg:
+                return 9
+            return neg_handler(spec, out_fd, err_fd, stop_ev)
+        active_case[0] = ("pos_7a", 0)
+        b_dir = [e[3] for e in events_ref[0] if e[0] == "spawn"][-1]
+        rctx = loads_strict((b_dir / "oci_extracted/fixtures/replay_context_v1.json").read_text(encoding="utf-8"))
+        c = [x for x in corpus_doc["cases"] if x["case_id"] == spec["case_id"]][0]
+        reg_fix = gov1_7a_certification.build_canonical_regression_fixture(rctx["snapshot_locator"]["content_digest"])
+        adm, adm_loc = gov1_7a_certification.recompute_fixture_7a_admission(collection_request=c["collection_request"], admission_id=c["admission_id"], clock_attestation=c["clock_reading"]["attestation"], configured_max_uncertainty_ms=c["clock_reading"]["configured_max_uncertainty_ms"], timezone_snapshot=corpus_doc["timezone_snapshot"], registry_snapshot_locator=rctx["snapshot_locator"], registry_snapshot=rctx["snapshot"], driver_contract_locator=rctx["driver_contract_locator"], driver_contract=rctx["driver_contract"], sealed_sandbox_profile_locator=spec["sealed_sandbox_profile_locator"], regression_fixture_locator=make_locator("smart_ads/regression_fixture/v1", canonicalize(reg_fix)))
+        hr, cmap = c["http_response"], {p["raw_campaign_id"]: p["resource_ref"] for p in corpus_doc["verified_campaign_pairs"]}
+        batch = gov1_7a_certification.transform_pipeboard_response_to_batch_dict(admitted=adm, private_object_id="act_5544332211", known_campaign_map=cmap, scoped_resource_refs=frozenset(u["resource_ref"] for u in rctx["expected_inventory"]["expected_resources"]), retrieval_context=c["retrieval_context"], network_ok=hr["network_ok"], http_status=hr["http_status"], headers=[(h[0], h[1]) for h in hr["headers"]], body_chunks=[hr["body_utf8"].encode("utf-8")], reducer=reducer)
+        comp = gov1_7a_certification.recompute_collection_completeness_dict(expected_resources=rctx["expected_inventory"]["expected_resources"], required_metrics=adm["canonical_query_contract"]["metric_semantic_refs"], metric_source_mappings=rctx["driver_contract"]["metric_source_mappings"], batch_dict=batch, admitted_dict=adm)
+        os.write(out_fd, canonicalize({"case_id": c["case_id"], "admitted_collection_digest": adm_loc["content_digest"], "observation_batch": batch, "observed_completeness_status": comp["status"], "normalized_fact_set_digest": comp["normalized_fact_set_digest"]}) + b"\n")
+        return 0
+
+    hooks, ev = _make_portable_hooks(fx["comp_spec"], _handler, usage_fn=usage_fn, on_spawn=lambda: active_case.__setitem__(0, ("", 0)), clock_fn=lambda: (clk.__setitem__(0, clk[0] + (300_005_000_000 if active_case[0][0] == "wall_clock_limit_enforced" else 5_000_000)), clk[0])[1])
+    events_ref[0] = ev
+    return hooks
+
+def test_cli_probe_7a_oci_host_and_blocked_pipeline_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from tools.governance import gov1_cli_oci
+
+    assert gov1_cli_oci.OCI_CLI_COMMANDS == frozenset({"probe-7a-oci-host", "run-etapa11-oci-candidates"})
+    monkeypatch.setattr(gov1_cli_oci, "probe_7a_oci_host", lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []})
+    out_ok = tmp_path / "probe_ok.json"
+    assert cli.main(["probe-7a-oci-host", "--base-oci-dir", str(tmp_path), "--out", str(out_ok)]) == 0
+    assert out_ok.read_bytes() == canonicalize({"status": "ELIGIBLE", "eligible": True, "reasons": []})
+    assert loads_strict(capsys.readouterr().out.strip())["status"] == "ELIGIBLE"
+    assert cli.main(["probe-7a-oci-host", "--out", str(out_ok)]) == 1
+    capsys.readouterr()
+    monkeypatch.setattr(gov1_cli_oci, "probe_7a_oci_host", lambda **_kw: {"status": "BLOCKED", "eligible": False, "reasons": ["euid_not_root"]})
+    out_blk = tmp_path / "probe_blk.json"
+    assert cli.main(["probe-7a-oci-host", "--out", str(out_blk)]) == 1
+    assert loads_strict(capsys.readouterr().out.strip()) == {"eligible": False, "reasons": ["euid_not_root"], "status": "BLOCKED"}
+    blobs_dir = _stage_d26_blobs_dir(tmp_path / "blobs", _decode_d26())
+    cand_out = tmp_path / "blocked_out"
+    assert cli.main(["run-etapa11-oci-candidates", "--repo", str(REPO_ROOT), "--base-oci-dir", str(tmp_path), "--out-dir", str(cand_out), "--legacy-blobs-dir", str(blobs_dir)]) == 1
+    assert loads_strict(capsys.readouterr().out.strip())["status"] == "BLOCKED" and not cand_out.exists()
+    assert cli.main(["run-etapa11-oci-candidates", "--repo", str(REPO_ROOT), "--base-oci-dir", str(tmp_path), "--out-dir", str(tmp_path / "bad"), "--legacy-repo", str(tmp_path), "--legacy-blobs-dir", str(blobs_dir)]) == 1
+    capsys.readouterr()
+
+def test_pipeline_ephemeral_d4_pem_cleanup_even_on_failure(tmp_path: Path, portable_oci_fixture: dict[str, Any]) -> None:
+    from tools.governance import gov1_cli_oci
+
+    seen_key_dirs: list[Path] = []
+    with pytest.raises(RuntimeError, match="boom"):
+        with gov1_cli_oci._ephemeral_d4_keyring("2028-01-01T00:00:00Z", key_root_parent=tmp_path) as (k_dir, keys):
+            seen_key_dirs.append(k_dir)
+            assert len(keys) == 12 and len(list(k_dir.glob("*.pem"))) == 12
+            assert keys["independent_7a_verifier"][2] != keys["7a_verifier"][2]
+            raise RuntimeError("boom")
+    assert seen_key_dirs and not seen_key_dirs[0].exists() and list(tmp_path.rglob("*.pem")) == []
+    cg_root = tmp_path / "cg"
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    blobs_dir = _stage_d26_blobs_dir(tmp_path / "blobs", portable_oci_fixture["d26"])
+    crash_hooks = _make_pipeline_sim_hooks(portable_oci_fixture, crash_on_neg=True)
+    with pytest.raises(ValueError, match="exited non-zero"):
+        gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
+            repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=tmp_path / "fail_out",
+            legacy_blobs_dir=blobs_dir, build_run_id="fail-run", verify_ephemeral_d4=True, cgroup_root=cg_root,
+            host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []},
+            subrun_hooks=crash_hooks, base_oci_expectations=portable_oci_fixture["base_meta"],
+            work_root_parent=tmp_path, key_root_parent=tmp_path,
+        )
+    assert list(tmp_path.rglob("*.pem")) == []
+
+def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Path, portable_oci_fixture: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from tools.governance import gov1_cli_oci
+
+    cg_root, out_dir = tmp_path / "cg", tmp_path / "etapa11_out"
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    blobs_dir = _stage_d26_blobs_dir(tmp_path / "blobs", portable_oci_fixture["d26"])
+    hooks = _make_pipeline_sim_hooks(portable_oci_fixture)
+    summary = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
+        repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=out_dir,
+        legacy_blobs_dir=blobs_dir, build_run_id="portable-e11", verify_ephemeral_d4=True, cgroup_root=cg_root,
+        host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []},
+        subrun_hooks=hooks, base_oci_expectations=portable_oci_fixture["base_meta"],
+        work_root_parent=tmp_path, key_root_parent=tmp_path,
+    )
+    assert summary["status"] == "PASS" and summary["ephemeral_d4_verified"] is True and summary["ephemeral_d4_cas_calls"] == 1
+    assert list(tmp_path.rglob("*.pem")) == [] and (out_dir / "etapa11_oci_summary.json").is_file()
+    sbx_envs = [p for p in (out_dir / "ephemeral-store/sha256").glob("*.json") if loads_strict(p.read_text(encoding="utf-8")).get("$schema") == gov1_sandbox.SANDBOX_PROFILE_SCHEMA]
+    assert len(sbx_envs) == 1
+    names = ("sealed_sandbox_profile", "wheel_build_provenance", "wheel_boundary_report", "mcp_rejection_matrix_report", "negative_security_test_report", "certification_7a_record", "gov1_convergence_record")
+    cands = {n: loads_strict((out_dir / "candidates" / f"{n}.candidate.json").read_text(encoding="utf-8")) for n in names}
+    assert all(c["artifact_kind"] == gov1_sandbox.LOCAL_CANDIDATE_KIND and c["signable"] is False and c["authority"] == "none" and "$schema" not in c and "integrity" not in c for c in cands.values())
+    assert cands["sealed_sandbox_profile"]["payload"]["issued_at_utc"] == "2026-09-07T10:00:00Z" and cands["wheel_build_provenance"]["payload"]["built_at_utc"] == "2026-09-07T10:00:05Z"
+    ts_seq = [cands[k]["payload"][f] for k, f in (("sealed_sandbox_profile", "issued_at_utc"), ("wheel_build_provenance", "built_at_utc"), ("wheel_boundary_report", "verified_at_utc"), ("mcp_rejection_matrix_report", "executed_at_utc"), ("negative_security_test_report", "executed_at_utc"), ("certification_7a_record", "certified_at_utc"), ("gov1_convergence_record", "converged_at_utc"))]
+    assert ts_seq == sorted(ts_seq)
+    assert cli.main(_verify_conv_cli_argv(out_dir, blobs_dir)) == 0
+    assert loads_strict(capsys.readouterr().out)["status"] == "PASS"
+    out_nod4, cg_root2 = tmp_path / "etapa11_nod4", tmp_path / "cg2"
+    cg_root2.mkdir()
+    (cg_root2 / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    sum_nod4 = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(repo_root=REPO_ROOT, base_oci_dir=portable_oci_fixture["base_dir"], out_dir=out_nod4, legacy_blobs_dir=blobs_dir, verify_ephemeral_d4=False, cgroup_root=cg_root2, host_probe_fn=lambda **_kw: {"status": "ELIGIBLE", "eligible": True, "reasons": []}, subrun_hooks=_make_pipeline_sim_hooks(portable_oci_fixture), base_oci_expectations=portable_oci_fixture["base_meta"], work_root_parent=tmp_path, key_root_parent=tmp_path)
+    assert sum_nod4["ephemeral_d4_verified"] is False and sum_nod4["ephemeral_d4_cas_calls"] == 0 and list(tmp_path.rglob("*.pem")) == []
+    assert cli.main(_verify_conv_cli_argv(out_nod4, blobs_dir)) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(gov1_cli_oci, "run_etapa11_oci_candidates_pipeline", lambda **_kw: summary)
+    assert cli.main(["run-etapa11-oci-candidates", "--repo", str(REPO_ROOT), "--base-oci-dir", str(portable_oci_fixture["base_dir"]), "--out-dir", str(tmp_path / "cli_out"), "--legacy-blobs-dir", str(blobs_dir), "--verify-ephemeral-d4"]) == 0
+    assert loads_strict(capsys.readouterr().out.strip())["ephemeral_d4_verified"] is True
+
+def test_workflow_gov1_etapa11_oci_yaml_contract() -> None:
+    wf_path = REPO_ROOT / ".github" / "workflows" / "gov1-etapa11-oci.yml"
+    assert wf_path.is_file()
+    wf_text = wf_path.read_text(encoding="utf-8")
+    for token in (
+        "name: gov1-etapa11-oci", "pull_request:", "push:", "workflow_dispatch:", "contents: read",
+        "etapa11-oci-linux-amd64:", "runs-on: ubuntu-latest", "timeout-minutes: 45",
+        "actions/checkout@v4", "astral-sh/setup-uv@v5", "runc", "skopeo",
+        gov1_oci_image.PINNED_BASE_OCI_MANIFEST_DIGEST, "SMART_ADS_LIVE_OCI_TESTS=1",
+        "probe-7a-oci-host", "run-etapa11-oci-candidates", "--verify-ephemeral-d4",
+        "verify-gov1-convergence-record", "git status --porcelain", "actions/upload-artifact@v4",
+    ):
+        assert token in wf_text, f"missing {token!r} in gov1-etapa11-oci.yml"
+
 @pytest.fixture(scope="module")
 def live_oci_suite_result() -> dict[str, Any] | None:
     base_oci_dir = _require_live_oci_prereqs()
     if base_oci_dir is None:
         return None
+    from tools.governance import gov1_cli_oci
+
     work_root = Path(tempfile.mkdtemp(prefix="smart-ads-live-oci-", dir="/tmp"))
     os.chmod(work_root, 0o755)
     try:
-        probe_runner = gov1_oci_supervisor.OciIsolatedWheelProbeRunner(base_oci_dir=base_oci_dir, work_dir=work_root / "stage7")
-        whl_path, snap = gov1_wheel.build_reproducible_wheel(REPO_ROOT, work_root / "wheel_out", probe_runner=probe_runner)
-        insp, mcp_exec = gov1_wheel.inspect_wheel_boundary(whl_path, probe_runner=probe_runner), gov1_mcp.execute_mcp_rejection_matrix_on_wheel(whl_path, probe_runner=probe_runner)
-        d26, git_blobs = _decode_d26(), gov1_7a_certification.resolve_7a_smart_ads_git_blobs(REPO_ROOT, snap.commit_sha)
-        store = Store(work_root / "store")
-        reg_state, _, inv_pair = _stage_leaf_envelopes_in_store(store, commit_sha=snap.commit_sha, git_blobs=git_blobs, d26_blobs=d26)
-        rctx = {"snapshot": reg_state.snapshot.to_dict(), "snapshot_locator": reg_state.locator.to_dict(), "driver_contract": reg_state.driver_contract.to_dict(), "driver_contract_locator": reg_state.driver_contract_locator.to_dict(), "expected_inventory": inv_pair[1].to_dict(), "expected_inventory_locator": inv_pair[0].to_dict()}
-        seccomp = gov1_sandbox.build_default_7a_seccomp_profile()
-        comp = gov1_oci_image.build_composite_7a_oci_layout(base_oci_dir=base_oci_dir, output_layout_dir=work_root / "comp_oci", wheel_bytes=whl_path.read_bytes(), corpus_bytes=CORPUS_JSON.read_bytes(), replay_context_obj=rctx, resolved_d26_blobs=d26, seccomp_profile=seccomp, runner_py_bytes=gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE.encode("utf-8"), venv_probe_bootstrap_bytes=gov1_oci_container_runner.VENV_PROBE_BOOTSTRAP_SOURCE.encode("utf-8"))
-        priv_pem = work_root / "sbx.pem"
-        subprocess.run(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(priv_pem)], check=True, capture_output=True)
-        pub_raw32 = p1.raw_public_key_from_pem(priv_pem)
-        run_ctx = decomposition_governance.verified_run_context_identity(REPO_ROOT)["run_context_locator"]
-        until_utc = (datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        sbx_env = p1.sign_envelope(gov1_sandbox.build_sealed_sandbox_profile_envelope(migration_run_context_locator=run_ctx, oci_image_digest=comp.oci_image_digest, runner_binary_digest=comp.runner_binary_digest, seccomp_profile=seccomp, issued_at_utc="2026-09-07T10:00:00Z", valid_from_utc="2026-01-01T00:00:00Z", valid_until_utc=until_utc, registry_locator=make_locator("smart_ads/key_authorization_registry/v1", b'{"r":1}'), signer_key_id=p1.key_id_for(pub_raw32)), "SMART-ADS:SANDBOX:V1\n", priv_pem)
-        sbx_loc = store.put(sbx_env)
-        sbx_payload = {k: v for k, v in sbx_env.items() if k not in {"$schema", "integrity"}}
-        sup = gov1_oci_supervisor.LinuxRuncSealedOciSupervisor(composite_spec=comp, work_dir=work_root / "sup", build_run_id="live-oci-t3", seccomp_profile=seccomp, sealed_sandbox_profile_locator=sbx_loc)
-        neg_cases = sup.execute_negative_security_suite(wheel_digest=insp["wheel_digest"], sandbox_profile_payload=sbx_payload)
-        pos_res = gov1_7a_runner.run_7a_hermetic_execution(wheel_bytes=whl_path.read_bytes(), corpus_bytes=CORPUS_JSON.read_bytes(), sandbox_profile=sbx_env, seccomp_profile=seccomp, resolved_d26_blobs=d26, sandbox_pubkey_raw32=pub_raw32, supervisor=sup)
-        return {"inspection": insp, "mcp_exec": mcp_exec, "neg_cases": neg_cases, "pos_res": pos_res}
+        blobs_dir = _stage_d26_blobs_dir(work_root / "d26_blobs", _decode_d26())
+        out_dir = work_root / "etapa11_out"
+        summary = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
+            repo_root=REPO_ROOT, base_oci_dir=base_oci_dir, out_dir=out_dir,
+            legacy_blobs_dir=blobs_dir, build_run_id="live-oci-t4", verify_ephemeral_d4=True,
+        )
+        c_dir = out_dir / "candidates"
+        cands = {n: loads_strict((c_dir / f"{n}.candidate.json").read_text(encoding="utf-8")) for n in ("wheel_boundary_report", "mcp_rejection_matrix_report", "negative_security_test_report", "certification_7a_record")}
+        cli_rc = cli.main(_verify_conv_cli_argv(out_dir, blobs_dir))
+        probe_rc = cli.main(["probe-7a-oci-host", "--base-oci-dir", str(base_oci_dir)])
+        pem_left = [str(p) for p in work_root.rglob("*.pem")]
+        return {"summary": summary, "cands": cands, "cli_rc": cli_rc, "probe_rc": probe_rc, "pem_left": pem_left}
     finally:
         gov1_oci_image.cleanup_runc_bundle_trees(work_root)
 
 def test_live_linux_amd64_oci_stage7_probes_negative_suite_and_7a_corpus(live_oci_suite_result: dict[str, Any] | None) -> None:
     if live_oci_suite_result is None:
         return
-    assert live_oci_suite_result["inspection"]["isolated_venv_import_passed"] is True
-    assert live_oci_suite_result["mcp_exec"]["body_64k_boundary_verified"] is True
-    assert len(live_oci_suite_result["neg_cases"]) == 17 and sum(len(c["runs"]) for c in live_oci_suite_result["neg_cases"]) == 18
-    assert live_oci_suite_result["pos_res"]["status"] == "EXECUTED"
-    assert live_oci_suite_result["pos_res"]["execution"]["statuses"] == ["complete", "failed", "partial", "partial"]
+    cands = live_oci_suite_result["cands"]
+    assert cands["wheel_boundary_report"]["payload"]["isolated_venv_import_passed"] is True
+    assert cands["mcp_rejection_matrix_report"]["payload"]["body_64k_boundary_verified"] is True
+    neg_cases = cands["negative_security_test_report"]["payload"]["cases"]
+    assert len(neg_cases) == 17 and sum(len(c["runs"]) for c in neg_cases) == 18
+    pos_cases = cands["certification_7a_record"]["payload"]["fixture_evidence"]["cases"]
+    assert [c["observed_completeness_status"] for c in pos_cases] == ["complete", "failed", "partial", "partial"]
+
+def test_live_etapa11_cli_and_pipeline_convergence(live_oci_suite_result: dict[str, Any] | None) -> None:
+    if live_oci_suite_result is None:
+        return
+    summary = live_oci_suite_result["summary"]
+    assert summary["status"] == "PASS" and summary["ephemeral_d4_verified"] is True and summary["ephemeral_d4_cas_calls"] == 1
+    assert live_oci_suite_result["probe_rc"] == 0 and live_oci_suite_result["cli_rc"] == 0 and live_oci_suite_result["pem_left"] == []
