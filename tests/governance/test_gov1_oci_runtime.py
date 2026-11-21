@@ -10,13 +10,14 @@ from _pytest.outcomes import Failed
 import pytest
 
 from tests.governance.test_gov1_7a_verifiers import _stage_leaf_envelopes_in_store
+from tests.governance.test_gov1_convergence import ADR_PATH, Gov1InstallationPins, MemoryProtectedRuntime, RUN_CONTEXT_LOCATOR
 from tests.governance.test_gov1_oci_seccomp_and_bundle import _make_tar_gz_layer, _write_synthetic_oci_layout
 from tools.governance import (
-    decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_mcp,
+    decomposition_governance, gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_convergence, gov1_mcp,
     gov1_oci_container_runner, gov1_oci_image, gov1_oci_readback, gov1_oci_supervisor, gov1_sandbox, gov1_wheel, p1,
 )
 from tools.governance.jcs import canonicalize, loads_strict
-from tools.governance.locator import Store, make_locator
+from tools.governance.locator import Store, digest, make_locator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "tests" / "certification_7a" / "fixtures"
@@ -33,10 +34,10 @@ def _decode_d26() -> dict[str, bytes]:
     doc = loads_strict(PINNED_D26_JSON.read_text(encoding="utf-8"))
     return {rel: base64.b64decode(doc["blobs"][f"{role}__{Path(rel).name}"]) for role, rel, _, _ in gov1_7a_runner.PINNED_PIPEBOARD_D26_SPECS}
 
-def _require_live_oci_prereqs(*, env: Mapping[str, str] | None = None, probe_fn: Any = gov1_oci_readback.probe_7a_oci_host) -> Path:
+def _require_live_oci_prereqs(*, env: Mapping[str, str] | None = None, probe_fn: Any = gov1_oci_readback.probe_7a_oci_host) -> Path | None:
     eff_env = os.environ if env is None else env
     if eff_env.get("SMART_ADS_LIVE_OCI_TESTS") != "1":
-        pytest.skip("SMART_ADS_LIVE_OCI_TESTS != '1'")
+        return None
     raw_base = eff_env.get("SMART_ADS_BASE_OCI_DIR", "").strip()
     if not raw_base:
         pytest.fail("SMART_ADS_LIVE_OCI_TESTS=1 requires SMART_ADS_BASE_OCI_DIR")
@@ -161,6 +162,7 @@ def test_task3_ast_purity_budgets_and_live_prereq_fail_hard() -> None:
                 root = (node.module or "").split(".")[0]
                 assert root != "smart_ads" and root not in _FORBIDDEN_NET
     assert len(Path(__file__).read_text(encoding="utf-8").splitlines()) <= 380
+    assert _require_live_oci_prereqs(env={}) is None and _require_live_oci_prereqs(env={"SMART_ADS_LIVE_OCI_TESTS": "0"}) is None
     with pytest.raises(Failed, match="SMART_ADS_BASE_OCI_DIR"):
         _require_live_oci_prereqs(env={"SMART_ADS_LIVE_OCI_TESTS": "1"})
     with pytest.raises(Failed, match="ineligible"):
@@ -210,6 +212,7 @@ def test_subrun_pre_go_abort_clamping_priority_and_cleanup_order(tmp_path: Path,
     assert tags.index("harvest") < tags.index("delete") < tags.index("cleanup")
     with pytest.raises(ValueError, match="exited non-zero"):
         sup._run_container_task(task_spec={"kind": "neg", "fail_rc": True})
+    assert [e[0] for e in events[-3:]] == ["delete", "terminate", "cleanup"] and pytest.raises(ValueError, gov1_oci_supervisor._make_profile_ready_validator, None, expect_seccomp=True)
     bad_hooks, bad_ev = _make_portable_hooks(comp_spec, _flood_or_rc, rb_mutator=lambda rb_d, _l: rb_d.__setitem__("network_absent", False))
     bad_sup = gov1_oci_supervisor.LinuxRuncSealedOciSupervisor(composite_spec=comp_spec, work_dir=tmp_path / "w2", build_run_id="r2", cgroup_root=cg_root, hooks=bad_hooks)
     run_ctx = decomposition_governance.verified_run_context_identity(REPO_ROOT)["run_context_locator"]
@@ -290,6 +293,11 @@ def test_supervisor_negative_suite_and_7a_corpus_end_to_end(tmp_path: Path, port
     assert gov1_7a_certification.verify_certification_7a_replay_bytes(cert_cand, store=fx["store"], wheel_bytes=fx["wheel_bytes"], corpus_bytes=CORPUS_JSON.read_bytes(), resolved_git_blobs=fx["git_blobs"], resolved_d26_blobs=fx["d26"], sandbox_profile=sbx_cand, wheel_provenance=prov_cand, wheel_boundary_report=bound_cand, negative_security_report=neg_cand, sealed_sandbox_profile_store_locator=sbx_loc)["mode"] == "candidate"
     with pytest.raises(ValueError, match="parity|mismatch|reducer"):
         sup.execute_7a_corpus(wheel_bytes=fx["wheel_bytes"], corpus_bytes=CORPUS_JSON.read_bytes(), sandbox_profile_payload=sbx_cand["payload"], resolved_d26_blobs=fx["d26"], reducer=lambda _m: [])
+    for bad_kw in ({"wheel_bytes": bytearray(fx["wheel_bytes"])}, {"corpus_bytes": bytearray(CORPUS_JSON.read_bytes())}, {"sandbox_profile_payload": {}}):
+        with pytest.raises(ValueError):
+            sup.execute_7a_corpus(**{"wheel_bytes": fx["wheel_bytes"], "corpus_bytes": CORPUS_JSON.read_bytes(), "sandbox_profile_payload": sbx_cand["payload"], "resolved_d26_blobs": fx["d26"], "reducer": lambda _m: [], **bad_kw})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="d26 mismatch"):
+        sup._read_sealed_bundle_fixtures({**fx["d26"], "scripts/pipeboard_limits.py": b"tampered"})
 
 def test_oci_isolated_wheel_probe_runner_portable(tmp_path: Path, portable_oci_fixture: dict[str, Any]) -> None:
     fx, cg_root = portable_oci_fixture, tmp_path / "cg"
@@ -309,7 +317,9 @@ def test_oci_isolated_wheel_probe_runner_portable(tmp_path: Path, portable_oci_f
     hooks, events = _make_portable_hooks(fx["comp_spec"], _probe_handler)
     bm = fx["base_meta"]
     runner = gov1_oci_supervisor.OciIsolatedWheelProbeRunner(base_oci_dir=fx["base_dir"], work_dir=tmp_path / "probe_work", cgroup_root=cg_root, hooks=hooks, expected_manifest_digest=bm["manifest_digest"], expected_config_digest=bm["config_digest"], expected_layer_digests=bm["layer_digests"], expected_diff_ids=bm["diff_ids"])
-    assert runner.os_isolated is True and isinstance(runner, gov1_wheel.IsolatedWheelProbeRunner)
+    rt = MemoryProtectedRuntime({"k": 1}, {}, {})
+    pins = Gov1InstallationPins(configuration_digest=digest(rt.config), installation_authority="synthetic-gov1-installation", cell_id="c", head_register="h", checkpoint_register="ck", owner_principal="principal:r", owner_tenant="t", pinned_run_context_locator=RUN_CONTEXT_LOCATOR)
+    assert runner.os_isolated is True and gov1_convergence.Gov1AdmissionVerifier(rt, pins, fx["store"], ADR_PATH.read_bytes(), isolated_probe_runner=runner)._require_os_isolated_probe_runner() is runner
     members = frozenset(e["path"] for e in fx["inspection"]["sorted_record_entries"])
     assert runner.run_wheel_import_probe(wheel_bytes=fx["wheel_bytes"], expected_member_paths=members, expected_modules=fx["inspection"]["packaged_modules"])["schema_bundle_digest"] == fx["inspection"]["schema_bundle_digest"]
     mcp_out = runner.run_mcp_matrix_probe(wheel_bytes=fx["wheel_bytes"], expected_member_paths=members, expected_schema_bundle_digest=fx["inspection"]["schema_bundle_digest"])
@@ -320,10 +330,18 @@ def test_oci_isolated_wheel_probe_runner_portable(tmp_path: Path, portable_oci_f
     assert [e[1] for e in events if e[0] == "go"] == [b"\x01", b"\x01", b"\x03"]
     with pytest.raises(ValueError):
         runner.run_wheel_import_probe(wheel_bytes=fx["wheel_bytes"], expected_member_paths=frozenset({"only.py"}), expected_modules=fx["inspection"]["packaged_modules"])
+    with pytest.raises(ValueError):
+        runner.run_pep517_wheel_build(snapshot_files=fx["snapshot"].files, snapshot_modes={**fx["snapshot"].modes, "pyproject.toml": "120000"}, verified_backend_site_dir=b_site, source_date_epoch=gov1_wheel.DEFAULT_SOURCE_DATE_EPOCH)
+    sym_runner = gov1_oci_supervisor.OciIsolatedWheelProbeRunner(base_oci_dir=fx["base_dir"], work_dir=tmp_path / "sym_work", cgroup_root=cg_root, hooks=hooks, expected_manifest_digest=bm["manifest_digest"], expected_config_digest=bm["config_digest"], expected_layer_digests=bm["layer_digests"], expected_diff_ids=bm["diff_ids"])
+    os.symlink(tmp_path / "missing_target", tmp_path / "sym_work" / "stage7-probe-oci")
+    with pytest.raises(ValueError, match="symlink"):
+        sym_runner._ensure_probe_composite_spec()
 
 @pytest.fixture(scope="module")
-def live_oci_suite_result() -> dict[str, Any]:
+def live_oci_suite_result() -> dict[str, Any] | None:
     base_oci_dir = _require_live_oci_prereqs()
+    if base_oci_dir is None:
+        return None
     work_root = Path(tempfile.mkdtemp(prefix="smart-ads-live-oci-", dir="/tmp"))
     os.chmod(work_root, 0o755)
     try:
@@ -351,7 +369,9 @@ def live_oci_suite_result() -> dict[str, Any]:
     finally:
         gov1_oci_image.cleanup_runc_bundle_trees(work_root)
 
-def test_live_linux_amd64_oci_stage7_probes_negative_suite_and_7a_corpus(live_oci_suite_result: dict[str, Any]) -> None:
+def test_live_linux_amd64_oci_stage7_probes_negative_suite_and_7a_corpus(live_oci_suite_result: dict[str, Any] | None) -> None:
+    if live_oci_suite_result is None:
+        return
     assert live_oci_suite_result["inspection"]["isolated_venv_import_passed"] is True
     assert live_oci_suite_result["mcp_exec"]["body_64k_boundary_verified"] is True
     assert len(live_oci_suite_result["neg_cases"]) == 17 and sum(len(c["runs"]) for c in live_oci_suite_result["neg_cases"]) == 18

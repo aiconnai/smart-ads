@@ -235,18 +235,20 @@ def _finalize_post_go_subrun(*, proc: Any, lease: CgroupV2Lease, tmp_fd: int, st
 def _cleanup_subrun_resources(*, fds: dict[str, int | None], proc: Any | None, lease: CgroupV2Lease | None, bundle_dir: Path, runc_binary: str, runc_root_dir: Path, instance_id: str, hooks: RuncSubrunHooks) -> None:
     for k in ("stdin_r", "stdin_w", "stdout_r", "stdout_w", "stderr_r", "stderr_w"):
         _close_tracked_fd(fds, k)
+    if lease is not None and (lease.cgroup_dir.exists() or (proc is not None and proc.poll() is None)):
+        with contextlib.suppress(BaseException):
+            hooks.terminate_cgroup(lease)
     if proc is not None and proc.poll() is None:
-        if lease is not None:
-            with contextlib.suppress(BaseException):
-                hooks.terminate_cgroup(lease)
         _wait_or_kill_proc(proc)
     _close_tracked_fd(fds, "tmp_fd")
     if proc is not None:
         hooks.delete_runc([runc_binary, "--root", str(runc_root_dir), "delete", "--force", instance_id])
     if lease is not None and lease.cgroup_dir.exists():
+        with contextlib.suppress(BaseException):
+            hooks.terminate_cgroup(lease)
         with contextlib.suppress(OSError):
             os.rmdir(lease.cgroup_dir)
-    if bundle_dir.exists():
+    if bundle_dir.is_symlink() or bundle_dir.exists():
         hooks.cleanup_bundle(bundle_dir)
 
 def _execute_runc_subrun(*, instance_id: str, composite_spec: CompositeOciBundleSpec, bundles_root: Path, runc_root_dir: Path, cgroup_root: Path, runc_binary: str, process_args: Sequence[str], seccomp_mode_byte: bytes, task_spec: Mapping[str, Any] | None = None, ready_only: bool = False, extra_app_files: Mapping[str, bytes] | None = None, seccomp_profile: dict[str, Any] | None = None, ready_validator: Callable[[LiveContainerReadback], None] | None = None, hooks: RuncSubrunHooks = RuncSubrunHooks()) -> SubrunExecutionResult:
@@ -295,9 +297,14 @@ def _prepare_supervisor_work_dirs(work_dir: Path) -> tuple[Path, Path, Path]:
         os.chmod(d, mode)
     return w_root, bundles_dir, runc_root
 
+def _validate_sandbox_profile_payload(sandbox_profile_payload: object) -> tuple[str, bytes, bytes]:
+    if not isinstance(sandbox_profile_payload, Mapping) or not neg7a._SPEC_17_FIELDS.issubset(sandbox_profile_payload.keys()) or "resource_limits" not in sandbox_profile_payload:
+        raise ValueError("sandbox_profile_payload: missing required 17 sandbox spec fields")
+    lim = neg7a._validate_resource_limits_dict(sandbox_profile_payload["resource_limits"], "sandbox_profile.resource_limits")
+    return json_digest({k: sandbox_profile_payload[k] for k in neg7a._SPEC_17_FIELDS}), canonicalize({k: sandbox_profile_payload[k] for k in neg7a._SHARED_RUNTIME_16_FIELDS}), canonicalize(lim)
+
 def _make_profile_ready_validator(sandbox_profile_payload: Mapping[str, Any], *, expect_seccomp: bool) -> Callable[[LiveContainerReadback], None]:
-    exp_shared = canonicalize({k: sandbox_profile_payload[k] for k in neg7a._SHARED_RUNTIME_16_FIELDS})
-    exp_limits = canonicalize(neg7a._validate_resource_limits_dict(sandbox_profile_payload["resource_limits"], "sandbox_profile.resource_limits"))
+    _, exp_shared, exp_limits = _validate_sandbox_profile_payload(sandbox_profile_payload)
 
     def _validate(live_rb: LiveContainerReadback) -> None:
         rb = neg7a._validate_runtime_readback_dict(live_rb.runtime_readback, "ready_readback")
@@ -390,24 +397,30 @@ class LinuxRuncSealedOciSupervisor(SealedOciSupervisorPort):
 
     def execute_negative_security_suite(self, *, wheel_digest: str, sandbox_profile_payload: Mapping[str, Any], build_run_id: str | None = None) -> list[dict[str, Any]]:
         neg7a._sha256_str(wheel_digest, "wheel_digest")
-        if not isinstance(sandbox_profile_payload, Mapping) or not neg7a._SPEC_17_FIELDS.issubset(sandbox_profile_payload.keys()):
-            raise ValueError("sandbox_profile_payload: missing required 17 sandbox spec fields")
+        sbx_spec_digest = _validate_sandbox_profile_payload(sandbox_profile_payload)[0]
         run_id = self.build_run_id if build_run_id is None else neg7a._strict_str(build_run_id, "build_run_id")
         neg7a._opaque_ref_str(f"sandbox:oci-neg-{run_id}-00-0", "build_run_id", expected_prefix="sandbox")
-        sbx_spec_digest, cases_out = json_digest({k: sandbox_profile_payload[k] for k in neg7a._SPEC_17_FIELDS}), []
+        cases_out: list[dict[str, Any]] = []
         for c_idx, cid in enumerate(neg7a.MANDATORY_7A_NEGATIVE_CASES):
             runs = [self._execute_single_negative_subrun(cid=cid, c_idx=c_idx, s_idx=s_idx, run_id=run_id, wheel_digest=wheel_digest, sbx_spec_digest=sbx_spec_digest, sandbox_profile_payload=sandbox_profile_payload) for s_idx in range(2 if cid == "output_limit_enforced" else 1)]
             neg7a._check_denial_run(cid, runs[0], f"neg[{cid}]") if cid in _DENIAL_CASE_IDS else neg7a._check_resource_case(cid, runs, f"neg[{cid}]")
             cases_out.append({"case_id": cid, "outcome": "passed", "runs": runs})
         return cases_out
 
-    def _read_sealed_bundle_fixtures(self) -> tuple[bytes, bytes, bytes]:
+    def _read_sealed_bundle_fixtures(self, verified_d26: Mapping[str, bytes]) -> tuple[bytes, bytes, bytes]:
         inspect_dir = self._bundles_dir / self._next_instance_id("sa7a-fix")
         try:
             trees = self._hooks.materialize_bundle(composite_spec=self.composite_spec, bundle_dir=inspect_dir, extra_app_files=None)
-            return (trees["app"] / "wheel" / gov1_wheel.EXPECTED_WHEEL_FILENAME).read_bytes(), (trees["fixtures"] / "pipeboard_7a_corpus_v1.json").read_bytes(), (trees["fixtures"] / "replay_context_v1.json").read_bytes()
+            for role, rel, _, _ in runner7a.PINNED_PIPEBOARD_D26_SPECS:
+                d26_p = trees["app"] / f"d26/{role}__{Path(rel).name}"
+                if d26_p.is_symlink() or not d26_p.is_file() or d26_p.read_bytes() != verified_d26[rel]:
+                    raise ValueError(f"execute_7a_corpus: sealed OCI bundle d26 mismatch for {rel!r}")
+            req_files = (trees["app"] / "wheel" / gov1_wheel.EXPECTED_WHEEL_FILENAME, trees["fixtures"] / "pipeboard_7a_corpus_v1.json", trees["fixtures"] / "replay_context_v1.json")
+            if any(p.is_symlink() or not p.is_file() for p in req_files):
+                raise ValueError("execute_7a_corpus: missing sealed wheel or fixture file in OCI bundle")
+            return req_files[0].read_bytes(), req_files[1].read_bytes(), req_files[2].read_bytes()
         finally:
-            if inspect_dir.exists():
+            if inspect_dir.is_symlink() or inspect_dir.exists():
                 self._hooks.cleanup_bundle(inspect_dir)
 
     def _execute_single_7a_case(self, *, idx: int, cc: Mapping[str, Any], corpus_doc: Mapping[str, Any], rctx_parts: Any, priv_map: Mapping[tuple[str, str], str], cmap: Mapping[str, str], sbx_loc: Mapping[str, Any], sandbox_profile_payload: Mapping[str, Any], sbx_spec_digest: str, whl_digest: str, corpus_digest: str, reducer: Callable[[dict[str, Any]], list[dict[str, int]]]) -> dict[str, Any]:
@@ -435,8 +448,10 @@ class LinuxRuncSealedOciSupervisor(SealedOciSupervisorPort):
     def execute_7a_corpus(self, *, wheel_bytes: bytes, corpus_bytes: bytes, sandbox_profile_payload: Mapping[str, Any], resolved_d26_blobs: Mapping[str, bytes], reducer: Callable[[dict[str, Any]], list[dict[str, int]]]) -> Mapping[str, Any]:
         if self._sbx_locator is None or not callable(reducer):
             raise ValueError("execute_7a_corpus requires sealed_sandbox_profile_locator and callable reducer")
-        runner7a._verify_d26_blob_map(resolved_d26_blobs)
-        img_whl, img_corp, rctx_raw = self._read_sealed_bundle_fixtures()
+        if type(wheel_bytes) is not bytes or not wheel_bytes or type(corpus_bytes) is not bytes or not corpus_bytes:
+            raise ValueError("execute_7a_corpus: wheel_bytes and corpus_bytes must be non-empty bytes")
+        sbx_spec_digest, verified_d26 = _validate_sandbox_profile_payload(sandbox_profile_payload)[0], runner7a._verify_d26_blob_map(resolved_d26_blobs)
+        img_whl, img_corp, rctx_raw = self._read_sealed_bundle_fixtures(verified_d26)
         if wheel_bytes != img_whl or corpus_bytes != img_corp:
             raise ValueError("execute_7a_corpus: wheel_bytes or corpus_bytes mismatch against sealed OCI bundle")
         rctx_parts = _parse_bundle_replay_context(rctx_raw)
@@ -449,7 +464,7 @@ class LinuxRuncSealedOciSupervisor(SealedOciSupervisorPort):
             if replay7a.derive_resource_ref(secret_bytes=secret, mapping_version=rctx_parts[0]["resource_ref_mapping_version"], domain_separator=rctx_parts[0]["domain_separator"], raw_provider_id=pair["raw_campaign_id"]) != rref:
                 raise ValueError("corpus_bytes: campaign resource_ref HMAC derivation mismatch")
             cmap[pair["raw_campaign_id"]] = rref
-        whl_digest, corpus_digest, sbx_spec_digest = digest(wheel_bytes), digest(corpus_bytes), json_digest({k: sandbox_profile_payload[k] for k in neg7a._SPEC_17_FIELDS})
+        whl_digest, corpus_digest = digest(wheel_bytes), digest(corpus_bytes)
         cases_out = [self._execute_single_7a_case(idx=idx, cc=cc, corpus_doc=corpus_doc, rctx_parts=rctx_parts, priv_map=priv_map, cmap=cmap, sbx_loc=self._sbx_locator, sandbox_profile_payload=sandbox_profile_payload, sbx_spec_digest=sbx_spec_digest, whl_digest=whl_digest, corpus_digest=corpus_digest, reducer=reducer) for idx, cc in enumerate(corpus_doc["cases"])]
         return {"cases": cases_out, "statuses": [c["observed_completeness_status"] for c in cases_out]}
 
@@ -488,7 +503,7 @@ class OciIsolatedWheelProbeRunner(IsolatedWheelProbeRunner):
         shim = {**{d: ("dir", 0o555, b"") for d in ("app", "dev", "fixtures", "home", "proc", "run", "sys", "tmp", "usr", "usr/bin", "var", "var/run")}, "var/.wh.run": ("reg", 0o444, b""), "usr/bin/python3": ("sym", 0o777, "/usr/local/bin/python3.12")}
         app = {**{d: ("dir", 0o555, b"") for d in ("app", "app/venv", "app/venv/bin", "app/venv/lib", "app/venv/lib/python3.12", "app/venv/lib/python3.12/site-packages")}, "app/runner.py": ("reg", 0o555, runner_b), "app/venv_probe_bootstrap.py": ("reg", 0o555, boot_b), "app/seccomp_filter.bpf": ("reg", 0o444, bpf_raw), "app/venv/pyvenv.cfg": ("reg", 0o444, oci_img._PYVENV_CFG_BYTES), "app/venv/bin/python": ("sym", 0o777, "/usr/local/bin/python3.12"), "app/venv/bin/python3": ("sym", 0o777, "/usr/local/bin/python3.12")}
         out_dir = self._work_dir / "stage7-probe-oci"
-        if out_dir.exists():
+        if out_dir.is_symlink() or out_dir.exists():
             oci_img.cleanup_runc_bundle_trees(out_dir)
         overlays = (oci_img._build_deterministic_tar_gz_layer(shim), oci_img._build_deterministic_tar_gz_layer(app), oci_img._build_deterministic_tar_gz_layer({"fixtures": ("dir", 0o555, b"")}))
         self._probe_spec = CompositeOciBundleSpec(out_dir, oci_img._write_composite_oci_files(out_dir, v_base, overlays), run_bin_dig, sec_dig, py_sha, run_sha)
@@ -531,7 +546,7 @@ class OciIsolatedWheelProbeRunner(IsolatedWheelProbeRunner):
         for rel_p, raw in snapshot_files.items():
             source_path(rel_p)
             gov1_wheel._reject_forbidden_hatch_filename(rel_p, label="run_pep517_wheel_build")
-            if not gov1_wheel._is_allowed_snapshot_stage_path(rel_p) or type(raw) is not bytes or snapshot_modes[rel_p] not in {"100644", "100755"}:
+            if not gov1_wheel._is_allowed_snapshot_stage_path(rel_p) or type(raw) is not bytes or type(snapshot_modes[rel_p]) is not str or snapshot_modes[rel_p] not in {"100644", "100755"}:
                 raise ValueError(f"run_pep517_wheel_build: invalid staged snapshot entry {rel_p!r}")
             extra[f"stage/{rel_p}"] = raw
         b_root = b_dir.resolve()
