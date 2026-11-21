@@ -420,8 +420,8 @@ def run_etapa11_oci_candidates_pipeline(
     profiles, valid_until_utc = {p["schema"]: p for p in profile_proposals(adr_bytes)}, _compute_valid_until_utc()
     w_parent = str(work_root_parent) if work_root_parent is not None else ("/tmp" if Path("/tmp").is_dir() else None)
     work_root = Path(tempfile.mkdtemp(prefix="smart-ads-etapa11-oci-", dir=w_parent))
-    os.chmod(work_root, 0o755)
     try:
+        os.chmod(work_root, 0o755)
         out_path.mkdir(parents=True, exist_ok=True)
         store = Store(out_path / "ephemeral-store")
         with _ephemeral_d4_keyring(valid_until_utc, key_root_parent=key_root_parent) as (_key_dir, keys):

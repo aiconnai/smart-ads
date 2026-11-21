@@ -31,9 +31,12 @@ jobs:
 
       - name: Ensure runc, skopeo, and cgroup-v2 controllers
         run: |
-          if ! command -v runc >/dev/null 2>&1 || ! command -v skopeo >/dev/null 2>&1; then
+          missing_pkgs=()
+          command -v runc >/dev/null 2>&1 || missing_pkgs+=(runc)
+          command -v skopeo >/dev/null 2>&1 || missing_pkgs+=(skopeo)
+          if [ "${#missing_pkgs[@]}" -gt 0 ]; then
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends runc skopeo
+            sudo apt-get install -y --no-install-recommends "${missing_pkgs[@]}"
           fi
           uname -m
           runc --version
@@ -43,6 +46,7 @@ jobs:
       - name: Fetch pinned linux/amd64 python:3.12-slim-bookworm OCI layout
         run: |
           skopeo copy \
+            --preserve-digests \
             --override-os linux \
             --override-arch amd64 \
             docker://docker.io/library/python@sha256:0f086103b026048cc50cb5da25ec435c023c5241a83fc44daea593377abc61c4 \
@@ -77,7 +81,7 @@ jobs:
             PYTHONDONTWRITEBYTECODE=1 \
             SMART_ADS_LIVE_OCI_TESTS=1 \
             SMART_ADS_BASE_OCI_DIR=/tmp/smart-ads-base-oci \
-            "$PYTHON_BIN" -m pytest tests/governance/test_gov1_oci_runtime.py -v
+            "$PYTHON_BIN" -m pytest -o cache_dir=/tmp/pytest-cache-live-oci tests/governance/test_gov1_oci_runtime.py -v
 
           sudo -E env "PATH=$PATH" \
             PYTHONDONTWRITEBYTECODE=1 \

@@ -441,7 +441,30 @@ def test_pipeline_ephemeral_d4_pem_cleanup_even_on_failure(tmp_path: Path, porta
             subrun_hooks=crash_hooks, base_oci_expectations=portable_oci_fixture["base_meta"],
             work_root_parent=tmp_path, key_root_parent=tmp_path,
         )
-    assert list(tmp_path.rglob("*.pem")) == []
+    assert list(tmp_path.rglob("*.pem")) == [] and list(tmp_path.glob("smart-ads-etapa11-oci-*")) == []
+
+def test_run_git_offline_fsmonitor_and_root_safe_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tools.governance import decomposition_scope
+
+    scope_tree = ast.parse((REPO_ROOT / "tools" / "governance" / "decomposition_scope.py").read_text(encoding="utf-8"))
+    rgo = [n for n in ast.walk(scope_tree) if isinstance(n, ast.FunctionDef) and n.name == "run_git_offline"][0]
+    assert (rgo.end_lineno or rgo.lineno) - rgo.lineno + 1 < 50
+    real_run = decomposition_scope.subprocess.run
+    seen: list[list[str]] = []
+    monkeypatch.setattr(decomposition_scope.subprocess, "run", lambda cmd, *a, **kw: (seen.append(list(cmd)), real_run(cmd, *a, **kw))[1])
+    monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 1001)
+    decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
+    non_root_cmd = seen[-1]
+    assert non_root_cmd[1:7] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false"]
+    assert not any(arg.startswith("safe.directory=") for arg in non_root_cmd)
+    monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 0)
+    decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
+    root_cmd = seen[-1]
+    assert root_cmd[1:9] == [
+        "-c", "protocol.allow=never", "-c", "credential.helper=",
+        "-c", "core.fsmonitor=false", "-c", f"safe.directory={REPO_ROOT.resolve().as_posix()}",
+    ]
+    assert root_cmd[9:] == ["-C", str(REPO_ROOT), "rev-parse", "HEAD"]
 
 def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Path, portable_oci_fixture: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from tools.governance import gov1_cli_oci
@@ -488,7 +511,8 @@ def test_workflow_gov1_etapa11_oci_yaml_contract() -> None:
     for token in (
         "name: gov1-etapa11-oci", "pull_request:", "push:", "workflow_dispatch:", "contents: read",
         "etapa11-oci-linux-amd64:", "runs-on: ubuntu-latest", "timeout-minutes: 45",
-        "actions/checkout@v4", "astral-sh/setup-uv@v5", "runc", "skopeo",
+        "actions/checkout@v4", "astral-sh/setup-uv@v5", "missing_pkgs=()", "--preserve-digests",
+        "-o cache_dir=/tmp/pytest-cache-live-oci", "runc", "skopeo",
         gov1_oci_image.PINNED_BASE_OCI_MANIFEST_DIGEST, "SMART_ADS_LIVE_OCI_TESTS=1",
         "probe-7a-oci-host", "run-etapa11-oci-candidates", "--verify-ephemeral-d4",
         "verify-gov1-convergence-record", "git status --porcelain", "actions/upload-artifact@v4",
@@ -503,8 +527,8 @@ def live_oci_suite_result() -> dict[str, Any] | None:
     from tools.governance import gov1_cli_oci
 
     work_root = Path(tempfile.mkdtemp(prefix="smart-ads-live-oci-", dir="/tmp"))
-    os.chmod(work_root, 0o755)
     try:
+        os.chmod(work_root, 0o755)
         blobs_dir = _stage_d26_blobs_dir(work_root / "d26_blobs", _decode_d26())
         out_dir = work_root / "etapa11_out"
         summary = gov1_cli_oci.run_etapa11_oci_candidates_pipeline(
