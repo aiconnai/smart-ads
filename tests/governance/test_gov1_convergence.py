@@ -916,6 +916,14 @@ def test_constants_adr_cases_and_untouched_p1_domain_prefixes() -> None:
     assert "gov1_convergence_record/v1" not in p1.DOMAIN_PREFIXES
 
 
+_NEW_OCI_BUDGETS: dict[str, int] = {
+    "gov1_oci_container_runner.py": 620,
+    "gov1_oci_image.py": 550,
+    "gov1_oci_readback.py": 550,
+    "gov1_oci_seccomp_bpf.py": 420,
+}
+
+
 def test_zero_ast_assert_across_all_gov1_modules() -> None:
     gov1_files = sorted((REPO_ROOT / "tools" / "governance").glob("gov1_*.py"))
     assert [f.name for f in gov1_files] == [
@@ -927,7 +935,9 @@ def test_zero_ast_assert_across_all_gov1_modules() -> None:
         "gov1_convergence.py",
         "gov1_d4_helpers.py",
         "gov1_mcp.py",
+        "gov1_oci_container_runner.py",
         "gov1_oci_image.py",
+        "gov1_oci_readback.py",
         "gov1_oci_seccomp_bpf.py",
         "gov1_sandbox.py",
         "gov1_wheel.py",
@@ -938,8 +948,9 @@ def test_zero_ast_assert_across_all_gov1_modules() -> None:
         assert [n for n in ast.walk(tree) if isinstance(n, ast.Assert)] == [], (
             f"ast.Assert found in {mod_path}"
         )
-        if mod_path.name in {"gov1_oci_image.py", "gov1_oci_seccomp_bpf.py"}:
-            assert len(src.splitlines()) <= 650, f"{mod_path.name} exceeds 650 lines"
+        if mod_path.name in _NEW_OCI_BUDGETS:
+            budget = _NEW_OCI_BUDGETS[mod_path.name]
+            assert len(src.splitlines()) <= budget, f"{mod_path.name} exceeds {budget} lines"
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     span = (node.end_lineno or node.lineno) - node.lineno + 1

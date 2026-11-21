@@ -1,23 +1,32 @@
-"""Tests for Task 1: `gov1_oci_seccomp_bpf.py` and `gov1_oci_image.py`."""
+"""Tests for Task 1 & Task 2: seccomp BPF, OCI bundle layout, container runner, and readback."""
 from __future__ import annotations
 
 import ast
 import base64
 import copy
+import errno
 import gzip
 import io
+import json
 import os
 from pathlib import Path
+import signal
 import struct
+import subprocess
+import sys
 import tarfile
+import types
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
-from tools.governance import gov1_7a_runner, gov1_oci_image, gov1_oci_seccomp_bpf, gov1_sandbox, gov1_wheel
+from tools.governance import (
+    gov1_7a_certification, gov1_7a_negative, gov1_7a_runner, gov1_oci_container_runner,
+    gov1_oci_image, gov1_oci_readback, gov1_oci_seccomp_bpf, gov1_sandbox, gov1_wheel,
+)
 from tools.governance.jcs import canonicalize, loads_strict
-from tools.governance.locator import digest, json_digest
+from tools.governance.locator import digest, json_digest, make_locator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_DIR = REPO_ROOT / "tests" / "certification_7a" / "fixtures"
@@ -114,7 +123,9 @@ def test_task1_modules_ast_purity_budgets_and_no_network_imports() -> None:
     specs = (
         (REPO_ROOT / "tools" / "governance" / "gov1_oci_seccomp_bpf.py", 420, True, False),
         (REPO_ROOT / "tools" / "governance" / "gov1_oci_image.py", 550, True, True),
-        (Path(__file__), 400, False, False),
+        (REPO_ROOT / "tools" / "governance" / "gov1_oci_container_runner.py", 620, True, True),
+        (REPO_ROOT / "tools" / "governance" / "gov1_oci_readback.py", 550, True, True),
+        (Path(__file__), 700, False, False),
     )
     for path, max_lines, is_gov1, forbid_net in specs:
         src = path.read_text(encoding="utf-8")
@@ -390,3 +401,295 @@ def test_safe_tar_extraction_rejects_missing_python_and_escape_vectors(
             bs = gov1_oci_image.build_composite_7a_oci_layout(base_oci_dir=bad_b, output_layout_dir=tmp_path / f"bad_o_{idx}", wheel_bytes=head_wheel_bytes, corpus_bytes=b"{}", replay_context_obj={}, resolved_d26_blobs=_decode_d26_fixture(), seccomp_profile=gov1_sandbox.build_default_7a_seccomp_profile(), runner_py_bytes=b"print(1)\n", expected_manifest_digest=bm["manifest_digest"], expected_config_digest=bm["config_digest"], expected_layer_digests=bm["layer_digests"], expected_diff_ids=bm["diff_ids"])
             gov1_oci_image.materialize_runc_bundle_trees(composite_spec=bs, bundle_dir=tmp_path / f"bad_m_{idx}")
     assert outside_victim.read_bytes() == b"untouched"
+
+
+def test_container_runner_constants_framing_and_ast_source_verifier() -> None:
+    assert (gov1_oci_container_runner.PREMASK_BANNER, gov1_oci_container_runner.READY_BANNER, gov1_oci_container_runner.GO_BYTE) == (b"SMART-ADS-OCI-PREMASK\n", b"SMART-ADS-OCI-READY\n", b"\x02")
+    gov1_oci_container_runner.verify_embedded_runner_sources()
+    f_neg = gov1_oci_container_runner.encode_go_task_frame({"kind": "neg", "case_id": "socket_denied"})
+    assert f_neg[0:1] == b"\x02" and struct.unpack(">I", f_neg[1:5])[0] == len(f_neg) - 5
+    f_pep = gov1_oci_container_runner.encode_go_task_frame({"kind": "pep517_build", "driver_script": "x" * 10000})
+    assert len(f_pep) > 10005
+    for bad_spec in ({}, {"kind": "neg", "case_id": "x" * 4200}, {"kind": "pep517_build", "driver_script": "x" * 70000}):
+        with pytest.raises(ValueError):
+            gov1_oci_container_runner.encode_go_task_frame(bad_spec)
+    for bad_src in (
+        "import ctypes, os\nlibc = ctypes.CDLL(None)\nos.closerange(3, 65536)\nassert True\n",
+        "import ctypes, os\nos.closerange(3, 65536)\nlibc = ctypes.CDLL(None)\n",
+        "import ctypes, os\nlibc = ctypes.CDLL(None)\nos.closerange(3, 65536)\ndef big():\n" + ("    x = 1\n" * 50),
+    ):
+        with pytest.raises(ValueError):
+            gov1_oci_container_runner._verify_single_embedded_source(bad_src, "test")
+
+
+class _ExitIntercept(BaseException):
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+
+def _run_embedded_source(
+    source_code: str, stdin_bytes: bytes, *, root_dir: Path | None = None,
+    env_override: dict[str, str] | None = None, prctl_rc: int = 0, extra_patches: Any = None,
+) -> tuple[bytes, int, list[Any]]:
+    events, in_buf, out_buf, err_box = [], io.BytesIO(stdin_bytes), bytearray(), [0]
+    mod = types.ModuleType("_embedded_test")
+    exec(compile(source_code, "<embedded>", "exec"), mod.__dict__)
+    fake_os = types.SimpleNamespace(**{k: getattr(os, k) for k in dir(os)})
+    fake_os.closerange = lambda lo, hi: events.append(("closerange", lo, hi))
+    fake_os.read = lambda fd, n: in_buf.read(n) if fd == 0 else os.read(fd, n)
+    fake_os.write = lambda fd, data: (out_buf.extend(data), len(data))[1] if fd == 1 else os.write(fd, data)
+    fake_os._exit = lambda code: (_ for _ in ()).throw(_ExitIntercept(code))
+    fake_os.fstat = lambda fd: (_ for _ in ()).throw(OSError(errno.EBADF, "bad fd")) if fd >= 3 else os.fstat(fd)
+    if env_override is not None:
+        fake_os.environ = env_override
+    fake_libc = types.SimpleNamespace(
+        prctl=lambda opt, a2, *_r: (events.append(("prctl", opt, int(a2) if isinstance(a2, int) else a2)), prctl_rc)[1],
+        syscall=lambda nr, *_a: (events.append(("syscall", nr)), err_box.__setitem__(0, errno.EPERM), -1)[2],
+    )
+    fake_ctypes = types.SimpleNamespace(**{k: getattr(mod.ctypes, k) for k in dir(mod.ctypes)})
+    fake_ctypes.CDLL = lambda *_a, **_k: (events.append(("CDLL",)), fake_libc)[1]
+    fake_ctypes.set_errno = lambda v: err_box.__setitem__(0, v)
+    fake_ctypes.get_errno = lambda: err_box[0]
+    mod.os, mod.ctypes = fake_os, fake_ctypes
+    if root_dir is not None and hasattr(mod, "_configure_roots_for_test"):
+        mod._configure_roots_for_test(str(root_dir))
+    if extra_patches is not None:
+        extra_patches(mod, fake_os, events)
+    orig_argv, orig_stdout, fd1_txt = sys.argv[:], sys.stdout, io.StringIO()
+    sys.stdout = fd1_txt
+    try:
+        mod.main()
+        rc = 0
+    except _ExitIntercept as ex:
+        rc = ex.code
+    finally:
+        sys.stdout, sys.argv = orig_stdout, orig_argv
+    out_buf.extend(fd1_txt.getvalue().encode("utf-8"))
+    return bytes(out_buf), rc, events
+
+
+def test_container_runner_handshake_seccomp_modes_and_denial_cases(tmp_path: Path) -> None:
+    root = tmp_path / "croot"
+    for d in ("app", "fixtures", "tmp", "dev", "proc", "sys", "home", "etc", "usr", "var", "run", "var/run"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    _, bpf7a = gov1_oci_seccomp_bpf.compile_seccomp_profile_to_bpf(gov1_sandbox.build_default_7a_seccomp_profile())
+    (root / "app/seccomp_filter.bpf").write_bytes(bpf7a)
+    (root / "app/pep517_seccomp.bpf").write_bytes(gov1_oci_seccomp_bpf.compile_stage7_pep517_seccomp_bpf())
+    for ro_d in ("dev", "home", "app", "fixtures", "etc", "usr", "var/run", "run", "var", "proc", "sys"):
+        os.chmod(root / ro_d, 0o555)
+    os.chmod(root, 0o555)
+    src = gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE
+    out_eof, rc_eof, ev_eof = _run_embedded_source(src, b"\x01", root_dir=root)
+    assert rc_eof == 0 and out_eof == b"SMART-ADS-OCI-PREMASK\nSMART-ADS-OCI-READY\n" and [e[0] for e in ev_eof[:4]] == ["CDLL", "closerange", "prctl", "prctl"]
+    _, rc_noop, ev_s7 = _run_embedded_source(src, b"\x03" + gov1_oci_container_runner.encode_go_task_frame({"kind": "preflight_noop"}), root_dir=root)
+    assert rc_noop == 0 and ("prctl", 22, 2) in ev_s7
+    _, rc_skip, ev_skip = _run_embedded_source(src, b"\x00", root_dir=root)
+    assert rc_skip == 0 and all(e[0] != "prctl" for e in ev_skip)
+    for bad_in, bad_rc in ((b"\x09", 0), (b"\x01", -1)):
+        with pytest.raises(RuntimeError):
+            _run_embedded_source(src, bad_in, root_dir=root, prctl_rc=bad_rc)
+    exact_env = dict(gov1_7a_negative._EXACT_ENV)
+    for cid in sorted([*gov1_7a_negative._EXACT_DENIAL_OBS, *gov1_7a_negative._COUNTED_DENIAL_OBS]):
+        out, rc, _ = _run_embedded_source(src, b"\x01" + gov1_oci_container_runner.encode_go_task_frame({"kind": "neg", "case_id": cid}), root_dir=root, env_override=dict(exact_env))
+        assert rc == 0
+        obs = loads_strict(out.split(b"SMART-ADS-OCI-READY\n", 1)[1].decode("utf-8"))
+        if cid in gov1_7a_negative._EXACT_DENIAL_OBS:
+            assert obs == dict(gov1_7a_negative._EXACT_DENIAL_OBS[cid])
+        else:
+            p_id, min_c = gov1_7a_negative._COUNTED_DENIAL_OBS[cid]
+            assert obs["probe_set_id"] == p_id and obs["denied_probe_count"] >= min_c
+    gov1_oci_image.cleanup_runc_bundle_trees(root)
+
+
+def test_container_runner_pos_7a_pep517_and_venv_bootstrap(tmp_path: Path, head_wheel_bytes: bytes) -> None:
+    from tests.governance.test_gov1_7a_verifiers import _stage_leaf_envelopes_in_store
+    from tools.governance.locator import Store
+
+    d26 = _decode_d26_fixture()
+    commit_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, check=True, capture_output=True, text=True).stdout.strip()
+    git_blobs = gov1_7a_certification.resolve_7a_smart_ads_git_blobs(REPO_ROOT, commit_sha)
+    reg_state, _, inv_pair = _stage_leaf_envelopes_in_store(Store(tmp_path / "store"), commit_sha=commit_sha, git_blobs=git_blobs, d26_blobs=d26)
+    replay_ctx = {"snapshot": reg_state.snapshot.to_dict(), "snapshot_locator": reg_state.locator.to_dict(), "driver_contract": reg_state.driver_contract.to_dict(), "driver_contract_locator": reg_state.driver_contract_locator.to_dict(), "expected_inventory": inv_pair[1].to_dict(), "expected_inventory_locator": inv_pair[0].to_dict()}
+    root = tmp_path / "pos_root"
+    for rel_p, raw_b in gov1_wheel._read_and_validate_wheel_archive(head_wheel_bytes)[0].items():
+        dst = root / "app/venv/lib/python3.12/site-packages" / rel_p
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(raw_b)
+    for d in ("app/d26", "fixtures", "tmp"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    for role, rel_p, _, _ in gov1_7a_runner.PINNED_PIPEBOARD_D26_SPECS:
+        (root / f"app/d26/{role}__{Path(rel_p).name}").write_bytes(d26[rel_p])
+    (root / "app/seccomp_filter.bpf").write_bytes(gov1_oci_seccomp_bpf.compile_seccomp_profile_to_bpf(gov1_sandbox.build_default_7a_seccomp_profile())[1])
+    (root / "fixtures/pipeboard_7a_corpus_v1.json").write_bytes(CORPUS_JSON.read_bytes())
+    (root / "fixtures/replay_context_v1.json").write_bytes(canonicalize(replay_ctx))
+    sbx_loc = make_locator(gov1_sandbox.SANDBOX_PROFILE_SCHEMA, b'{"sbx":1}')
+    statuses = [loads_strict(_run_embedded_source(gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE, b"\x01" + gov1_oci_container_runner.encode_go_task_frame({"kind": "pos_7a_case", "case_id": c["case_id"], "sealed_sandbox_profile_locator": sbx_loc}), root_dir=root)[0].split(b"SMART-ADS-OCI-READY\n", 1)[1].decode("utf-8"))["observed_completeness_status"] for c in loads_strict(CORPUS_JSON.read_text(encoding="utf-8"))["cases"]]
+    assert statuses == ["complete", "failed", "partial", "partial"]
+    drv_stub = "import json, pathlib, sys\n(pathlib.Path(sys.argv[4]) / 'demo.whl').write_bytes(b'PK-demo')\nsys.stdout.write(json.dumps({'wheel_name': 'demo.whl'}))\n"
+    p_out, p_rc, _ = _run_embedded_source(gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE, b"\x01" + gov1_oci_container_runner.encode_go_task_frame({"kind": "pep517_build", "closure_mods_csv": "hatchling", "source_date_epoch": 1700000000, "runner_bootstrap": "pass", "driver_script": drv_stub}), root_dir=root)
+    assert p_rc == 0 and loads_strict(p_out.split(b"SMART-ADS-OCI-READY\n", 1)[1].decode("utf-8")) == {"wheel_name": "demo.whl", "wheel_b64": base64.b64encode(b"PK-demo").decode("ascii")}
+    v_out, v_rc, _ = _run_embedded_source(gov1_oci_container_runner.VENV_PROBE_BOOTSTRAP_SOURCE, b"\x01" + gov1_oci_container_runner.encode_go_task_frame({"probe_argv": ["probe.py", "ok-val"], "probe_script": "import json, sys; sys.stdout.write(json.dumps({'arg': sys.argv[1]}))"}), root_dir=root)
+    assert v_rc == 0 and loads_strict(v_out.split(b"SMART-ADS-OCI-READY\n", 1)[1].decode("utf-8")) == {"arg": "ok-val"}
+
+
+def test_container_runner_resource_ceiling_cases(tmp_path: Path) -> None:
+    root = tmp_path / "res_root"
+    for d in ("app", "tmp"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / "app/seccomp_filter.bpf").write_bytes(gov1_oci_seccomp_bpf.compile_seccomp_profile_to_bpf(gov1_sandbox.build_default_7a_seccomp_profile())[1])
+    src = gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE
+
+    def _patch_fsize(mod: Any, fake_os: Any, _ev: list[Any]) -> None:
+        handlers, written, orig_w, orig_r = {}, [0], fake_os.write, fake_os.read
+        mod.signal = types.SimpleNamespace(SIGXFSZ=signal.SIGXFSZ, SIGXCPU=signal.SIGXCPU, signal=lambda s, h: handlers.__setitem__(s, h))
+        fake_os.write = lambda fd, data: orig_w(fd, data) if fd in (1, 2) else ((handlers[signal.SIGXFSZ](signal.SIGXFSZ, None), (_ for _ in ()).throw(OSError(errno.EFBIG, "fbig")))[1] if written[0] >= 67_108_864 else (written.__setitem__(0, written[0] + len(data)), len(data))[1])
+        fake_os.pipe = lambda: (99, 100)
+        fake_os.read = lambda fd, n: (_ for _ in ()).throw(_ExitIntercept(0)) if fd == 99 else orig_r(fd, n)
+
+    f_out, _, _ = _run_embedded_source(src, b"\x01" + gov1_oci_container_runner.encode_go_task_frame({"kind": "neg", "case_id": "file_size_limit_enforced"}), root_dir=root, extra_patches=_patch_fsize)
+    assert f_out.endswith(b'{"sigxfsz":true}\n')
+
+    def _patch_pids(_mod: Any, fake_os: Any, _ev: list[Any]) -> None:
+        forks, orig_r = [0], fake_os.read
+        fake_os.fork = lambda: (forks.__setitem__(0, forks[0] + 1), (_ for _ in ()).throw(OSError(errno.EAGAIN, "pids")) if forks[0] > 5 else 1000 + forks[0])[1]
+        fake_os.pipe = lambda: (98, 99)
+        fake_os.read = lambda fd, n: (_ for _ in ()).throw(_ExitIntercept(0)) if fd == 98 else orig_r(fd, n)
+
+    p_out, _, _ = _run_embedded_source(src, b"\x00" + gov1_oci_container_runner.encode_go_task_frame({"kind": "neg", "case_id": "pids_limit_enforced"}), root_dir=root, extra_patches=_patch_pids)
+    assert p_out.endswith(b'{"pids_eagain":true}\n')
+
+
+def test_probe_7a_oci_host_and_create_7a_leaf_cgroup(tmp_path: Path) -> None:
+    cg_root, fake_runc = tmp_path / "cgroup", tmp_path / "runc"
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu io memory pids\n", encoding="utf-8")
+    (cg_root / "memory.swap.max").write_text("0\n", encoding="utf-8")
+    fake_runc.write_text("#!/bin/sh\necho 'runc version 1.1.12'\n", encoding="utf-8")
+    fake_runc.chmod(0o755)
+    blocked = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="darwin", machine="arm64", euid=501)
+    assert blocked["status"] == "BLOCKED" and blocked["eligible"] is False and "euid_not_root" in blocked["reasons"]
+    elig = gov1_oci_readback.probe_7a_oci_host(cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="linux", machine="x86_64", euid=0)
+    assert elig["status"] == "ELIGIBLE" and elig["eligible"] is True and elig["runc_available"] is True and elig["cgroup_v2_available"] is True
+    bad_oci = gov1_oci_readback.probe_7a_oci_host(base_oci_dir=tmp_path / "missing_oci", cgroup_root=cg_root, runc_binary=str(fake_runc), sys_platform="linux", machine="x86_64", euid=0)
+    assert bad_oci["status"] == "BLOCKED" and bad_oci["base_oci_verified"] is False
+    for bad_id in ("", "../bad", "a/b", "space id"):
+        with pytest.raises(ValueError):
+            gov1_oci_readback.create_7a_leaf_cgroup(bad_id, cgroup_root=cg_root)
+    lease = gov1_oci_readback.create_7a_leaf_cgroup("inst-01", cgroup_root=cg_root)
+    assert lease.cgroup_rel_path == "/smart_ads_7a/inst-01"
+    assert [(lease.cgroup_dir / f).read_text(encoding="utf-8") for f in ("cpu.max", "memory.max", "memory.swap.max", "pids.max")] == ["100000 100000\n", "1073741824\n", "0\n", "32\n"]
+
+
+def _build_synthetic_live_proc_and_bundle(
+    tmp_path: Path, head_wheel_bytes: bytes
+) -> tuple[Path, gov1_oci_readback.CgroupV2Lease, gov1_oci_image.CompositeOciBundleSpec, dict[str, Path]]:
+    elf, base_dir, cg_root, proc_root = b"\x7fELF-python3.12-test", tmp_path / "base_rb", tmp_path / "cg_rb", tmp_path / "proc"
+    meta = _write_synthetic_oci_layout(base_dir, [_make_tar_gz_layer([("dir", "usr/local/bin", 0o755, b""), ("reg", "usr/local/bin/python3.12", 0o755, elf)])])
+    spec = gov1_oci_image.build_composite_7a_oci_layout(
+        base_oci_dir=base_dir, output_layout_dir=tmp_path / "comp_rb", wheel_bytes=head_wheel_bytes, corpus_bytes=CORPUS_JSON.read_bytes(),
+        replay_context_obj={"ok": 1}, resolved_d26_blobs=_decode_d26_fixture(), seccomp_profile=gov1_sandbox.build_default_7a_seccomp_profile(),
+        runner_py_bytes=gov1_oci_container_runner.CONTAINER_RUNNER_SOURCE.encode("utf-8"), venv_probe_bootstrap_bytes=gov1_oci_container_runner.VENV_PROBE_BOOTSTRAP_SOURCE.encode("utf-8"),
+        expected_manifest_digest=meta["manifest_digest"], expected_config_digest=meta["config_digest"], expected_layer_digests=meta["layer_digests"], expected_diff_ids=meta["diff_ids"],
+    )
+    trees = gov1_oci_image.materialize_runc_bundle_trees(composite_spec=spec, bundle_dir=tmp_path / "bun_rb")
+    os.chmod(trees["rootfs"], 0o755)
+    for sub in ("app", "fixtures"):
+        (trees["rootfs"] / sub).rmdir()
+        (trees["rootfs"] / sub).symlink_to(trees[sub])
+    os.chmod(trees["rootfs"], 0o555)
+    cg_root.mkdir()
+    (cg_root / "cgroup.controllers").write_text("cpu memory pids\n", encoding="utf-8")
+    lease = gov1_oci_readback.create_7a_leaf_cgroup("sbx-42", cgroup_root=cg_root)
+    pid_d, self_d = proc_root / "4242", proc_root / "self"
+    for d in (pid_d / "ns", self_d / "ns", pid_d / "fd", pid_d / "net", pid_d / "sys/class/net/lo"):
+        d.mkdir(parents=True, exist_ok=True)
+    for ns in ("mnt", "net", "pid", "ipc", "uts", "user"):
+        (pid_d / "ns" / ns).symlink_to(f"{ns}:[40001]")
+        (self_d / "ns" / ns).symlink_to(f"{ns}:[10001]")
+    for fd_n in ("0", "1", "2"):
+        (pid_d / "fd" / fd_n).write_text("", encoding="utf-8")
+    (pid_d / "status").write_text("Name:\tpython3.12\nNoNewPrivs:\t1\nSeccomp:\t2\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\nCapBnd:\t0000000000000000\nCapAmb:\t0000000000000000\n", encoding="utf-8")
+    (pid_d / "net/dev").write_text("Inter-|Receive\n face |bytes\n    lo: 0 0 0 0\n", encoding="utf-8")
+    (pid_d / "net/if_inet6").write_text("", encoding="utf-8")
+    (pid_d / "net/fib_trie").write_text("Main:\nLocal:\n", encoding="utf-8")
+    (pid_d / "sys/class/net/lo/flags").write_text("0x8\n", encoding="utf-8")
+    (pid_d / "limits").write_text("Limit                     Soft Limit           Hard Limit           Units\nMax cpu time              120                  120                  seconds\nMax file size             67108864             67108864             bytes\n", encoding="utf-8")
+    (pid_d / "exe").write_bytes(elf)
+    (pid_d / "root").symlink_to(trees["rootfs"])
+    mi = ["10 1 8:1 / / ro,relatime - ext4 /dev/sda1 ro", "11 10 8:1 /app /app ro,nosuid,nodev - ext4 /dev/sda1 ro", "12 10 8:1 /fix /fixtures ro,nosuid,nodev - ext4 /dev/sda1 ro", "13 10 0:25 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=262144k,nr_inodes=4096", *[f"{20 + i} 10 0:{30 + i} / {m} ro,nosuid,nodev,noexec - tmpfs tmpfs ro,size=4k,nr_inodes=16" for i, m in enumerate(gov1_7a_negative._EXACT_MASKED_MOUNTS)]]
+    (pid_d / "mountinfo").write_text("\n".join(mi) + "\n", encoding="utf-8")
+    return proc_root, lease, spec, trees
+
+
+def test_readback_live_container_state_and_tamper_rejections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, head_wheel_bytes: bytes
+) -> None:
+    proc_root, lease, spec, trees = _build_synthetic_live_proc_and_bundle(tmp_path, head_wheel_bytes)
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: os.statvfs_result((4096, 4096, 65536, 65536, 65536, 4096, 4095, 4095, 0, 255)))
+    rb = gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    os.close(rb.tmp_fd)
+    assert rb.runtime_readback["seccomp_enforced_before_entry"] is True and rb.runtime_readback["runner_binary_digest"] == spec.runner_binary_digest
+    open_before = sum(1 for fd in range(3, 512) if _fd_is_open(fd))
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: os.statvfs_result((4096, 4096, 100, 100, 100, 4096, 4095, 4095, 0, 255)))
+    with pytest.raises(ValueError):
+        gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    assert sum(1 for fd in range(3, 512) if _fd_is_open(fd)) == open_before
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: os.statvfs_result((4096, 4096, 65536, 65536, 65536, 4096, 4095, 4095, 0, 255)))
+    pid_d = proc_root / "4242"
+    with pytest.raises(ValueError):
+        gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=False, proc_root=proc_root)
+    for rel_f, bad_txt, ok_txt in (("net/fib_trie", "Local:\n  |-- 127.0.0.1\n", "Main:\nLocal:\n"), ("sys/class/net/lo/flags", "0x9\n", "0x8\n")):
+        (pid_d / rel_f).write_text(bad_txt, encoding="utf-8")
+        with pytest.raises(ValueError):
+            gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+        (pid_d / rel_f).write_text(ok_txt, encoding="utf-8")
+    (pid_d / "exe").write_bytes(b"\x7fELF-tampered")
+    with pytest.raises(ValueError):
+        gov1_oci_readback.readback_live_container_state(container_pid=4242, lease=lease, composite_spec=spec, bundle_trees=trees, expect_seccomp=True, proc_root=proc_root)
+    gov1_oci_image.cleanup_runc_bundle_trees(trees["bundle_dir"])
+
+
+def _fd_is_open(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+        return True
+    except OSError:
+        return False
+
+
+def test_seal_premask_harvest_usage_and_terminate_whole_cgroup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_cmd, killed_pids = [], []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (seen_cmd.append(list(cmd)), subprocess.CompletedProcess(cmd, 0, "", ""))[1])
+    gov1_oci_readback.seal_container_premask_namespaces(4242)
+    assert seen_cmd and seen_cmd[0][:4] == [sys.executable, "-I", "-B", "-S"] and seen_cmd[0][-1] == "4242"
+    with pytest.raises(ValueError):
+        gov1_oci_readback.seal_container_premask_namespaces(1)
+    cg_root = tmp_path / "cg_u"
+    cg_root.mkdir()
+    lease = gov1_oci_readback.create_7a_leaf_cgroup("inst-u", cgroup_root=cg_root)
+    for f, v in (("cpu.stat", "usage_usec 45678\n"), ("memory.peak", "52428800\n"), ("pids.peak", "3\n"), ("memory.events", "oom 2\noom_kill 1\n"), ("pids.events", "max 4\n")):
+        (lease.cgroup_dir / f).write_text(v, encoding="utf-8")
+    tmp_d = tmp_path / "tmp_u"
+    (tmp_d / "sub").mkdir(parents=True)
+    (tmp_d / "sub/big.bin").write_bytes(b"x" * 12345)
+    (tmp_d / "sym").symlink_to(tmp_d / "sub/big.bin")
+    monkeypatch.setattr(os, "fstatvfs", lambda _fd: os.statvfs_result((4096, 4096, 65536, 65500, 65500, 4096, 4000, 4000, 0, 255)))
+    t_fd = os.open(tmp_d, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        u = gov1_oci_readback.harvest_cgroup_and_tmp_usage(lease=lease, tmp_fd=t_fd, stdout_bytes=128, stderr_bytes=64)
+        assert os.fstat(t_fd).st_ino == tmp_d.stat().st_ino
+    finally:
+        os.close(t_fd)
+    assert (u["cpu_time_us"], u["memory_peak_bytes"], u["pids_peak"], u["oom_delta"], u["oom_kill_delta"], u["pids_max_delta"], u["tmpfs_peak_bytes"], u["tmpfs_peak_inodes"], u["max_file_bytes"], u["stdout_bytes"], u["stderr_bytes"]) == (45678, 52428800, 3, 2, 1, 4, 36 * 4096, 96, 12345, 128, 64)
+    (lease.cgroup_dir / "cgroup.procs").write_text("55555\n", encoding="utf-8")
+    monkeypatch.setattr(os, "kill", lambda p, s: (killed_pids.append((p, s)), (lease.cgroup_dir / "cgroup.procs").write_text("", encoding="utf-8")))
+    assert gov1_oci_readback.terminate_whole_cgroup(lease) is True and killed_pids == [(55555, signal.SIGKILL)]
+    (lease.cgroup_dir / "cgroup.kill").write_text("0\n", encoding="utf-8")
+    (lease.cgroup_dir / "cgroup.procs").write_text("", encoding="utf-8")
+    assert gov1_oci_readback.terminate_whole_cgroup(lease) is True and (lease.cgroup_dir / "cgroup.kill").read_text(encoding="utf-8") == "1\n"
+    (lease.cgroup_dir / "cgroup.procs").write_text("99999\n", encoding="utf-8")
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    ticks = iter([0.0, 0.5, 1.5])
+    monkeypatch.setattr("time.monotonic", lambda: next(ticks))
+    with pytest.raises(ValueError, match="whole_cgroup_empty invariant violated"):
+        gov1_oci_readback.terminate_whole_cgroup(lease)
