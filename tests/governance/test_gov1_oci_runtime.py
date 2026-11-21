@@ -443,13 +443,14 @@ def test_run_git_offline_fsmonitor_and_root_safe_directory(monkeypatch: pytest.M
     scope_tree = ast.parse((REPO_ROOT / "tools" / "governance" / "decomposition_scope.py").read_text(encoding="utf-8"))
     rgo = [n for n in ast.walk(scope_tree) if isinstance(n, ast.FunctionDef) and n.name == "run_git_offline"][0]
     assert (rgo.end_lineno or rgo.lineno) - rgo.lineno + 1 < 50
+    real_euid = os.geteuid() if hasattr(os, "geteuid") else 1001
     real_run, seen = decomposition_scope.subprocess.run, []
     monkeypatch.setattr(decomposition_scope.subprocess, "run", lambda cmd, *a, **kw: (seen.append(list(cmd)), real_run(cmd, *a, **kw))[1])
     monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 1001)
-    decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
+    decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD", check=(real_euid == REPO_ROOT.stat().st_uid))
     assert seen[-1][1:7] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false"] and not any(a.startswith("safe.directory=") for a in seen[-1])
     monkeypatch.setattr(decomposition_scope.os, "geteuid", lambda: 0)
-    decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD")
+    assert len(decomposition_scope.run_git_offline(REPO_ROOT, "rev-parse", "HEAD").stdout.strip()) == 40
     assert seen[-1][1:9] == ["-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "core.fsmonitor=false", "-c", f"safe.directory={REPO_ROOT.resolve().as_posix()}"] and seen[-1][9:] == ["-C", str(REPO_ROOT), "rev-parse", "HEAD"]
 
 def test_pipeline_portable_end_to_end_candidates_d4_and_cli_verify(tmp_path: Path, portable_oci_fixture: dict[str, Any], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
