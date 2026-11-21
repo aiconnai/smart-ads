@@ -927,14 +927,23 @@ def test_zero_ast_assert_across_all_gov1_modules() -> None:
         "gov1_convergence.py",
         "gov1_d4_helpers.py",
         "gov1_mcp.py",
+        "gov1_oci_image.py",
+        "gov1_oci_seccomp_bpf.py",
         "gov1_sandbox.py",
         "gov1_wheel.py",
     ]
     for mod_path in gov1_files:
-        tree = ast.parse(mod_path.read_text(encoding="utf-8"), filename=str(mod_path))
+        src = mod_path.read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=str(mod_path))
         assert [n for n in ast.walk(tree) if isinstance(n, ast.Assert)] == [], (
             f"ast.Assert found in {mod_path}"
         )
+        if mod_path.name in {"gov1_oci_image.py", "gov1_oci_seccomp_bpf.py"}:
+            assert len(src.splitlines()) <= 650, f"{mod_path.name} exceeds 650 lines"
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    span = (node.end_lineno or node.lineno) - node.lineno + 1
+                    assert span < 50, f"{mod_path.name}:{node.name} has {span} lines"
 
 
 # ---------------------------------------------------------------------------
