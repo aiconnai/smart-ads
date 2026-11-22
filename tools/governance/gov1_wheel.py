@@ -213,6 +213,7 @@ EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
         "smart_ads.application.admission",
         "smart_ads.application.collection",
         "smart_ads.application.completeness",
+        "smart_ads.application.curation_pipeline",
         "smart_ads.analytics",
         "smart_ads.analytics.cells",
         "smart_ads.analytics.certification",
