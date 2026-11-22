@@ -34,6 +34,10 @@ from smart_ads.application.curation_pipeline import (
     verify_operational_read_evidence,
     verify_sanitized_candidate_fact_set,
 )
+from smart_ads.application.duckdb_execution import (
+    execute_analysis_replay_bundle,
+    execute_certified_report,
+)
 
 __all__ = [
     "AdmissionError",
@@ -50,6 +54,8 @@ __all__ = [
     "collect",
     "evaluate_fixture_collection",
     "execute_admitted_call",
+    "execute_analysis_replay_bundle",
+    "execute_certified_report",
     "materialize_parquet_generation",
     "publish_dataset_snapshot",
     "recompute_collection_completeness",

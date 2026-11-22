@@ -40,6 +40,8 @@ EXPECTED_PACKAGED_MODULES = frozenset(
     {
         "smart_ads",
         "smart_ads.adapters",
+        "smart_ads.adapters.duckdb",
+        "smart_ads.adapters.duckdb.cli_engine",
         "smart_ads.adapters.pipeboard",
         "smart_ads.adapters.pipeboard.adapter",
         "smart_ads.adapters.pipeboard.reducer",
@@ -73,6 +75,7 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.application.collection",
         "smart_ads.application.completeness",
         "smart_ads.application.curation_pipeline",
+        "smart_ads.application.duckdb_execution",
         "smart_ads.analytics",
         "smart_ads.analytics.cells",
         "smart_ads.analytics.certification",
