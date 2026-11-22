@@ -76,6 +76,7 @@ EXPECTED_PACKAGED_MODULES = frozenset(
         "smart_ads.application.completeness",
         "smart_ads.application.curation_pipeline",
         "smart_ads.application.duckdb_execution",
+        "smart_ads.application.retention_service",
         "smart_ads.analytics",
         "smart_ads.analytics.cells",
         "smart_ads.analytics.certification",
