@@ -1319,11 +1319,12 @@ def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
         )
 
 
-_EXPECTED_54_CORE_SCHEMA_IDS = {
+_EXPECTED_58_CORE_SCHEMA_IDS = {
     "smart_ads/active_partition_head/v1",
     "smart_ads/admitted_collection/v1",
     "smart_ads/analysis_execution/v1",
     "smart_ads/analysis_policy/v1",
+    "smart_ads/analysis_replay_input_bundle/v1",
     "smart_ads/analysis_result/v1",
     "smart_ads/analysis_result_schema/v1",
     "smart_ads/analytics_landing_row/v1",
@@ -1347,6 +1348,8 @@ _EXPECTED_54_CORE_SCHEMA_IDS = {
     "smart_ads/dataset_catalog_genesis_record/v1",
     "smart_ads/dataset_snapshot/v1",
     "smart_ads/derived_metric_definition/v1",
+    "smart_ads/duckdb_binary_object_locator/v1",
+    "smart_ads/duckdb_extension_binary_locator/v1",
     "smart_ads/effect_proof/v1",
     "smart_ads/execution_receipt/v1",
     "smart_ads/expected_resource_inventory/v1",
@@ -1364,6 +1367,7 @@ _EXPECTED_54_CORE_SCHEMA_IDS = {
     "smart_ads/pipeboard_phase1_contract/v1",
     "smart_ads/private_registry_snapshot/v1",
     "smart_ads/regression_fixture/v1",
+    "smart_ads/report_execution/v1",
     "smart_ads/retention_release_proof/v1",
     "smart_ads/retention_release_result/v1",
     "smart_ads/retention_root/v1",
@@ -1380,9 +1384,9 @@ _EXPECTED_54_CORE_SCHEMA_IDS = {
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
     assert schema_ids == sorted(schema_ids, key=lambda s: s.encode("utf-8"))
-    assert len(schema_ids) == 54
+    assert len(schema_ids) == 58
     assert len(set(schema_ids)) == len(schema_ids)
-    assert set(schema_ids) == _EXPECTED_54_CORE_SCHEMA_IDS
+    assert set(schema_ids) == _EXPECTED_58_CORE_SCHEMA_IDS
 
     by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}
     for sid, desc in by_id.items():

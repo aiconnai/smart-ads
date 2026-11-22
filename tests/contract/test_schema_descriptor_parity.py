@@ -23,7 +23,17 @@ from typing import Any
 import pytest
 
 import smart_ads
-from smart_ads.analytics import cells, certification, formulas, intelligence, lattice, policy, results
+from smart_ads.analytics import (
+    cells,
+    certification,
+    formulas,
+    intelligence,
+    lattice,
+    policy,
+    replay_bundle,
+    reporting,
+    results,
+)
 from smart_ads.contracts import effects, git_provenance, negative_security, operational_evidence, retention
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES,
@@ -84,6 +94,8 @@ P1_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/dataset_catalog/v1": catalog.DatasetCatalog,
     "smart_ads/dataset_catalog_cut_receipt/v1": catalog.DatasetCatalogCutReceipt,
     "smart_ads/dataset_snapshot/v1": catalog.DatasetSnapshot,
+    "smart_ads/analysis_replay_input_bundle/v1": replay_bundle.AnalysisReplayInputBundle,
+    "smart_ads/report_execution/v1": reporting.ReportExecution,
 }
 EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/regression_fixture/v1": lattice.RegressionFixtureV1,
@@ -93,6 +105,8 @@ EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/fact_reconciliation/v1": bundle_7b.FactReconciliation,
     "smart_ads/parquet_object_locator/v1": catalog.ParquetObjectLocator,
     "smart_ads/active_partition_head/v1": catalog.ActivePartitionHead,
+    "smart_ads/duckdb_binary_object_locator/v1": replay_bundle.DuckDbBinaryObjectLocator,
+    "smart_ads/duckdb_extension_binary_locator/v1": replay_bundle.DuckDbExtensionBinaryLocator,
 }
 PR2_SCHEMA_TYPES: dict[str, type] = {**P1_SCHEMA_TYPES, **EMBEDDED_SCHEMA_TYPES}
 # Embedded value objects of ADR section 5.4 L1133-1146 and section 6.3 L1788-1799 carry no `$schema` member on the wire.
@@ -110,6 +124,10 @@ SCHEMA_ID_CONSTANTS: tuple[tuple[str, str], ...] = (
     (cells.ANALYSIS_RESULT_TYPE, "smart_ads/analysis_result/v1"),
     (cells.ANALYSIS_EXECUTION_TYPE, "smart_ads/analysis_execution/v1"),
     (cells.CANONICAL_RESULT_SET_TYPE, "smart_ads/canonical_result_set/v1"),
+    (cells.REPLAY_BUNDLE_TYPE, "smart_ads/analysis_replay_input_bundle/v1"),
+    (replay_bundle.DUCKDB_BINARY_LOCATOR_SCHEMA, "smart_ads/duckdb_binary_object_locator/v1"),
+    (replay_bundle.DUCKDB_EXT_BINARY_LOCATOR_SCHEMA, "smart_ads/duckdb_extension_binary_locator/v1"),
+    (reporting.REPORT_EXECUTION_SCHEMA, "smart_ads/report_execution/v1"),
     (intelligence.FINDING_SCHEMA, "smart_ads/finding/v1"),
     (certification.CERTIFICATION_RECORD_SCHEMA, "smart_ads/certification_record/v1"),
     (bundle_7b.FACT_EVIDENCE_SELECTOR_SCHEMA, "smart_ads/fact_evidence_selector/v1"),
@@ -139,7 +157,15 @@ PRE_PR2_SCHEMA_IDS = frozenset(
 
 PACKAGE_SUBMODULES: dict[str, tuple[str, ...]] = {
     "smart_ads.analytics": (
-        "cells", "certification", "formulas", "intelligence", "lattice", "policy", "results",
+        "cells",
+        "certification",
+        "formulas",
+        "intelligence",
+        "lattice",
+        "policy",
+        "replay_bundle",
+        "reporting",
+        "results",
     ),
     # The 7A/7B public facades and tolerance, never the internal bundle_* modules.
     "smart_ads.reconciliation": ("bundle_7b", "certification_7a", "tolerance"),
@@ -396,11 +422,42 @@ def _pr4_retention_instances(ds_snap: Any) -> dict[str, Any]:
     }
 
 
+def _pr4_replay_and_report_instances(
+    eff_ev: dict[str, Any], cur_cat: dict[str, Any], ds_snap: Any, alg_id: Any
+) -> dict[str, Any]:
+    run_loc = _loc("smart_ads/migration_run_context/v1", "1")
+    pol_loc, inv_loc = _loc("smart_ads/analysis_policy/v1", "5"), _loc("smart_ads/expected_resource_inventory/v1", "4")
+    prov_loc = _loc("smart_ads/git_artifact_provenance/v1", "6")
+    db_bin = replay_bundle.DuckDbBinaryObjectLocator("sha256:" + ("7" * 64), 4096)
+    ext_bin = replay_bundle.DuckDbExtensionBinaryLocator("sha256:" + ("8" * 64), 2048)
+    col = cells.ResultColumn("total_spend", "int64", False)
+    r_schema = cells.AnalysisResultSchema("scalar", (col,), None, UNSIGNED)
+    q_def = replay_bundle.DuckDbQueryDefinition("result:spend", "query:q1", "SELECT 7 AS total_spend", r_schema.locator(), "scalar", (col,), None, ())
+    bundle = replay_bundle.AnalysisReplayInputBundle("bundle:b-001", run_loc, ds_snap.locator(), "1.5.5", db_bin, (replay_bundle.DuckDbExtensionSpec("parquet", "1.5.5", "explicit_local_binary", ext_bin),), (replay_bundle.DuckDbSessionSetting("threads", cells.TaggedScalarCell("int64", "1")),), (replay_bundle.DuckDbViewDefinition("v_landing", "SELECT * FROM __smart_ads_landing", ()),), (q_def,), pol_loc, (prov_loc,), UNSIGNED)
+    proj = cells.ResultProjection("scalar", r_schema.locator(), (col,), ((cells.TaggedScalarCell("int64", "7"),),), 1)
+    a_res = results.AnalysisResult(run_loc, ds_snap.locator(), bundle.locator(), "result:spend", proj, UNSIGNED)
+    c_set = results.CanonicalResultSet.build(bundle.locator(), (results.CanonicalResultEntry.from_result(a_res),))
+    a_exec = results.AnalysisExecution(bundle.locator(), c_set, UNSIGNED)
+    cert_rec = certification.AnalyticalCertificationRecord((), formulas.DerivedCertificationStatus.VERIFIED, False, c_set.canonical_result_digest, UNSIGNED)
+    attested = (certification.AttestedCertificationInput(formulas.CertificationInput(formulas.DerivedCertificationStatus.VERIFIED, "phase1_7b_base"), True),)
+    rep_in = reporting.CanonicalReportInput(ds_snap.snapshot_digest, c_set.canonical_result_digest, "2026-11-11T03:10:00.000000Z", "2026-11-10", "result:spend", inv_loc, cur_cat["smart_ads/curation_execution/v1"].locator(), (), attested, (), formulas.DerivedCertificationStatus.VERIFIED, False)
+    rep_res = reporting.render_canonical_report_result(rep_in, ())
+    op_ev = eff_ev["smart_ads/operational_read_evidence/v1"]
+    rep_exec = reporting.ReportExecution("report:rep-001", run_loc, ds_snap.locator(), bundle.locator(), a_exec.locator(), pol_loc, (), (cert_rec.locator(),), (op_ev.locator(),), (op_ev.effect_proof_locator,), prov_loc, alg_id, rep_in, rep_res, "2026-11-11T03:11:00Z", integrity=UNSIGNED)
+    return {
+        "smart_ads/duckdb_binary_object_locator/v1": db_bin,
+        "smart_ads/duckdb_extension_binary_locator/v1": ext_bin,
+        "smart_ads/analysis_replay_input_bundle/v1": bundle,
+        "smart_ads/report_execution/v1": rep_exec,
+    }
+
+
 def _pr4_instances() -> dict[str, Any]:
     eff_ev, alg_id, row = _pr4_effect_and_evidence_instances()
     cur_cat, ds_snap = _pr4_curation_and_catalog_instances(eff_ev, alg_id, row)
     ret = _pr4_retention_instances(ds_snap)
-    return {**eff_ev, **cur_cat, **ret}
+    rep = _pr4_replay_and_report_instances(eff_ev, cur_cat, ds_snap, alg_id)
+    return {**eff_ev, **cur_cat, **ret, **rep}
 
 
 @pytest.fixture(scope="module")
@@ -421,13 +478,13 @@ def instances() -> dict[str, Any]:
 # ---------------------------------------------------------------- descriptor registry shape
 
 
-def test_registry_has_54_unique_descriptors_sorted_by_utf8_schema_id() -> None:
+def test_registry_has_58_unique_descriptors_sorted_by_utf8_schema_id() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
-    assert len(CORE_SCHEMA_DESCRIPTORS) == 54
+    assert len(CORE_SCHEMA_DESCRIPTORS) == 58
     assert len(set(schema_ids)) == len(schema_ids)
     assert schema_ids == _utf8_sorted(schema_ids)
     assert set(schema_ids) == PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)
-    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 41
+    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 45
 
 
 def test_every_descriptor_is_immutable_with_sorted_unique_fields() -> None:
@@ -533,8 +590,12 @@ def _declared_key_constants() -> list[tuple[str, frozenset[str], frozenset[str] 
         ("smart_ads/dataset_catalog/v1", frozenset(catalog.DatasetCatalog.KEYS), frozenset(catalog.DatasetCatalog.CORE_KEYS)),
         ("smart_ads/dataset_catalog_cut_receipt/v1", frozenset(catalog.DatasetCatalogCutReceipt.KEYS), frozenset(catalog.DatasetCatalogCutReceipt.CORE_KEYS)),
         ("smart_ads/dataset_snapshot/v1", frozenset(catalog.DatasetSnapshot.KEYS), frozenset(catalog.DatasetSnapshot.CORE_KEYS)),
+        ("smart_ads/analysis_replay_input_bundle/v1", frozenset(replay_bundle.AnalysisReplayInputBundle.KEYS), frozenset(replay_bundle.AnalysisReplayInputBundle.CORE_KEYS)),
+        ("smart_ads/report_execution/v1", frozenset(reporting.ReportExecution.KEYS), frozenset(reporting.ReportExecution.CORE_KEYS)),
         ("smart_ads/parquet_object_locator/v1", frozenset(catalog.ParquetObjectLocator.KEYS), None),
         ("smart_ads/active_partition_head/v1", frozenset(catalog.ActivePartitionHead.KEYS), None),
+        ("smart_ads/duckdb_binary_object_locator/v1", frozenset(replay_bundle.DuckDbBinaryObjectLocator.KEYS), None),
+        ("smart_ads/duckdb_extension_binary_locator/v1", frozenset(replay_bundle.DuckDbExtensionBinaryLocator.KEYS), None),
         ("smart_ads/fact_evidence_selector/v1", frozenset(bundle_7b.FactEvidenceSelector.KEYS), None),
         ("smart_ads/fact_reconciliation/v1", frozenset(bundle_7b.FactReconciliation.KEYS), None),
     ]
@@ -566,6 +627,8 @@ _PR3_AND_PR4_P1_SCHEMA_IDS = frozenset(
         "smart_ads/dataset_catalog/v1",
         "smart_ads/dataset_catalog_cut_receipt/v1",
         "smart_ads/dataset_snapshot/v1",
+        "smart_ads/analysis_replay_input_bundle/v1",
+        "smart_ads/report_execution/v1",
     }
 )
 
