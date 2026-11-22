@@ -31,18 +31,28 @@ from smart_ads.ports.provider import (
     SanitizedMetricObservation,
     SanitizedResourceObservation,
 )
+from smart_ads.ports.storage import (
+    CellObjectStorePort,
+    DuckDbEnginePort,
+    ParquetCompression,
+    ParquetLandingCodecPort,
+)
 
 __all__ = [
     "AdmittedFixtureCall",
     "AdmittedProviderCall",
     "AmbiguousLocalDayError",
+    "CellObjectStorePort",
     "CellRuntimePorts",
     "ClockAttestation",
     "ClockAttestationPort",
+    "DuckDbEnginePort",
     "EnvelopeSignerPort",
     "ExpectedInventoryPort",
     "ExternalIOCounters",
     "FixtureObservationPort",
+    "ParquetCompression",
+    "ParquetLandingCodecPort",
     "ProtectedRegistryPort",
     "ProviderObservationBatch",
     "ProviderPort",

@@ -1,4 +1,4 @@
-"""Pure registry domain, canonical HMAC resource_ref, capability lifecycle, and Pipeboard contract (ADR-0001)."""
+"""Pure registry domain, canonical HMAC resource_ref, capability lifecycle, Pipeboard contract, curation, and catalog (ADR-0001)."""
 from __future__ import annotations
 
 from smart_ads.domain.capabilities import (
@@ -9,6 +9,27 @@ from smart_ads.domain.capabilities import (
     TransitionKind,
     is_io_denied_state,
     validate_capability_transition,
+)
+from smart_ads.domain.catalog import (
+    ActivePartitionHead,
+    CatalogCasOperation,
+    CatalogCasRequestProjection,
+    DatasetCatalog,
+    DatasetCatalogCutReceipt,
+    DatasetCatalogGenesisConsumptionRecord,
+    DatasetCatalogGenesisRecord,
+    DatasetSnapshot,
+    GenerationManifest,
+    ParquetObjectLocator,
+    compute_logical_rows_digest,
+    compute_physical_parquet_set_digest,
+)
+from smart_ads.domain.curation import (
+    CurationExecution,
+    CurationMode,
+    compute_curation_window,
+    partition_key_for_metric_date,
+    validate_partition_key,
 )
 from smart_ads.domain.pipeboard_contract import (
     FORBIDDEN_PIPEBOARD_ARGUMENTS,
@@ -43,22 +64,34 @@ from smart_ads.domain.resource_ref import (
 
 __all__ = [
     "ALLOWED_CAPABILITY_TRANSITIONS",
+    "ActivePartitionHead",
     "AuthorizedScopeRelation",
     "BidirectionalResourceDirectory",
     "CANONICAL_RESOURCE_REF_RE",
     "CapabilityInvalidationTransition",
     "CapabilityRevalidationTransition",
     "CapabilityState",
+    "CatalogCasOperation",
+    "CatalogCasRequestProjection",
+    "CurationExecution",
+    "CurationMode",
+    "DatasetCatalog",
+    "DatasetCatalogCutReceipt",
+    "DatasetCatalogGenesisConsumptionRecord",
+    "DatasetCatalogGenesisRecord",
+    "DatasetSnapshot",
     "DriverCapabilityEntry",
     "ExpectedResourceInventory",
     "ExpectedResourceKey",
     "FORBIDDEN_PIPEBOARD_ARGUMENTS",
+    "GenerationManifest",
     "IO_DENIED_CAPABILITY_STATES",
     "LegacySourcePacket",
     "PINNED_LEGACY_COMMIT",
     "PINNED_LEGACY_REPO",
     "PINNED_PIPEBOARD_D26_SPECS",
     "PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS",
+    "ParquetObjectLocator",
     "PinnedGitArtifactMember",
     "PinnedUpstreamReference",
     "PipeboardPhase1Contract",
@@ -67,10 +100,15 @@ __all__ = [
     "RegistryBinding",
     "TenantResourceKeyHandle",
     "TransitionKind",
+    "compute_curation_window",
+    "compute_logical_rows_digest",
+    "compute_physical_parquet_set_digest",
     "compute_resource_mapping_contract_digest",
     "derive_resource_ref",
     "is_io_denied_state",
+    "partition_key_for_metric_date",
     "validate_capability_transition",
+    "validate_partition_key",
     "validate_resource_ref",
     "verify_resource_ref",
 ]
