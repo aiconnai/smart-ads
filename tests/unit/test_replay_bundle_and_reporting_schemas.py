@@ -599,6 +599,69 @@ def test_verify_report_execution_rejects_tampered_proofs_provenance_and_unsigned
         verify_report_execution(unsigned_rep, **world.verify_kwargs(), require_signed=True)
 
 
+def test_verify_report_execution_rejects_unresolved_history_and_cross_run_generation() -> None:
+    world = _build_report_world(inconclusive_clicks=False)
+    run_loc = world.report.migration_run_context_locator
+    reg_loc = _loc("smart_ads/private_registry_snapshot/v1", "3")
+    cur_loc = world.generation_manifests[1].curation_execution_locator
+    cat0_loc = _loc("smart_ads/dataset_catalog/v1", "0")
+    _, d_hist = compute_logical_rows_digest((_landing_row("2026-11-05", "3"),))
+
+    # Fabricated/unresolved restatement_history_generation_locators must reject
+    unres_in = replace(world.report.canonical_report_input, restatement_history_generation_locators=(_loc(GenerationManifest.SCHEMA, "8"),))
+    unres_rep = _resign(world.report, canonical_report_input=unres_in, canonical_report_input_digest="")
+    with pytest.raises(ClosedValidationError, match="missing restatement history"):
+        verify_report_execution(unres_rep, **world.verify_kwargs(), require_signed=True)
+
+    # Resolved signed same-run history generation passes; unsigned or cross-run history generation rejects
+    hist_gm = _sign(GenerationManifest(run_loc, "gen:hist", "year=2026/month=11", None, "2026-11-06T03:00:00Z", 1, d_hist, reg_loc, cur_loc, cat0_loc, (world.operational_evidences[0].locator(),), (ParquetObjectLocator("year=2026/month=11", "sha256:" + ("7" * 64), 256),), integrity=UNSIGNED))
+    ok_in = replace(world.report.canonical_report_input, restatement_history_generation_locators=(hist_gm.locator(),))
+    ok_rep = _resign(world.report, canonical_report_input=ok_in, canonical_report_input_digest="")
+    assert verify_report_execution(ok_rep, **world.verify_kwargs(generation_manifests=(*world.generation_manifests, hist_gm)), require_signed=True) == ok_rep
+
+    unsigned_hist = replace(hist_gm, integrity=UNSIGNED)
+    unsig_in = replace(world.report.canonical_report_input, restatement_history_generation_locators=(unsigned_hist.locator(),))
+    unsig_rep = _resign(world.report, canonical_report_input=unsig_in, canonical_report_input_digest="")
+    with pytest.raises(ClosedValidationError):
+        verify_report_execution(unsig_rep, **world.verify_kwargs(generation_manifests=(*world.generation_manifests, unsigned_hist)), require_signed=True)
+
+    cross_gm = _resign(hist_gm, migration_run_context_locator=_loc(RUN_CONTEXT_TYPE, "f"))
+    cross_in = replace(world.report.canonical_report_input, restatement_history_generation_locators=(cross_gm.locator(),))
+    cross_rep = _resign(world.report, canonical_report_input=cross_in, canonical_report_input_digest="")
+    with pytest.raises(ClosedValidationError, match="cross-run"):
+        verify_report_execution(cross_rep, **world.verify_kwargs(generation_manifests=(*world.generation_manifests, cross_gm)), require_signed=True)
+
+
+def test_verify_report_execution_rejects_swapped_per_query_result_schemas() -> None:
+    world = _build_report_world(inconclusive_clicks=False)
+    run_loc, snap_loc = world.report.migration_run_context_locator, world.snapshot.locator()
+    c1, c2 = ResultColumn("v1", "int64", False), ResultColumn("v2", "utf8", False)
+    s1 = _sign(AnalysisResultSchema("scalar", (c1,), None, UNSIGNED))
+    s2 = _sign(AnalysisResultSchema("scalar", (c2,), None, UNSIGNED))
+    q1 = DuckDbQueryDefinition("result:aux_1", "query:aux_1", "SELECT 1 AS v1", s1.locator(), "scalar", (c1,), None, ())
+    q2 = DuckDbQueryDefinition("result:aux_2", "query:aux_2", "SELECT 'ok' AS v2", s2.locator(), "scalar", (c2,), None, ())
+    queries = (q1, q2, world.replay_bundle.queries[0])
+    bundle = _resign(world.replay_bundle, queries=queries)
+    # Swap s1 and s2 across aux_1 and aux_2 in AnalysisResult / AnalysisExecution
+    p1_swapped = ResultProjection("scalar", s2.locator(), (c2,), ((TaggedScalarCell("utf8", "ok"),),), 1)
+    p2_swapped = ResultProjection("scalar", s1.locator(), (c1,), ((TaggedScalarCell("int64", "1"),),), 1)
+    r1 = _sign(AnalysisResult(run_loc, snap_loc, bundle.locator(), "result:aux_1", p1_swapped, UNSIGNED))
+    r2 = _sign(AnalysisResult(run_loc, snap_loc, bundle.locator(), "result:aux_2", p2_swapped, UNSIGNED))
+    r_m = _resign(world.results[0], replay_input_bundle_locator=bundle.locator())
+    c_set = CanonicalResultSet.build(bundle.locator(), (CanonicalResultEntry.from_result(r1), CanonicalResultEntry.from_result(r2), CanonicalResultEntry.from_result(r_m)))
+    a_exec = _sign(AnalysisExecution(bundle.locator(), c_set, UNSIGNED))
+    all_res, all_schemas = (r1, r2, r_m), (s1, s2, world.result_schemas[0])
+    ev_b = AnalysisEvidence(a_exec, all_res, all_schemas, snap_loc, world.policy_obj.locator(), True, run_loc)
+    findings = tuple(_sign(f) for f in evaluate_findings(world.evaluation_context, ev_b))
+    cert = _sign(build_certification_record(world.evaluation_context, ev_b, findings, world.attested_inputs, integrity=UNSIGNED))
+    rep_in = replace(world.report.canonical_report_input, canonical_result_digest=c_set.canonical_result_digest, finding_digests=tuple(sorted((f.finding_digest for f in findings), key=lambda s: s.encode("utf-8"))))
+    rep_res = render_canonical_report_result(rep_in, findings)
+    f_locs = sort_artifact_locators([f.locator() for f in findings], expected_type=Finding.SCHEMA, allow_empty=True)
+    swapped_rep = _resign(world.report, analysis_replay_input_bundle_locator=bundle.locator(), analysis_execution_locator=a_exec.locator(), finding_locators=f_locs, certification_record_locators=(cert.locator(),), canonical_report_input=rep_in, canonical_report_input_digest="", canonical_report_result=rep_res, canonical_report_result_digest="")
+    with pytest.raises(ClosedValidationError, match="analysis_result_schema_locator"):
+        verify_report_execution(swapped_rep, **world.verify_kwargs(replay_bundle=bundle, execution=a_exec, results=all_res, result_schemas=all_schemas, findings=findings, certifications=(cert,)), require_signed=True)
+
+
 def test_storage_ports_are_runtime_checkable_and_reexported() -> None:
     for sym in ("CellObjectStorePort", "DuckDbEnginePort", "ParquetLandingCodecPort"):
         assert sym in ports_pkg.__all__

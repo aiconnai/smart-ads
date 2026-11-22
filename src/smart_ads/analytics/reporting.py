@@ -446,8 +446,8 @@ def _verify_snapshot_and_operational_lineage(
         active_gens.append(gm)
         active_keys.add(hkey)
     hist_keys = {canonicalize_jcs(loc.to_dict()) for loc in report.canonical_report_input.restatement_history_generation_locators}
-    if set(gen_by_key) - (active_keys | hist_keys):
-        raise ClosedValidationError("generation_manifests: unreferenced GenerationManifest supplied")
+    if set(gen_by_key) != (active_keys | hist_keys):
+        raise ClosedValidationError("generation_manifests: missing restatement history or unreferenced manifest")
     if canonicalize_jcs(report.canonical_report_input.curation_execution_locator.to_dict()) not in {canonicalize_jcs(gm.curation_execution_locator.to_dict()) for gm in active_gens}:
         raise ClosedValidationError("report_execution: curation_execution_locator not in active snapshot generations")
     expected_ev_locs = _union_artifact_locators(
@@ -458,8 +458,8 @@ def _verify_snapshot_and_operational_lineage(
         raise ClosedValidationError("report_execution: operational_read_evidence_locators != active generation union")
     if sort_artifact_locators([ev.locator() for ev in evidences], expected_type=OperationalReadEvidence.SCHEMA, field_name="operational_evidences") != expected_ev_locs:
         raise ClosedValidationError("operational_evidences: resolved evidences differ from transitive union")
-    if any(ev.migration_run_context_locator != report.migration_run_context_locator for ev in evidences):
-        raise ClosedValidationError("operational_evidences: cross-run OperationalReadEvidence is forbidden")
+    if any(gm.migration_run_context_locator != report.migration_run_context_locator for gm in generations) or any(ev.migration_run_context_locator != report.migration_run_context_locator for ev in evidences):
+        raise ClosedValidationError("report_execution: cross-run GenerationManifest or OperationalReadEvidence is forbidden")
     if report.operational_read_effect_proof_locators != sort_artifact_locators([ev.effect_proof_locator for ev in evidences], expected_type=EffectProof.SCHEMA, field_name="operational_read_effect_proof_locators"):
         raise ClosedValidationError("report_execution: operational_read_effect_proof_locators mismatch")
 
@@ -497,8 +497,8 @@ def _verify_provenance_and_bundle_bindings(
         if resolved_s is None:
             raise ClosedValidationError(f"replay_bundle: missing AnalysisResultSchema for {q.result_key!r}")
         q.verify_against_schema(resolved_s)
-    if {q.result_key for q in bundle.queries} != {e.result_key for e in execution.canonical_result_set.results}:
-        raise ClosedValidationError("replay_bundle: query result_key set differs from AnalysisExecution")
+    if [(q.result_key, q.analysis_result_schema_locator) for q in bundle.queries] != [(e.result_key, e.result_projection.analysis_result_schema_locator) for e in execution.canonical_result_set.results]:
+        raise ClosedValidationError("replay_bundle: query (result_key, analysis_result_schema_locator) pairs differ from AnalysisExecution")
 
 
 def _verify_certified_findings_and_render(
