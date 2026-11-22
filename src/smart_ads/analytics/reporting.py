@@ -1,7 +1,7 @@
 """Closed `report_execution/v1`, deterministic report rendering, and full-chain verifier (ADR-0001 §§6.4, 11.1)."""
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import Any, ClassVar, Final, TypeVar
@@ -10,6 +10,7 @@ from smart_ads.analytics.cells import ANALYSIS_EXECUTION_TYPE, DATASET_SNAPSHOT_
 from smart_ads.analytics.certification import CERTIFICATION_RECORD_SCHEMA, AnalyticalCertificationRecord, AttestedCertificationInput, verify_certification_record
 from smart_ads.analytics.formulas import CertificationInput, DerivedCertificationStatus
 from smart_ads.analytics.intelligence import FINDING_DETECTED, FINDING_INCONCLUSIVE, FINDING_SCHEMA, FINDING_STATUSES, FINDING_TYPES, AnalysisEvidence, EvaluationContext, Finding
+from smart_ads.analytics.lattice import candidate_sort_key, order_candidates
 from smart_ads.analytics.policy import AnalysisPolicy
 from smart_ads.analytics.replay_bundle import AnalysisReplayInputBundle
 from smart_ads.analytics.results import AnalysisExecution, AnalysisResult, verify_analysis_execution
@@ -18,8 +19,9 @@ from smart_ads.contracts.git_provenance import GitArtifactProvenance
 from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs, jcs_sha256, sort_utf8_strings
 from smart_ads.contracts.operational_evidence import AlgorithmProvenanceIdentity, OperationalReadEvidence
 from smart_ads.contracts.scalars import ClosedValidationError, require_exact_keys, validate_envelope_timestamp_utc, validate_iso_date, validate_sha256_prefixed, validate_timestamp_utc6
-from smart_ads.domain.catalog import DatasetSnapshot, GenerationManifest
-from smart_ads.domain.curation import CurationExecution
+from smart_ads.contracts.schemas import AnalyticsLandingRow
+from smart_ads.domain.catalog import DatasetSnapshot, GenerationManifest, compute_logical_rows_digest
+from smart_ads.domain.curation import CurationExecution, partition_key_for_metric_date
 from smart_ads.domain.registry import ExpectedResourceInventory
 
 _T = TypeVar("_T")
@@ -358,7 +360,9 @@ class ReportExecution(_P1EnvelopeBase):
         self._validate_locators(label)
         if type(self.render_algorithm_identity) is not AlgorithmProvenanceIdentity:
             raise ClosedValidationError(f"{label}.render_algorithm_identity: expected AlgorithmProvenanceIdentity")
-        AlgorithmProvenanceIdentity.from_dict(self.render_algorithm_identity.to_dict())
+        checked_alg = AlgorithmProvenanceIdentity.from_dict(self.render_algorithm_identity.to_dict())
+        if checked_alg.schema_id != self.SCHEMA:
+            raise ClosedValidationError(f"{label}.render_algorithm_identity.schema_id: expected {self.SCHEMA!r}, got {checked_alg.schema_id!r}")
         self._validate_report_payloads(label)
         validate_envelope_timestamp_utc(self.executed_at_utc, field_name=f"{label}.executed_at_utc")
         _verify_p1_integrity(self.integrity, self.to_dict, label=label)
@@ -426,42 +430,123 @@ def _reparse_seq(items: object, cls: type[_T], *, label: str, require_signed: bo
     return tuple(_reparse_p1(item, cls, label=f"{label}[{i}]", require_signed=require_signed) for i, item in enumerate(items))
 
 
+def derive_snapshot_restatement_history(
+    inventory: ExpectedResourceInventory, rows: Iterable[AnalyticsLandingRow]
+) -> tuple[AnalyticsLandingRow, ...]:
+    """Derive sorted deduplicated `EvaluationContext.restatement_history` over inventory scope."""
+    if type(inventory) is not ExpectedResourceInventory:
+        raise ClosedValidationError("inventory: expected ExpectedResourceInventory")
+    fresh_inv = ExpectedResourceInventory.from_dict(inventory.to_dict())
+    if isinstance(rows, (str, bytes, Mapping)) or not isinstance(rows, Iterable):
+        raise ClosedValidationError("rows: expected Iterable of AnalyticsLandingRow")
+    allowed_resources = {u.resource_ref for u in fresh_inv.expected_resources}
+    deduped: dict[bytes, tuple[AnalyticsLandingRow, bytes]] = {}
+    for idx, item in enumerate(rows):
+        if type(item) is not AnalyticsLandingRow:
+            raise ClosedValidationError(f"rows[{idx}]: expected AnalyticsLandingRow")
+        fresh_r = AnalyticsLandingRow.from_dict(item.to_dict())
+        if (fresh_r.fact_key.binding_ref, fresh_r.fact_key.account_ref) != (fresh_inv.binding_ref, fresh_inv.account_ref) or fresh_r.fact_key.resource_ref not in allowed_resources:
+            continue
+        k_bytes, row_bytes = candidate_sort_key(fresh_r), canonicalize_jcs(fresh_r.to_dict())
+        prev = deduped.get(k_bytes)
+        if prev is not None and prev[1] != row_bytes:
+            raise ClosedValidationError("restatement_history: conflicting row bytes on equal candidate_sort_key")
+        deduped[k_bytes] = (fresh_r, row_bytes)
+    return order_candidates(pair[0] for pair in deduped.values())
+
+
+def _walk_head_parent_chain(
+    head_key: bytes, partition_key: str, head_seq: int, gen_by_key: Mapping[bytes, GenerationManifest]
+) -> set[bytes]:
+    cur_key, seq = head_key, head_seq
+    chain_keys: set[bytes] = set()
+    while True:
+        gm = gen_by_key.get(cur_key)
+        if gm is None or gm.partition_key != partition_key or cur_key in chain_keys:
+            raise ClosedValidationError("generation_manifests: missing, mismatched, or cyclic snapshot lineage manifest")
+        chain_keys.add(cur_key)
+        if seq == 1:
+            if gm.parent_generation_manifest_locator is not None:
+                raise ClosedValidationError("generation_manifests: seq-1 GenerationManifest must have parent=None")
+            return chain_keys
+        if gm.parent_generation_manifest_locator is None:
+            raise ClosedValidationError("generation_manifests: seq > 1 GenerationManifest missing parent")
+        cur_key = canonicalize_jcs(gm.parent_generation_manifest_locator.to_dict())
+        seq -= 1
+
+
 def _verify_snapshot_and_operational_lineage(
     report: ReportExecution, snapshot: DatasetSnapshot,
     generations: tuple[GenerationManifest, ...], evidences: tuple[OperationalReadEvidence, ...],
-) -> None:
+) -> tuple[dict[bytes, GenerationManifest], set[bytes], set[bytes]]:
     gen_by_key: dict[bytes, GenerationManifest] = {}
     for gm in generations:
         key = canonicalize_jcs(gm.locator().to_dict())
         if key in gen_by_key:
             raise ClosedValidationError("generation_manifests: duplicate GenerationManifest")
         gen_by_key[key] = gm
+    if any(gm.migration_run_context_locator != report.migration_run_context_locator for gm in generations) or any(ev.migration_run_context_locator != report.migration_run_context_locator for ev in evidences):
+        raise ClosedValidationError("report_execution: cross-run GenerationManifest or OperationalReadEvidence is forbidden")
     active_gens: list[GenerationManifest] = []
     active_keys: set[bytes] = set()
+    lineage_keys: set[bytes] = set()
     for head in snapshot.partition_heads:
         hkey = canonicalize_jcs(head.generation_manifest_locator.to_dict())
-        gm = gen_by_key.get(hkey)
-        if gm is None or gm.partition_key != head.partition_key:
-            raise ClosedValidationError("generation_manifests: missing or mismatched active partition head")
-        active_gens.append(gm)
+        lineage_keys.update(_walk_head_parent_chain(hkey, head.partition_key, head.head_sequence_number, gen_by_key))
+        active_gens.append(gen_by_key[hkey])
         active_keys.add(hkey)
     hist_keys = {canonicalize_jcs(loc.to_dict()) for loc in report.canonical_report_input.restatement_history_generation_locators}
-    if set(gen_by_key) != (active_keys | hist_keys):
+    if not hist_keys.issubset(lineage_keys) or set(gen_by_key) != lineage_keys:
         raise ClosedValidationError("generation_manifests: missing restatement history or unreferenced manifest")
     if canonicalize_jcs(report.canonical_report_input.curation_execution_locator.to_dict()) not in {canonicalize_jcs(gm.curation_execution_locator.to_dict()) for gm in active_gens}:
         raise ClosedValidationError("report_execution: curation_execution_locator not in active snapshot generations")
     expected_ev_locs = _union_artifact_locators(
-        (loc for gm in active_gens for loc in gm.operational_read_evidence_locators),
+        (loc for gm in generations for loc in gm.operational_read_evidence_locators),
         expected_type=OperationalReadEvidence.SCHEMA, field_name="operational_read_evidence_locators",
     )
     if report.operational_read_evidence_locators != expected_ev_locs:
-        raise ClosedValidationError("report_execution: operational_read_evidence_locators != active generation union")
+        raise ClosedValidationError("report_execution: operational_read_evidence_locators != lineage generation union")
     if sort_artifact_locators([ev.locator() for ev in evidences], expected_type=OperationalReadEvidence.SCHEMA, field_name="operational_evidences") != expected_ev_locs:
         raise ClosedValidationError("operational_evidences: resolved evidences differ from transitive union")
-    if any(gm.migration_run_context_locator != report.migration_run_context_locator for gm in generations) or any(ev.migration_run_context_locator != report.migration_run_context_locator for ev in evidences):
-        raise ClosedValidationError("report_execution: cross-run GenerationManifest or OperationalReadEvidence is forbidden")
     if report.operational_read_effect_proof_locators != sort_artifact_locators([ev.effect_proof_locator for ev in evidences], expected_type=EffectProof.SCHEMA, field_name="operational_read_effect_proof_locators"):
         raise ClosedValidationError("report_execution: operational_read_effect_proof_locators mismatch")
+    return gen_by_key, active_keys, hist_keys
+
+
+def _verify_curation_and_restatement_rows(
+    report: ReportExecution, curation_execution: CurationExecution, evaluation_context: EvaluationContext,
+    fresh_gens: tuple[GenerationManifest, ...], gen_by_key: Mapping[bytes, GenerationManifest],
+    active_keys: set[bytes], hist_keys: set[bytes], decoded_rows: Mapping[str, Sequence[AnalyticsLandingRow]],
+    *, require_signed: bool,
+) -> None:
+    fresh_cur = _reparse_p1(curation_execution, CurationExecution, label="curation_execution", require_signed=require_signed)
+    if (
+        curation_execution != fresh_cur
+        or fresh_cur.locator() != report.canonical_report_input.curation_execution_locator
+        or fresh_cur.migration_run_context_locator != report.migration_run_context_locator
+        or (evaluation_context.curation_anchor_date, evaluation_context.curation_restatement_lookback_days)
+        != (fresh_cur.curation_anchor_date, fresh_cur.restatement_lookback_days)
+    ):
+        raise ClosedValidationError("report_execution: CurationExecution locator, run, or curation window mismatch")
+    expected_refs = {gm.locator().object_ref for gm in fresh_gens}
+    if not isinstance(decoded_rows, Mapping) or any(type(k) is not str for k in decoded_rows) or set(decoded_rows) != expected_refs:
+        raise ClosedValidationError("decoded_generation_rows: keys must equal lineage GenerationManifest object_refs")
+    verified_rows: dict[str, tuple[AnalyticsLandingRow, ...]] = {}
+    for gm in fresh_gens:
+        ref = gm.locator().object_ref
+        ordered, logical_digest = compute_logical_rows_digest(decoded_rows[ref])
+        if len(ordered) != gm.row_count or logical_digest != gm.logical_rows_digest or any(partition_key_for_metric_date(r.fact_key.metric_date) != gm.partition_key for r in ordered):
+            raise ClosedValidationError(f"decoded_generation_rows[{ref!r}]: partition_key, row_count, or logical_rows_digest mismatch")
+        verified_rows[ref] = ordered
+    start_ym, end_ym = fresh_cur.curation_window.start_date[:7], fresh_cur.curation_window.end_date[:7]
+    for akey in set(gen_by_key) - active_keys:
+        agm = gen_by_key[akey]
+        if start_ym <= f"{agm.partition_key[5:9]}-{agm.partition_key[16:18]}" <= end_ym and akey not in hist_keys:
+            raise ClosedValidationError("report_execution: overlapping ancestor generation omitted from restatement_history_generation_locators")
+    pool_rows = (r for k in sorted(active_keys | hist_keys) for r in verified_rows[gen_by_key[k].locator().object_ref])
+    exp_hist = derive_snapshot_restatement_history(evaluation_context.inventory, pool_rows)
+    if [canonicalize_jcs(r.to_dict()) for r in evaluation_context.restatement_history] != [canonicalize_jcs(r.to_dict()) for r in exp_hist]:
+        raise ClosedValidationError("evaluation_context.restatement_history: differs from snapshot/history lineage rows")
 
 
 def _verify_provenance_and_bundle_bindings(
@@ -485,7 +570,8 @@ def _verify_provenance_and_bundle_bindings(
     rnd_loc = ArtifactLocator.for_canonical_bytes(GitArtifactProvenance.SCHEMA, canonicalize_jcs(rnd_prov.to_dict()))
     alg = report.render_algorithm_identity
     if (
-        report.report_template_provenance_locator != tmpl_loc
+        alg.schema_id != report.SCHEMA
+        or report.report_template_provenance_locator != tmpl_loc
         or alg.git_artifact_provenance_locator != rnd_loc
         or (alg.repository, alg.commit_sha, alg.path, alg.git_blob_oid, alg.file_content_sha256)
         != (rnd_prov.repository, rnd_prov.commit_sha, rnd_prov.path, rnd_prov.git_blob_oid, rnd_prov.file_content_sha256)
@@ -533,8 +619,10 @@ def _verify_certified_findings_and_render(
 
 
 def verify_report_execution(
-    report: ReportExecution, *, snapshot: DatasetSnapshot,
-    generation_manifests: Sequence[GenerationManifest], operational_evidences: Sequence[OperationalReadEvidence],
+    report: ReportExecution, *, snapshot: DatasetSnapshot, curation_execution: CurationExecution,
+    generation_manifests: Sequence[GenerationManifest],
+    decoded_generation_rows: Mapping[str, Sequence[AnalyticsLandingRow]],
+    operational_evidences: Sequence[OperationalReadEvidence],
     replay_bundle: AnalysisReplayInputBundle, execution: AnalysisExecution,
     results: Sequence[AnalysisResult], result_schemas: Sequence[AnalysisResultSchema],
     policy_obj: AnalysisPolicy, findings: Sequence[Finding],
@@ -562,7 +650,8 @@ def verify_report_execution(
     fresh_certs = _reparse_seq(certifications, AnalyticalCertificationRecord, label="certifications", require_signed=require_signed)
     checked_attested = _validate_attested_inputs(attested_inputs, field_name="attested_inputs")
     _verify_provenance_and_bundle_bindings(fresh_rep, fresh_snap, fresh_bundle, fresh_exec, fresh_schemas, fresh_pol, fresh_tmpl, fresh_rnd)
-    _verify_snapshot_and_operational_lineage(fresh_rep, fresh_snap, fresh_gens, fresh_evs)
+    gen_by_key, active_keys, hist_keys = _verify_snapshot_and_operational_lineage(fresh_rep, fresh_snap, fresh_gens, fresh_evs)
+    _verify_curation_and_restatement_rows(fresh_rep, curation_execution, evaluation_context, fresh_gens, gen_by_key, active_keys, hist_keys, decoded_generation_rows, require_signed=require_signed)
     verify_analysis_execution(fresh_exec, list(fresh_res), list(fresh_schemas), fresh_snap.locator(), require_signed=require_signed, bundle_migration_run_context_locator=fresh_rep.migration_run_context_locator)
     _verify_certified_findings_and_render(
         fresh_rep, fresh_snap, fresh_exec, fresh_pol, fresh_res, fresh_schemas,
@@ -573,5 +662,6 @@ def verify_report_execution(
 
 __all__ = [
     "CanonicalReportInput", "CanonicalReportResult", "REPORT_EXECUTION_SCHEMA", "ReportExecution",
-    "ReportFindingSummary", "render_canonical_report_result", "verify_report_execution",
+    "ReportFindingSummary", "derive_snapshot_restatement_history", "render_canonical_report_result",
+    "verify_report_execution",
 ]

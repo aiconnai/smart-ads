@@ -15,6 +15,7 @@ from smart_ads.analytics import (
     CanonicalResultSet, CertificationInput, DerivedCertificationStatus, DuckDbBinaryObjectLocator,
     DuckDbExtensionBinaryLocator, DuckDbExtensionSpec, DuckDbQueryDefinition, DuckDbSessionSetting,
     EvaluationContext, EvaluationScope, ReportExecution, ResultColumn, TaggedScalarCell,
+    derive_snapshot_restatement_history,
 )
 import smart_ads.application as application_pkg
 from smart_ads.application import (
@@ -241,8 +242,11 @@ class RetentionWorld:
         self.nov2_parquet_object_ref = self.gm_nov2.parquet_object_locators[0].object_ref
 
     def _build_signed_report(
-        self, tag: str, snap_loc: ArtifactLocator, cur_loc: ArtifactLocator, hist_locs: tuple[ArtifactLocator, ...]
+        self, tag: str, snap_loc: ArtifactLocator, cur_loc: ArtifactLocator,
+        hist_locs: tuple[ArtifactLocator, ...], lineage_gms: tuple[GenerationManifest, ...],
     ) -> tuple[ReportExecution, ArtifactLocator]:
+        lineage_rows = tuple(r for gm in lineage_gms for pq in gm.parquet_object_locators for r in self.codec.decode_and_verify_landing_rows(self.store.get_bytes(pq.object_ref, expected_size_bytes=pq.size_bytes), expected_partition_key=pq.partition_key))
+        eval_ctx = EvaluationContext(self.policy, EvaluationScope("tenant:ibvi", "scope:campaigns-active", "campaign", "meta", "BRL"), "2026-11-11T03:15:00.000000Z", "2026-11-10", 1, "2026-11-10", self.eval_inv, "result:metrics", derive_snapshot_restatement_history(self.eval_inv, lineage_rows))
         cols = tuple(ResultColumn(n, t, nl) for n, t, nl in METRIC_WINDOW_COLUMNS)
         q_m = DuckDbQueryDefinition("result:metrics", "query:metrics", _LIVE_METRICS_WINDOW_SQL, self.metrics_schema_loc, "relation", cols, _METRIC_UKEY, _METRIC_ORDER)
         exts = (DuckDbExtensionSpec("parquet", "1.5.5", "explicit_local_binary", DuckDbExtensionBinaryLocator.for_binary_bytes(self.ext_bytes)),)
@@ -256,13 +260,13 @@ class RetentionWorld:
         s_exec_pre, _ = _put_signed_model(self.store, AnalysisExecution(b_loc, CanonicalResultSet.build(b_loc, (CanonicalResultEntry.from_result(s_res),))), self.key_reg_loc)
         _, s_exec_loc, _ = execute_analysis_replay_bundle(bundle_locator=b_loc, store=self.store, parquet_codec=self.codec, duckdb_engine=engine, result_integrities={"result:metrics": s_res.integrity}, execution_integrity=s_exec_pre.integrity, require_signed_inputs=True)  # type: ignore[dict-item]
         attested = (AttestedCertificationInput(CertificationInput(DerivedCertificationStatus.VERIFIED, "phase1_7b_base"), True),)
-        u_rep, _, u_cert, _, u_f = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=self.eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec)
+        u_rep, _, u_cert, _, u_f = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec)
         f_ints = tuple(_put_signed_model(self.store, f, self.key_reg_loc)[0].integrity for f, _ in u_f)
-        _, _, u_cert2, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=self.eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints)  # type: ignore[arg-type]
+        _, _, u_cert2, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints)  # type: ignore[arg-type]
         c_int = _put_signed_model(self.store, u_cert2, self.key_reg_loc)[0].integrity
-        u_rep3, _, _, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=self.eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints, certification_integrity=c_int)  # type: ignore[arg-type]
+        u_rep3, _, _, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints, certification_integrity=c_int)  # type: ignore[arg-type]
         r_int = _put_signed_model(self.store, u_rep3, self.key_reg_loc)[0].integrity
-        rep, rep_loc, _, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=self.eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints, certification_integrity=c_int, report_integrity=r_int, require_signed_inputs=True)  # type: ignore[arg-type]
+        rep, rep_loc, _, _, _ = execute_certified_report(report_id=f"report:{tag}", executed_at_utc="2026-11-11T03:20:00Z", bundle_locator=b_loc, execution_locator=s_exec_loc, evaluation_context=eval_ctx, expected_resource_inventory_locator=self.eval_inv_loc, curation_execution_locator=cur_loc, restatement_history_generation_locators=hist_locs, attested_certification_inputs=attested, report_template_provenance_locator=self.tmpl_loc, render_algorithm_identity=self.render_alg, store=self.store, parquet_codec=self.codec, finding_integrities=f_ints, certification_integrity=c_int, report_integrity=r_int, require_signed_inputs=True)  # type: ignore[arg-type]
         return rep, rep_loc
 
     def _init_reports_and_roots(self) -> None:
@@ -275,14 +279,13 @@ class RetentionWorld:
         self.policy, self.policy_loc = _put_signed_model(self.store, raw_pol, self.key_reg_loc)
         cols = tuple(ResultColumn(n, t, nl) for n, t, nl in METRIC_WINDOW_COLUMNS)
         _, self.metrics_schema_loc = _put_signed_model(self.store, AnalysisResultSchema("relation", cols, _METRIC_UKEY), self.key_reg_loc)
-        eval_inv, self.eval_inv_loc = _put_signed_model(
+        self.eval_inv, self.eval_inv_loc = _put_signed_model(
             self.store,
             ExpectedResourceInventory("inventory:eval-001", self.reg_loc, self.reg_loc.content_digest, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", DateRange("2026-11-01", "2026-11-10", True), (ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", _CAMP_A, "campaign", "2026-11-10"),)),
             self.key_reg_loc,
         )
-        self.eval_ctx = EvaluationContext(self.policy, EvaluationScope("tenant:ibvi", "scope:campaigns-active", "campaign", "meta", "BRL"), "2026-11-11T03:15:00.000000Z", "2026-11-10", 7, "2026-11-10", eval_inv, "result:metrics", ())
-        self.rep1, self.rep1_loc = self._build_signed_report("r1", self.snap1_loc, self.gm_nov1.curation_execution_locator, ())
-        self.rep2, self.rep2_loc = self._build_signed_report("r2", self.snap2_loc, self.gm_nov2.curation_execution_locator, (self.gm_nov1_loc,))
+        self.rep1, self.rep1_loc = self._build_signed_report("r1", self.snap1_loc, self.gm_nov1.curation_execution_locator, (), (self.gm_oct, self.gm_nov1))
+        self.rep2, self.rep2_loc = self._build_signed_report("r2", self.snap2_loc, self.gm_nov2.curation_execution_locator, (self.gm_nov1_loc,), (self.gm_oct, self.gm_nov1, self.gm_nov2))
         u_r1, _ = build_retention_root(root_id="root:r1", cell_ref=self.cell_ref, migration_run_context_locator=self.run_loc, target_artifact_locator=self.rep1_loc, created_at_utc="2026-11-11T03:25:00Z", store=self.store, parquet_codec=self.codec, integrity=P1Integrity(_KEY_ID, self.key_reg_loc))
         self.root1, self.root1_loc = _put_signed_model(self.store, u_r1, self.key_reg_loc)
         u_r2, _ = build_retention_root(root_id="root:r2", cell_ref=self.cell_ref, migration_run_context_locator=self.run_loc, target_artifact_locator=self.rep2_loc, created_at_utc="2026-11-11T03:26:00Z", store=self.store, parquet_codec=self.codec, integrity=P1Integrity(_KEY_ID, self.key_reg_loc))
@@ -583,6 +586,7 @@ def _compute_signed_admission_integrities(
     target: RetentionRootAdmissionTarget = auth.subject  # type: ignore[assignment]
     resv_d = _sign_payload(AuthorizationReservationRecord(f"resv:{tag}", rw.run_loc, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, target, "reserved", None, "2026-11-11T03:31:00Z").to_dict(), rw.key_reg_loc)
     resv = AuthorizationReservationRecord.from_dict(resv_d, require_signed=True)
+    ind = AuthorizationReservationRecord.from_dict(_sign_payload(AuthorizationReservationRecord(f"resv:{tag}", rw.run_loc, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, target, "in_doubt", "pre_mutation_conflict_or_drift", "2026-11-11T03:31:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
     nh_d = _sign_payload(RetentionRootSetHead(f"head:{tag}", rw.cell_ref, target.expected_root_set_head_epoch + 1, target.admitted_root_locators, target.expected_root_set_head_locator, "2026-11-11T03:32:00Z").to_dict(), rw.key_reg_loc)
     nh = RetentionRootSetHead.from_dict(nh_d, require_signed=True)
     proj = RetentionRootSetCasRequestProjection("admit_roots", target.expected_root_set_head_epoch, target.expected_root_set_head_digest, target.admitted_root_locators, target.proposed_root_set_digest)
@@ -598,7 +602,7 @@ def _compute_signed_admission_integrities(
     ef = EffectProof.from_dict(ef_d, require_signed=True)
     pf_d = _sign_payload(RetentionRootAdmissionProof(rw.run_loc, rw.cell_ref, ef.locator(), adm_res.locator(), cas.locator(), target.expected_root_set_head_locator, nh.locator(), target.admitted_root_locators, target.admitted_object_refs, target.before_reachability_graph_digest, target.after_reachability_graph_digest, "2026-11-11T03:33:00Z").to_dict(), rw.key_reg_loc)
     pf = RetentionRootAdmissionProof.from_dict(pf_d, require_signed=True)
-    return {k: v.integrity for k, v in (("reservation", resv), ("new_head", nh), ("cas_receipt", cas), ("admission_result", adm_res), ("execution", ex), ("consumption", cn), ("effect_proof", ef), ("admission_proof", pf)) if v.integrity is not None}
+    return {k: v.integrity for k, v in (("reservation", resv), ("in_doubt_reservation", ind), ("new_head", nh), ("cas_receipt", cas), ("admission_result", adm_res), ("execution", ex), ("consumption", cn), ("effect_proof", ef), ("admission_proof", pf)) if v.integrity is not None}
 
 
 def _compute_signed_release_integrities(
@@ -608,6 +612,7 @@ def _compute_signed_release_integrities(
     target: RetentionReleaseTarget = auth.subject  # type: ignore[assignment]
     ret_refs = compute_retention_reachability_graph(target.retained_root_locators, store=rw.store, parquet_codec=rw.codec).reachable_object_refs
     resv = AuthorizationReservationRecord.from_dict(_sign_payload(AuthorizationReservationRecord(f"resv:{tag}", rw.run_loc, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, target, "reserved", None, "2026-11-11T03:41:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
+    ind = AuthorizationReservationRecord.from_dict(_sign_payload(AuthorizationReservationRecord(f"resv:{tag}", rw.run_loc, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, target, "in_doubt", "pre_mutation_conflict_or_drift", "2026-11-11T03:41:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
     nh = RetentionRootSetHead.from_dict(_sign_payload(RetentionRootSetHead(f"head:{tag}", rw.cell_ref, target.expected_root_set_head_epoch + 1, target.retained_root_locators, target.expected_root_set_head_locator, "2026-11-11T03:42:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
     proj = RetentionRootSetCasRequestProjection("release_roots", target.expected_root_set_head_epoch, target.expected_root_set_head_digest, target.released_root_locators, target.proposed_root_set_digest)
     cas = RetentionRootSetCasReceipt.from_dict(_sign_payload(RetentionRootSetCasReceipt(f"cas:{tag}", rw.cell_ref, "release_roots", proj, target.expected_root_set_head_locator, target.expected_root_set_head_digest, target.expected_root_set_head_epoch, nh.locator(), nh.locator().content_digest, nh.head_epoch, "committed", f"lin:{tag}", "2026-11-11T03:42:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
@@ -616,7 +621,7 @@ def _compute_signed_release_integrities(
     cn = AuthorizationConsumptionRecord.from_dict(_sign_payload(AuthorizationConsumptionRecord(f"cons:{tag}", rw.run_loc, auth_loc, auth_loc.content_digest, resv.locator(), ex.locator(), auth.single_use_nonce, auth.action, auth.dag_slot, "consumed", "2026-11-11T03:42:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
     ef = EffectProof.from_dict(_sign_payload(EffectProof(f"efp:{tag}", rw.run_loc, auth.action, auth.dag_slot, auth_loc, resv.locator(), ex.locator(), cn.locator(), rel_res.locator(), "2026-11-11T03:43:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
     pf = RetentionReleaseProof.from_dict(_sign_payload(RetentionReleaseProof(rw.run_loc, rw.cell_ref, ef.locator(), rel_res.locator(), cas.locator(), target.expected_root_set_head_locator, nh.locator(), target.released_root_locators, target.retained_root_locators, target.released_object_refs, ret_refs, target.before_reachability_graph_digest, target.after_reachability_graph_digest, True, "2026-11-11T03:43:00Z").to_dict(), rw.key_reg_loc), require_signed=True)
-    return {k: v.integrity for k, v in (("reservation", resv), ("new_head", nh), ("cas_receipt", cas), ("release_result", rel_res), ("execution", ex), ("consumption", cn), ("effect_proof", ef), ("release_proof", pf)) if v.integrity is not None}
+    return {k: v.integrity for k, v in (("reservation", resv), ("in_doubt_reservation", ind), ("new_head", nh), ("cas_receipt", cas), ("release_result", rel_res), ("execution", ex), ("consumption", cn), ("effect_proof", ef), ("release_proof", pf)) if v.integrity is not None}
 
 
 def test_signed_mode_enforces_p1_signatures_across_service_and_verifiers(retention_world: RetentionWorld) -> None:

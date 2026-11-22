@@ -246,7 +246,9 @@ class CurationExecution:
         _typed_locator(self.sanitized_candidate_fact_set_locator, field_name=f"{label}.sanitized_candidate_fact_set_locator", expected_type=SanitizedCandidateFactSet.SCHEMA)
         if type(self.curation_algorithm_identity) is not AlgorithmProvenanceIdentity:
             raise ClosedValidationError(f"{label}.curation_algorithm_identity: expected AlgorithmProvenanceIdentity")
-        AlgorithmProvenanceIdentity.from_dict(self.curation_algorithm_identity.to_dict())
+        checked_alg = AlgorithmProvenanceIdentity.from_dict(self.curation_algorithm_identity.to_dict())
+        if checked_alg.schema_id != self.SCHEMA:
+            raise ClosedValidationError(f"{label}.curation_algorithm_identity.schema_id: expected {self.SCHEMA!r}, got {checked_alg.schema_id!r}")
         _typed_locator(self.base_dataset_catalog_locator, field_name=f"{label}.base_dataset_catalog_locator", expected_type=_DATASET_CATALOG_SCHEMA)
         hist = _validate_unique_manifest_locators(self.historical_generation_manifest_locators, field_name=f"{label}.historical_generation_manifest_locators")
         object.__setattr__(self, "historical_generation_manifest_locators", hist)

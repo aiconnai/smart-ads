@@ -359,7 +359,9 @@ class SanitizedCandidateFactSet:
         _typed_locator(self.migration_run_context_locator, field_name=f"{label}.migration_run_context_locator", expected_type=_RUN_CONTEXT_SCHEMA)
         if type(self.sanitization_algorithm_identity) is not AlgorithmProvenanceIdentity:
             raise ClosedValidationError(f"{label}.sanitization_algorithm_identity: expected AlgorithmProvenanceIdentity")
-        AlgorithmProvenanceIdentity.from_dict(self.sanitization_algorithm_identity.to_dict())
+        checked_alg = AlgorithmProvenanceIdentity.from_dict(self.sanitization_algorithm_identity.to_dict())
+        if checked_alg.schema_id != self.SCHEMA:
+            raise ClosedValidationError(f"{label}.sanitization_algorithm_identity.schema_id: expected {self.SCHEMA!r}, got {checked_alg.schema_id!r}")
         src_locs = _sorted_locator_tuple(self.source_collection_result_locators, field_name=f"{label}.source_collection_result_locators", expected_type=CollectionResult.SCHEMA, allow_empty=False)
         ev_locs = _sorted_locator_tuple(self.operational_read_evidence_locators, field_name=f"{label}.operational_read_evidence_locators", expected_type=OperationalReadEvidence.SCHEMA, allow_empty=False)
         if len(src_locs) != len(ev_locs):

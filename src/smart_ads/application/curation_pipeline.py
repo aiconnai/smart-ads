@@ -88,10 +88,12 @@ def verify_algorithm_provenance_identity(
 
 
 def _verify_algorithm_in_store(
-    identity: AlgorithmProvenanceIdentity, *, store: CellObjectStorePort, require_signed: bool, label: str
+    identity: AlgorithmProvenanceIdentity, *, expected_schema_id: str, store: CellObjectStorePort, require_signed: bool, label: str
 ) -> AlgorithmProvenanceIdentity:
     if type(identity) is not AlgorithmProvenanceIdentity:
         raise ClosedValidationError(f"{label}: expected AlgorithmProvenanceIdentity")
+    if identity.schema_id != expected_schema_id:
+        raise ClosedValidationError(f"{label}.schema_id: expected {expected_schema_id!r}, got {identity.schema_id!r}")
     git_prov = _load_p1(store, identity.git_artifact_provenance_locator, GitArtifactProvenance, field_name=f"{label}.git_artifact_provenance_locator", require_signed=require_signed)
     verify_algorithm_provenance_identity(identity, git_prov)
     return identity
@@ -208,7 +210,7 @@ def build_sanitized_candidate_fact_set(
     """Build and store a verified `SanitizedCandidateFactSet` from operational read evidences."""
     checked_store = _require_store_and_bool(store, require_signed_inputs, bool_name="require_signed_inputs")
     run_loc = _typed_locator(migration_run_context_locator, field_name="migration_run_context_locator", expected_type=_RUN_CONTEXT_SCHEMA)
-    checked_alg = _verify_algorithm_in_store(sanitization_algorithm_identity, store=checked_store, require_signed=require_signed_inputs, label="sanitization_algorithm_identity")
+    checked_alg = _verify_algorithm_in_store(sanitization_algorithm_identity, expected_schema_id=SanitizedCandidateFactSet.SCHEMA, store=checked_store, require_signed=require_signed_inputs, label="sanitization_algorithm_identity")
     if isinstance(evidence_locators, (str, bytes)) or not isinstance(evidence_locators, Sequence):
         raise ClosedValidationError("evidence_locators: expected Sequence of ArtifactLocator")
     sorted_ev_locs = sort_artifact_locators(evidence_locators, expected_type=OperationalReadEvidence.SCHEMA, allow_empty=False, field_name="evidence_locators")
@@ -224,7 +226,7 @@ def verify_sanitized_candidate_fact_set(
     """Verify 1-to-1 evidence/result bijection, provenance, and candidate rows."""
     checked_store = _require_store_and_bool(store, require_signed)
     fresh_cs = _reparse_exact(candidate_set, SanitizedCandidateFactSet, label="candidate_set", require_signed=require_signed)
-    _verify_algorithm_in_store(fresh_cs.sanitization_algorithm_identity, store=checked_store, require_signed=require_signed, label="candidate_set.sanitization_algorithm_identity")
+    _verify_algorithm_in_store(fresh_cs.sanitization_algorithm_identity, expected_schema_id=SanitizedCandidateFactSet.SCHEMA, store=checked_store, require_signed=require_signed, label="candidate_set.sanitization_algorithm_identity")
     sorted_src_locs, ordered_rows = _derive_bijective_candidates(
         run_loc=fresh_cs.migration_run_context_locator, sorted_ev_locs=fresh_cs.operational_read_evidence_locators, store=checked_store, require_signed=require_signed
     )
@@ -277,7 +279,8 @@ def _verify_epoch0_cut_genesis_bindings(
     curation: CurationExecution, *, store: CellObjectStorePort, require_signed: bool,
 ) -> None:
     if (
-        old_catalog.partition_heads != () or receipt.cas_request_projection.operation != "add_partition"
+        old_catalog.catalog_epoch != 0 or old_catalog.partition_heads != ()
+        or receipt.cas_request_projection.operation != "add_partition"
         or receipt.cas_request_projection.target_head_sequence_number != 1 or len(new_catalog.partition_heads) != 1
         or receipt.genesis_record_locator is None or receipt.genesis_consumption_locator is None
     ):
@@ -286,16 +289,16 @@ def _verify_epoch0_cut_genesis_bindings(
     cons_rec = _load_p1(store, receipt.genesis_consumption_locator, DatasetCatalogGenesisConsumptionRecord, field_name="cut_receipt.genesis_consumption_locator", require_signed=require_signed)
     if (
         (curation.curation_mode, curation.dataset_catalog_genesis_record_locator) != ("genesis", receipt.genesis_record_locator)
-        or (gen_rec.cell_ref, gen_rec.empty_epoch0_catalog_locator) != (receipt.cell_ref, receipt.old_catalog_locator)
+        or (gen_rec.cell_ref, gen_rec.empty_epoch0_catalog_locator, gen_rec.migration_run_context_locator) != (receipt.cell_ref, receipt.old_catalog_locator, receipt.migration_run_context_locator)
         or (cons_rec.genesis_record_locator, cons_rec.empty_epoch0_catalog_locator, cons_rec.first_successor_catalog_locator, cons_rec.preallocated_cut_id, cons_rec.cas_linearization_id)
         != (receipt.genesis_record_locator, receipt.old_catalog_locator, receipt.new_catalog_locator, receipt.cut_id, receipt.cas_linearization_id)
     ):
         raise ClosedValidationError("dataset_catalog_cut_receipt: epoch-0 genesis record or consumption binding mismatch")
 
 
-def _verify_cut_receipt_metadata(
+def _verify_single_cut_step(
     receipt: DatasetCatalogCutReceipt, *, store: CellObjectStorePort, require_signed: bool
-) -> tuple[DatasetCatalog, DatasetCatalog, GenerationManifest]:
+) -> tuple[DatasetCatalog, DatasetCatalog, GenerationManifest, CurationExecution]:
     old_catalog = _load_p1(store, receipt.old_catalog_locator, DatasetCatalog, field_name="cut_receipt.old_catalog_locator", require_signed=require_signed)
     new_catalog = _load_p1(store, receipt.new_catalog_locator, DatasetCatalog, field_name="cut_receipt.new_catalog_locator", require_signed=require_signed)
     gen_loc = receipt.cas_request_projection.generation_manifest_locator
@@ -305,7 +308,7 @@ def _verify_cut_receipt_metadata(
     exp_proj = CatalogCasRequestProjection(op, old_catalog.catalog_epoch, receipt.old_catalog_locator.content_digest, new_gen.partition_key, seq, gen_loc)
     if (
         (old_catalog.catalog_epoch, new_catalog.catalog_epoch, old_catalog.catalog_epoch + 1) != (receipt.old_catalog_epoch, receipt.new_catalog_epoch, new_catalog.catalog_epoch)
-        or (old_catalog.cell_ref, new_catalog.cell_ref, receipt.migration_run_context_locator) != (receipt.cell_ref, receipt.cell_ref, new_gen.migration_run_context_locator)
+        or (old_catalog.cell_ref, new_catalog.cell_ref, receipt.migration_run_context_locator, curation.migration_run_context_locator) != (receipt.cell_ref, receipt.cell_ref, new_gen.migration_run_context_locator, new_gen.migration_run_context_locator)
         or (curation.base_dataset_catalog_locator, receipt.cas_request_projection, new_catalog.partition_heads) != (receipt.old_catalog_locator, exp_proj, exp_heads)
     ):
         raise ClosedValidationError("dataset_catalog_cut_receipt: catalog transition mismatch")
@@ -313,11 +316,40 @@ def _verify_cut_receipt_metadata(
         _verify_epoch0_cut_genesis_bindings(receipt, old_catalog, new_catalog, curation, store=store, require_signed=require_signed)
     elif curation.curation_mode != "incremental":
         raise ClosedValidationError("dataset_catalog_cut_receipt: epoch >= 1 requires incremental curation")
-    return old_catalog, new_catalog, new_gen
+    return old_catalog, new_catalog, new_gen, curation
+
+
+def _verify_cut_receipt_metadata(
+    receipt: DatasetCatalogCutReceipt, *, store: CellObjectStorePort, require_signed: bool
+) -> tuple[DatasetCatalog, DatasetCatalog, GenerationManifest]:
+    top_old, top_new, top_gen, cur_exec = _verify_single_cut_step(receipt, store=store, require_signed=require_signed)
+    cur_rec, old_cat = receipt, top_old
+    seen_refs: set[str] = {receipt.locator().object_ref}
+    while cur_rec.old_catalog_epoch >= 1:
+        if cur_exec.base_dataset_snapshot_locator is None or cur_exec.base_catalog_cut_receipt_locator is None:
+            raise ClosedValidationError("dataset_catalog_cut_receipt: missing incremental base snapshot or cut receipt")
+        parent_ref = cur_exec.base_catalog_cut_receipt_locator.object_ref
+        if parent_ref in seen_refs:
+            raise ClosedValidationError("dataset_catalog_cut_receipt: cycle in cut-receipt lineage")
+        seen_refs.add(parent_ref)
+        base_snap = _load_p1(store, cur_exec.base_dataset_snapshot_locator, DatasetSnapshot, field_name="curation.base_dataset_snapshot_locator", require_signed=require_signed)
+        base_cut = _load_p1(store, cur_exec.base_catalog_cut_receipt_locator, DatasetCatalogCutReceipt, field_name="curation.base_catalog_cut_receipt_locator", require_signed=require_signed)
+        p_old, p_new, _, p_cur = _verify_single_cut_step(base_cut, store=store, require_signed=require_signed)
+        if (
+            (base_cut.cell_ref, base_cut.migration_run_context_locator) != (receipt.cell_ref, receipt.migration_run_context_locator)
+            or (cur_rec.old_catalog_locator, cur_rec.old_catalog_epoch, p_new) != (base_cut.new_catalog_locator, base_cut.new_catalog_epoch, old_cat)
+            or (base_snap.dataset_catalog_locator, base_snap.catalog_cut_receipt_locator, base_snap.catalog_epoch, base_snap.partition_heads)
+            != (cur_rec.old_catalog_locator, cur_exec.base_catalog_cut_receipt_locator, old_cat.catalog_epoch, old_cat.partition_heads)
+        ):
+            raise ClosedValidationError("dataset_catalog_cut_receipt: parent cut-receipt or snapshot lineage mismatch")
+        cur_rec, old_cat, cur_exec = base_cut, p_old, p_cur
+    return top_old, top_new, top_gen
 
 
 def _verify_incremental_curation_history(
-    curation: CurationExecution, base_catalog: DatasetCatalog, *, store: CellObjectStorePort, require_signed: bool
+    curation: CurationExecution, base_catalog: DatasetCatalog, *, store: CellObjectStorePort, require_signed: bool,
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]],
+    visiting_cur: frozenset[str], parquet_codec: ParquetLandingCodecPort | None = None,
 ) -> tuple[GenerationManifest, ...]:
     if base_catalog.catalog_epoch < 1 or curation.base_dataset_snapshot_locator is None or curation.base_catalog_cut_receipt_locator is None:
         raise ClosedValidationError("curation_execution: incremental mode requires epoch >= 1 base")
@@ -325,45 +357,64 @@ def _verify_incremental_curation_history(
     base_cut = _load_p1(store, curation.base_catalog_cut_receipt_locator, DatasetCatalogCutReceipt, field_name="curation.base_catalog_cut_receipt_locator", require_signed=require_signed)
     _, verified_new_cat, _ = _verify_cut_receipt_metadata(base_cut, store=store, require_signed=require_signed)
     if (
-        (base_snap.dataset_catalog_locator, base_snap.catalog_cut_receipt_locator, base_cut.new_catalog_locator)
-        != (curation.base_dataset_catalog_locator, curation.base_catalog_cut_receipt_locator, curation.base_dataset_catalog_locator)
+        (base_snap.dataset_catalog_locator, base_snap.catalog_cut_receipt_locator, base_cut.new_catalog_locator, base_cut.migration_run_context_locator)
+        != (curation.base_dataset_catalog_locator, curation.base_catalog_cut_receipt_locator, curation.base_dataset_catalog_locator, curation.migration_run_context_locator)
         or (base_snap.catalog_epoch, base_snap.partition_heads, verified_new_cat) != (base_catalog.catalog_epoch, base_catalog.partition_heads, base_catalog)
     ):
         raise ClosedValidationError("curation_execution: base snapshot/catalog/cut-receipt mismatch")
     start_ym, end_ym = curation.curation_window.start_date[:7], curation.curation_window.end_date[:7]
-    intersecting = [h for h in base_catalog.partition_heads if start_ym <= _partition_year_month(h.partition_key) <= end_ym]
-    if curation.historical_generation_manifest_locators != tuple(h.generation_manifest_locator for h in intersecting):
-        raise ClosedValidationError("curation_execution.historical_generation_manifest_locators: intersecting head mismatch")
+    intersecting_locs: list[ArtifactLocator] = []
     manifests: list[GenerationManifest] = []
-    for head in intersecting:
-        gm = _load_p1(store, head.generation_manifest_locator, GenerationManifest, field_name="curation.historical_generation_manifest_locators[]", require_signed=require_signed)
-        if gm.partition_key != head.partition_key:
-            raise ClosedValidationError("curation_execution: historical manifest partition_key mismatch")
-        manifests.append(gm)
+    for head in base_catalog.partition_heads:
+        gm = _load_p1(store, head.generation_manifest_locator, GenerationManifest, field_name="base_catalog.partition_heads[].generation_manifest_locator", require_signed=require_signed)
+        if gm.partition_key != head.partition_key or (head.head_sequence_number == 1) != (gm.parent_generation_manifest_locator is None):
+            raise ClosedValidationError("curation_execution: base catalog head partition_key or sequence/parent mismatch")
+        _verify_generation_for_cas(gm, store=store, parquet_codec=parquet_codec, require_signed=require_signed, cur_memo=cur_memo, visiting_cur=visiting_cur)
+        if start_ym <= _partition_year_month(head.partition_key) <= end_ym:
+            intersecting_locs.append(head.generation_manifest_locator)
+            manifests.append(gm)
+    if curation.historical_generation_manifest_locators != tuple(intersecting_locs):
+        raise ClosedValidationError("curation_execution.historical_generation_manifest_locators: intersecting head mismatch")
     return tuple(manifests)
 
 
-def verify_curation_execution(
-    curation: CurationExecution, *, store: CellObjectStorePort, require_signed: bool = False
+def _verify_curation_execution_memo(
+    curation: CurationExecution, *, store: CellObjectStorePort, require_signed: bool,
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]],
+    visiting_cur: frozenset[str], parquet_codec: ParquetLandingCodecPort | None = None,
 ) -> tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]:
-    """Verify `CurationExecution`, candidate window/single-partition cut, and base catalog."""
-    checked_store = _require_store_and_bool(store, require_signed)
     fresh_cur = _reparse_exact(curation, CurationExecution, label="curation", require_signed=require_signed)
-    _verify_algorithm_in_store(fresh_cur.curation_algorithm_identity, store=checked_store, require_signed=require_signed, label="curation.curation_algorithm_identity")
-    raw_cs = _load_p1(checked_store, fresh_cur.sanitized_candidate_fact_set_locator, SanitizedCandidateFactSet, field_name="curation.sanitized_candidate_fact_set_locator", require_signed=require_signed)
+    cur_ref = fresh_cur.locator().object_ref
+    if cur_ref in cur_memo:
+        return cur_memo[cur_ref]
+    if cur_ref in visiting_cur:
+        raise ClosedValidationError("curation_execution: cycle detected")
+    _verify_algorithm_in_store(fresh_cur.curation_algorithm_identity, expected_schema_id=CurationExecution.SCHEMA, store=store, require_signed=require_signed, label="curation.curation_algorithm_identity")
+    raw_cs = _load_p1(store, fresh_cur.sanitized_candidate_fact_set_locator, SanitizedCandidateFactSet, field_name="curation.sanitized_candidate_fact_set_locator", require_signed=require_signed)
     if raw_cs.migration_run_context_locator != fresh_cur.migration_run_context_locator:
         raise ClosedValidationError("curation_execution: cross-run SanitizedCandidateFactSet forbidden")
-    candidate_set = verify_sanitized_candidate_fact_set(raw_cs, store=checked_store, require_signed=require_signed)
+    candidate_set = verify_sanitized_candidate_fact_set(raw_cs, store=store, require_signed=require_signed)
     _validate_candidates_in_single_partition_window(candidate_set.candidates, fresh_cur.curation_window)
-    base_catalog = _load_p1(checked_store, fresh_cur.base_dataset_catalog_locator, DatasetCatalog, field_name="curation.base_dataset_catalog_locator", require_signed=require_signed)
+    base_catalog = _load_p1(store, fresh_cur.base_dataset_catalog_locator, DatasetCatalog, field_name="curation.base_dataset_catalog_locator", require_signed=require_signed)
     if fresh_cur.curation_mode == "genesis":
         if fresh_cur.dataset_catalog_genesis_record_locator is None:
             raise ClosedValidationError("curation_execution: missing genesis record locator")
-        gen_rec = _load_p1(checked_store, fresh_cur.dataset_catalog_genesis_record_locator, DatasetCatalogGenesisRecord, field_name="curation.dataset_catalog_genesis_record_locator", require_signed=require_signed)
-        if (base_catalog.catalog_epoch, base_catalog.partition_heads, gen_rec.empty_epoch0_catalog_locator, gen_rec.cell_ref) != (0, (), fresh_cur.base_dataset_catalog_locator, base_catalog.cell_ref):
+        gen_rec = _load_p1(store, fresh_cur.dataset_catalog_genesis_record_locator, DatasetCatalogGenesisRecord, field_name="curation.dataset_catalog_genesis_record_locator", require_signed=require_signed)
+        if (base_catalog.catalog_epoch, base_catalog.partition_heads, gen_rec.empty_epoch0_catalog_locator, gen_rec.cell_ref, gen_rec.migration_run_context_locator) != (0, (), fresh_cur.base_dataset_catalog_locator, base_catalog.cell_ref, fresh_cur.migration_run_context_locator):
             raise ClosedValidationError("curation_execution: invalid genesis record or epoch-0 catalog")
-        return candidate_set, base_catalog, ()
-    return candidate_set, base_catalog, _verify_incremental_curation_history(fresh_cur, base_catalog, store=checked_store, require_signed=require_signed)
+        res: tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]] = (candidate_set, base_catalog, ())
+    else:
+        res = (candidate_set, base_catalog, _verify_incremental_curation_history(fresh_cur, base_catalog, store=store, require_signed=require_signed, cur_memo=cur_memo, visiting_cur=visiting_cur | {cur_ref}, parquet_codec=parquet_codec))
+    cur_memo[cur_ref] = res
+    return res
+
+
+def verify_curation_execution(
+    curation: CurationExecution, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None = None, require_signed: bool = False
+) -> tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]:
+    """Verify `CurationExecution`, candidate window/single-partition cut, and base catalog."""
+    checked_store, checked_codec = _require_store_and_bool(store, require_signed), (None if parquet_codec is None else _require_parquet_codec(parquet_codec))
+    return _verify_curation_execution_memo(curation, store=checked_store, require_signed=require_signed, cur_memo={}, visiting_cur=frozenset(), parquet_codec=checked_codec)
 
 
 def _validate_historical_generation_pairs(
@@ -434,10 +485,12 @@ def _check_parent_against_base_catalog(
 
 
 def _verify_manifest_curation_and_parent(
-    manifest: GenerationManifest, *, store: CellObjectStorePort, require_signed: bool
+    manifest: GenerationManifest, *, store: CellObjectStorePort, require_signed: bool,
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]],
+    visiting_cur: frozenset[str],
 ) -> tuple[CurationExecution, SanitizedCandidateFactSet, tuple[GenerationManifest, ...]]:
     curation = _load_p1(store, manifest.curation_execution_locator, CurationExecution, field_name="manifest.curation_execution_locator", require_signed=require_signed)
-    candidate_set, base_catalog, hist_manifests = verify_curation_execution(curation, store=store, require_signed=require_signed)
+    candidate_set, base_catalog, hist_manifests = _verify_curation_execution_memo(curation, store=store, require_signed=require_signed, cur_memo=cur_memo, visiting_cur=visiting_cur)
     target_pk = _validate_candidates_in_single_partition_window(candidate_set.candidates, curation.curation_window)
     if (manifest.partition_key, manifest.migration_run_context_locator, manifest.base_dataset_catalog_locator, manifest.operational_read_evidence_locators) != (target_pk, curation.migration_run_context_locator, curation.base_dataset_catalog_locator, candidate_set.operational_read_evidence_locators):
         raise ClosedValidationError("generation_manifest: partition_key, run, base catalog, or evidence mismatch")
@@ -464,22 +517,24 @@ def _decode_manifest_parquet_objects(
 
 def _verify_generation_manifest_memo(
     manifest: GenerationManifest, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort,
-    require_signed: bool, memo: dict[bytes, tuple[AnalyticsLandingRow, ...]], visiting: frozenset[bytes],
+    require_signed: bool, memo: dict[str, tuple[AnalyticsLandingRow, ...]], visiting: frozenset[str],
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]] | None = None,
 ) -> tuple[AnalyticsLandingRow, ...]:
     fresh_man = _reparse_exact(manifest, GenerationManifest, label="manifest", require_signed=require_signed)
-    man_key = canonicalize_jcs(fresh_man.locator().to_dict())
-    if man_key in memo:
-        return memo[man_key]
-    if man_key in visiting:
+    man_ref = fresh_man.locator().object_ref
+    if man_ref in memo:
+        return memo[man_ref]
+    if man_ref in visiting:
         raise ClosedValidationError("generation_manifest: ancestor cycle detected")
-    curation, candidate_set, hist_manifests = _verify_manifest_curation_and_parent(fresh_man, store=store, require_signed=require_signed)
-    next_visiting = visiting | {man_key}
-    hist_pairs = tuple((hm, _verify_generation_manifest_memo(hm, store=store, parquet_codec=parquet_codec, require_signed=require_signed, memo=memo, visiting=next_visiting)) for hm in hist_manifests)
+    shared_cur_memo = {} if cur_memo is None else cur_memo
+    curation, candidate_set, hist_manifests = _verify_manifest_curation_and_parent(fresh_man, store=store, require_signed=require_signed, cur_memo=shared_cur_memo, visiting_cur=frozenset())
+    next_visiting = visiting | {man_ref}
+    hist_pairs = tuple((hm, _verify_generation_manifest_memo(hm, store=store, parquet_codec=parquet_codec, require_signed=require_signed, memo=memo, visiting=next_visiting, cur_memo=shared_cur_memo)) for hm in hist_manifests)
     exp_pk, exp_rows = replay_curated_partition_rows(curation=curation, candidate_set=candidate_set, historical_generations=hist_pairs)
     decoded_rows, decoded_digest = _decode_manifest_parquet_objects(fresh_man, store=store, parquet_codec=parquet_codec)
     if (fresh_man.partition_key, fresh_man.row_count, fresh_man.logical_rows_digest, decoded_rows) != (exp_pk, len(exp_rows), decoded_digest, exp_rows) or [canonicalize_jcs(r.to_dict()) for r in decoded_rows] != [canonicalize_jcs(r.to_dict()) for r in exp_rows]:
         raise ClosedValidationError("generation_manifest: decoded Parquet rows mismatch curation replay")
-    memo[man_key] = decoded_rows
+    memo[man_ref] = decoded_rows
     return decoded_rows
 
 
@@ -510,9 +565,10 @@ def materialize_parquet_generation(
     reg_loc = _typed_locator(registry_snapshot_locator, field_name="registry_snapshot_locator", expected_type=_REGISTRY_SNAPSHOT_SCHEMA)
     cur_loc = _typed_locator(curation_locator, field_name="curation_locator", expected_type=CurationExecution.SCHEMA)
     curation = _load_p1(checked_store, cur_loc, CurationExecution, field_name="curation_locator")
-    candidate_set, base_catalog, hist_manifests = verify_curation_execution(curation, store=checked_store)
-    memo: dict[bytes, tuple[AnalyticsLandingRow, ...]] = {}
-    hist_pairs = tuple((hm, _verify_generation_manifest_memo(hm, store=checked_store, parquet_codec=checked_codec, require_signed=False, memo=memo, visiting=frozenset())) for hm in hist_manifests)
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]] = {}
+    candidate_set, base_catalog, hist_manifests = _verify_curation_execution_memo(curation, store=checked_store, require_signed=False, cur_memo=cur_memo, visiting_cur=frozenset())
+    memo: dict[str, tuple[AnalyticsLandingRow, ...]] = {}
+    hist_pairs = tuple((hm, _verify_generation_manifest_memo(hm, store=checked_store, parquet_codec=checked_codec, require_signed=False, memo=memo, visiting=frozenset(), cur_memo=cur_memo)) for hm in hist_manifests)
     target_pk, curated_rows = replay_curated_partition_rows(curation=curation, candidate_set=candidate_set, historical_generations=hist_pairs)
     _check_parent_against_base_catalog(base_catalog, target_pk, parent_generation_manifest_locator)
     ordered_rows, logical_digest = compute_logical_rows_digest(curated_rows)
@@ -534,12 +590,16 @@ def verify_generation_manifest(
 
 
 def _verify_generation_for_cas(
-    manifest: GenerationManifest, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None, require_signed: bool
+    manifest: GenerationManifest, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None,
+    require_signed: bool,
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]] | None = None,
+    visiting_cur: frozenset[str] = frozenset(),
 ) -> None:
     if parquet_codec is not None:
         verify_generation_manifest(manifest, store=store, parquet_codec=parquet_codec, require_signed=require_signed)
         return
-    _verify_manifest_curation_and_parent(manifest, store=store, require_signed=require_signed)
+    shared_cur_memo = {} if cur_memo is None else cur_memo
+    _verify_manifest_curation_and_parent(manifest, store=store, require_signed=require_signed, cur_memo=shared_cur_memo, visiting_cur=visiting_cur)
     for pq_loc in manifest.parquet_object_locators:
         if pq_loc.partition_key != manifest.partition_key:
             raise ClosedValidationError("generation_manifest: Parquet locator partition_key mismatch")
@@ -658,27 +718,50 @@ class GlobalDatasetCatalogService:
         return new_catalog, new_cat_loc, receipt, receipt_loc
 
 
+def _verify_catalog_heads(
+    catalog: DatasetCatalog, *, store: CellObjectStorePort,
+    parquet_codec: ParquetLandingCodecPort | None, require_signed: bool,
+    memo: dict[str, tuple[AnalyticsLandingRow, ...]],
+) -> None:
+    cur_memo: dict[str, tuple[SanitizedCandidateFactSet, DatasetCatalog, tuple[GenerationManifest, ...]]] = {}
+    for head in catalog.partition_heads:
+        head_gen = _load_p1(store, head.generation_manifest_locator, GenerationManifest, field_name="catalog.partition_heads[].generation_manifest_locator", require_signed=require_signed)
+        if head_gen.partition_key != head.partition_key or (head.head_sequence_number == 1) != (head_gen.parent_generation_manifest_locator is None):
+            raise ClosedValidationError("dataset_catalog: partition_head partition_key or sequence/parent mismatch")
+        if parquet_codec is None:
+            _verify_generation_for_cas(head_gen, store=store, parquet_codec=None, require_signed=require_signed, cur_memo=cur_memo)
+        else:
+            rows = _verify_generation_manifest_memo(head_gen, store=store, parquet_codec=parquet_codec, require_signed=require_signed, memo=memo, visiting=frozenset(), cur_memo=cur_memo)
+            if any(partition_key_for_metric_date(r.fact_key.metric_date) != head.partition_key for r in rows):
+                raise ClosedValidationError("dataset_catalog: decoded row partition_key mismatch")
+
+
 def verify_dataset_catalog_cut_receipt(
     receipt: DatasetCatalogCutReceipt, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort, require_signed: bool = False
 ) -> DatasetCatalogCutReceipt:
-    """Verify `DatasetCatalogCutReceipt` transition, genesis rules, and Parquet generation."""
+    """Verify `DatasetCatalogCutReceipt` transition, genesis rules, and all active Parquet generations."""
     checked_store, checked_codec = _require_store_and_bool(store, require_signed), _require_parquet_codec(parquet_codec)
     fresh_rec = _reparse_exact(receipt, DatasetCatalogCutReceipt, label="receipt", require_signed=require_signed)
-    _, _, new_gen = _verify_cut_receipt_metadata(fresh_rec, store=checked_store, require_signed=require_signed)
-    verify_generation_manifest(new_gen, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed)
+    _, new_catalog, new_gen = _verify_cut_receipt_metadata(fresh_rec, store=checked_store, require_signed=require_signed)
+    memo: dict[str, tuple[AnalyticsLandingRow, ...]] = {}
+    _verify_generation_manifest_memo(new_gen, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed, memo=memo, visiting=frozenset())
+    _verify_catalog_heads(new_catalog, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed, memo=memo)
     return fresh_rec
 
 
 def publish_dataset_snapshot(
     *, snapshot_id: str, created_at: str, cut_receipt_locator: ArtifactLocator,
-    store: CellObjectStorePort, integrity: P1Integrity | None = None,
+    store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None = None, integrity: P1Integrity | None = None,
 ) -> tuple[DatasetSnapshot, ArtifactLocator]:
     """Publish an immutable `DatasetSnapshot` byte-identical to `cut_receipt.new_catalog_locator`."""
     checked_store = _require_store_and_bool(store, False)
+    checked_codec = None if parquet_codec is None else _require_parquet_codec(parquet_codec)
     checked_cut_loc = _typed_locator(cut_receipt_locator, field_name="cut_receipt_locator", expected_type=DatasetCatalogCutReceipt.SCHEMA)
     cut_receipt = _load_p1(checked_store, checked_cut_loc, DatasetCatalogCutReceipt, field_name="cut_receipt_locator")
     _, new_catalog, new_gen = _verify_cut_receipt_metadata(cut_receipt, store=checked_store, require_signed=False)
-    _verify_generation_for_cas(new_gen, store=checked_store, parquet_codec=None, require_signed=False)
+    memo: dict[str, tuple[AnalyticsLandingRow, ...]] = {}
+    _verify_generation_for_cas(new_gen, store=checked_store, parquet_codec=checked_codec, require_signed=False)
+    _verify_catalog_heads(new_catalog, store=checked_store, parquet_codec=checked_codec, require_signed=False, memo=memo)
     snapshot = DatasetSnapshot(snapshot_id, new_catalog.catalog_epoch, cut_receipt.new_catalog_locator, checked_cut_loc, created_at, new_catalog.partition_heads, integrity=integrity)
     return snapshot, checked_store.put_json_artifact(DatasetSnapshot.SCHEMA, snapshot.to_dict())
 
@@ -695,15 +778,9 @@ def verify_dataset_snapshot(
     _, new_catalog, new_gen = _verify_cut_receipt_metadata(cut_receipt, store=checked_store, require_signed=require_signed)
     if (fresh_snap.catalog_epoch, fresh_snap.partition_heads) != (new_catalog.catalog_epoch, new_catalog.partition_heads) or canonicalize_jcs([h.to_dict() for h in fresh_snap.partition_heads]) != canonicalize_jcs([h.to_dict() for h in new_catalog.partition_heads]):
         raise ClosedValidationError("dataset_snapshot: catalog_epoch or partition_heads differ from resolved DatasetCatalog")
-    memo: dict[bytes, tuple[AnalyticsLandingRow, ...]] = {}
+    memo: dict[str, tuple[AnalyticsLandingRow, ...]] = {}
     _verify_generation_manifest_memo(new_gen, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed, memo=memo, visiting=frozenset())
-    for head in fresh_snap.partition_heads:
-        head_gen = _load_p1(checked_store, head.generation_manifest_locator, GenerationManifest, field_name="snapshot.partition_heads[].generation_manifest_locator", require_signed=require_signed)
-        if head_gen.partition_key != head.partition_key or (head.head_sequence_number == 1) != (head_gen.parent_generation_manifest_locator is None):
-            raise ClosedValidationError("dataset_snapshot: partition_head partition_key or sequence/parent mismatch")
-        rows = _verify_generation_manifest_memo(head_gen, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed, memo=memo, visiting=frozenset())
-        if any(partition_key_for_metric_date(r.fact_key.metric_date) != head.partition_key for r in rows):
-            raise ClosedValidationError("dataset_snapshot: decoded row partition_key mismatch")
+    _verify_catalog_heads(new_catalog, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed, memo=memo)
     return fresh_snap
 
 

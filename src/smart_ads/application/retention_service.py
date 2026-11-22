@@ -10,21 +10,22 @@ from typing import Any, ClassVar, Final, TypeVar
 
 from smart_ads.analytics import (
     AnalysisExecution, AnalysisPolicy, AnalysisReplayInputBundle, AnalysisResult, AnalysisResultSchema,
-    AnalyticalCertificationRecord, CanonicalResultSet, DerivedMetricDefinition, DuckDbBinaryObjectLocator,
-    DuckDbExtensionBinaryLocator, Finding, FormulaBundle, RegressionFixtureV1, ReportExecution,
+    AnalyticalCertificationRecord, DuckDbBinaryObjectLocator, DuckDbExtensionBinaryLocator, Finding, FormulaBundle,
+    RegressionFixtureV1, ReportExecution,
 )
 from smart_ads.application.curation_pipeline import _load_p1, _reparse_exact, _require_parquet_codec, _require_store_and_bool
 from smart_ads.contracts import (
-    ADR_P1_DOMAIN_PREFIXES, AdmittedCollection, AnalyticsLandingRow, ArtifactLocator, BaseMetricDefinition,
-    CanonicalQueryContract, ClosedValidationError, CollectionResult, GitArtifactProvenance, NormalizedCollectionFact,
-    P1Integrity, SemanticObservationProjection, canonicalize_jcs, jcs_sha256, p1_content_digest,
-    parse_timestamp_utc_micros, require_exact_keys, require_mapping, validate_envelope_timestamp_utc, validate_sha256_prefixed,
+    ADR_P1_DOMAIN_PREFIXES, AdmittedCollection, ArtifactLocator, BaseMetricDefinition, ClosedValidationError,
+    CollectionResult, GitArtifactProvenance, P1Integrity, canonicalize_jcs, jcs_sha256, p1_content_digest,
+    parse_timestamp_utc_micros, require_exact_keys, require_mapping, validate_envelope_timestamp_utc,
+    validate_opaque_ref, validate_sha256_prefixed,
 )
 from smart_ads.contracts.effects import (
     EFFECT_ACTION_MATRIX, AuthorizationConsumptionRecord, AuthorizationReceipt, AuthorizationReservationRecord,
-    EffectProof, ExecutionReceipt, ReservationStatus, RetentionReleaseTarget, RetentionRootAdmissionTarget, _safe_int,
-    _sorted_locator_tuple, _sorted_object_ref_tuple, _split_p1_envelope, _strict_id, _strict_str, _typed_locator,
-    _validate_nonce, sort_artifact_locators, sort_cell_object_refs, validate_cell_object_ref, verify_four_record_effect_proof,
+    EffectProof, ExecutionReceipt, ReservationStatus, RetentionReleaseTarget, RetentionRootAdmissionTarget,
+    _require_json_list, _require_locator_digest_pair, _safe_int, _sorted_locator_tuple, _sorted_object_ref_tuple,
+    _split_p1_envelope, _strict_id, _strict_str, _typed_locator, _validate_nonce, sort_artifact_locators,
+    sort_cell_object_refs, validate_cell_object_ref, verify_four_record_effect_proof,
 )
 from smart_ads.contracts.negative_security import NegativeSecurityTestReport
 from smart_ads.contracts.operational_evidence import OperationalReadEvidence, SanitizedCandidateFactSet
@@ -148,6 +149,62 @@ def _validate_optional_integrity(value: object, *, label: str, require_signed: b
         raise ClosedValidationError(f"{label}: malformed P1Integrity")
     return fresh
 
+_OTHER_ADR_STANDALONE_SCHEMAS: Final[frozenset[str]] = frozenset(
+    f"smart_ads/{n}/v1"
+    for n in (
+        "acceptance_profile artifact_contract_inventory business_calendar cell_trust_anchor_config "
+        "consumer_deployment_readback consumer_feature_flag_contract current_key_state current_key_state_head "
+        "cutover_execution_result daily_acceptance_token decomposition_fork_adjudication decomposition_manifest "
+        "decomposition_manifest_head delivery_mode_decision_receipt deployment_config_execution_result "
+        "feature_flag_ack_record feature_flag_readback_record gate2_approval_receipt gate2_authority_policy "
+        "gate3_evidence_packet gate3_freshness_profile gate3_selection_receipt gate4_freshness_profile "
+        "gate4_verification_record gov1_convergence_record ibvi_ads_delegation_context ibvi_ads_delegation_contract "
+        "incident_rollback_receipt incident_rollback_result key_authorization_registry "
+        "key_state_anti_rollback_checkpoint legacy_deployment_readback legacy_deployment_state_snapshot "
+        "legacy_read_endpoint_inventory legacy_seam_contract legacy_seam_release legacy_step2_implementation_evidence "
+        "legacy_surface_enumeration_contract live_certification_certificate live_certification_head "
+        "live_certification_transition manifest_validation_record mcp_rejection_matrix_report "
+        "migration_completion_record migration_manifest migration_run_context operational_read_proof_set "
+        "protected_merge_evidence readiness_attestation readiness_attestation_payload "
+        "reservation_reconciliation_record retirement_execution_result retirement_hour_bucket "
+        "retirement_verification_record rollback_drain_record rollback_prestate_record rollback_query_log "
+        "rollback_test_protocol rollback_test_receipt rollback_toggle_event rollback_toggle_result "
+        "sealed_sandbox_profile seam_parity_record shadow_acceptance_record shadow_mode_activation_result "
+        "smart_ads_live_read_activation_receipt stabilization_hour_bucket stabilization_period_completion_record "
+        "weekly_acceptance_token wheel_boundary_report wheel_build_provenance workload_identity_execution_result"
+    ).split()
+)
+
+
+def _validate_non_pr4_effect_fields(m: Mapping[str, Any], cls: type[Any], *, subj_kind: str, result_type: str, exp_slot: str) -> None:
+    if _strict_str(m["dag_slot"], field_name="dag_slot") != exp_slot:
+        raise ClosedValidationError(f"{cls.SCHEMA}.dag_slot: expected {exp_slot!r}")
+    run_loc = ArtifactLocator.from_dict(m["migration_run_context_locator"], expected_type=_RUN_CONTEXT_SCHEMA)
+    for lk, exp_t in cls._LOCATOR_FIELDS.items():
+        ArtifactLocator.from_dict(m[lk], expected_type=result_type if lk == "action_result_locator" else exp_t)
+    for id_k in ("authorization_id", "reservation_id", "execution_id", "consumption_id", "effect_proof_id", "linearization_id"):
+        if id_k in m:
+            _strict_id(m[id_k], field_name=id_k)
+    if "parameters_digest" in m:
+        validate_sha256_prefixed(_strict_str(m["parameters_digest"], field_name="parameters_digest"), field_name="parameters_digest")
+    if "approving_principal_ref" in m:
+        validate_opaque_ref(_strict_str(m["approving_principal_ref"], field_name="approving_principal_ref"), field_name="approving_principal_ref", expected_prefix="principal")
+    if "predecessor_locators" in m:
+        preds = tuple(ArtifactLocator.from_dict(p) for p in _require_json_list(m, "predecessor_locators", label=cls.SCHEMA))
+        _sorted_locator_tuple(preds, field_name="predecessor_locators", allow_empty=True)
+    if "authorization_receipt_digest" in m:
+        _require_locator_digest_pair(ArtifactLocator.from_dict(m["authorization_locator"], expected_type=AuthorizationReceipt.SCHEMA), m["authorization_receipt_digest"], expected_type=AuthorizationReceipt.SCHEMA, loc_field="authorization_locator", digest_field="authorization_receipt_digest")
+    if "subject" in m:
+        subj = require_mapping(m["subject"], label=f"{cls.SCHEMA}.subject")
+        if subj.get("subject_kind") != subj_kind or ArtifactLocator.from_dict(subj.get("migration_run_context_locator"), expected_type=_RUN_CONTEXT_SCHEMA) != run_loc:
+            raise ClosedValidationError(f"{cls.SCHEMA}.subject: invalid subject_kind or run context")
+        canonicalize_jcs(subj)
+    if "single_use_nonce" in m:
+        _validate_nonce(m["single_use_nonce"], field_name="single_use_nonce")
+    if ("reservation_status" in m and (_strict_str(m["reservation_status"], field_name="reservation_status") not in {"reserved", "consumed"} or m["in_doubt_reason"] is not None)) or ("execution_status" in m and _strict_str(m["execution_status"], field_name="execution_status") != "succeeded") or ("consumption_status" in m and _strict_str(m["consumption_status"], field_name="consumption_status") != "consumed"):
+        raise ClosedValidationError(f"{cls.SCHEMA}: non-terminal or in_doubt effect status is forbidden")
+
+
 def _validate_non_pr4_effect_envelope(raw_doc: Mapping[str, Any], cls: type[Any], *, require_signed: bool) -> Any:
     action = raw_doc.get("action")
     if type(action) is not str or action in EFFECT_ACTION_MATRIX or action not in _OTHER_ADR_EFFECT_SPECS:
@@ -156,21 +213,46 @@ def _validate_non_pr4_effect_envelope(raw_doc: Mapping[str, Any], cls: type[Any]
     m, integ = _split_p1_envelope(raw_doc, core_keys=cls.CORE_KEYS, schema=cls.SCHEMA, label=cls.SCHEMA, require_signed=require_signed)
     if integ is not None and integ.is_signed and integ.content_digest != p1_content_digest(raw_doc):
         raise ClosedValidationError(f"{cls.SCHEMA}.integrity.content_digest: mismatch")
-    if _strict_str(m["dag_slot"], field_name="dag_slot") != exp_slot:
-        raise ClosedValidationError(f"{cls.SCHEMA}.dag_slot: expected {exp_slot!r}")
-    run_loc = ArtifactLocator.from_dict(m["migration_run_context_locator"], expected_type=_RUN_CONTEXT_SCHEMA)
-    if "subject" in m:
-        subj = require_mapping(m["subject"], label=f"{cls.SCHEMA}.subject")
-        if subj.get("subject_kind") != subj_kind or ArtifactLocator.from_dict(subj.get("migration_run_context_locator"), expected_type=_RUN_CONTEXT_SCHEMA) != run_loc:
-            raise ClosedValidationError(f"{cls.SCHEMA}.subject: invalid subject_kind or run context")
-    if "single_use_nonce" in m:
-        _validate_nonce(m["single_use_nonce"], field_name="single_use_nonce")
-    if "action_result_locator" in m:
-        ArtifactLocator.from_dict(m["action_result_locator"], expected_type=result_type)
+    _validate_non_pr4_effect_fields(m, cls, subj_kind=subj_kind, result_type=result_type, exp_slot=exp_slot)
     for ts_k in ("issued_at_utc", "valid_until_utc", "reserved_at_utc", "executed_at_utc", "consumed_at_utc", "verified_at_utc"):
         if ts_k in m:
             validate_envelope_timestamp_utc(m[ts_k], field_name=ts_k)
-    return m
+    if "issued_at_utc" in m and _utc_micros(m["issued_at_utc"]) >= _utc_micros(m["valid_until_utc"]):
+        raise ClosedValidationError(f"{cls.SCHEMA}: issued_at_utc must precede valid_until_utc")
+    return dict(raw_doc)
+
+
+def _verify_visited_effect_proof(loc: ArtifactLocator, parsed: Any, *, store: CellObjectStorePort, require_signed: bool) -> None:
+    if isinstance(parsed, EffectProof):
+        auth = _load_p1(store, parsed.authorization_locator, AuthorizationReceipt, field_name="effect_proof.authorization_locator", require_signed=require_signed)
+        resv = _load_p1(store, parsed.reservation_locator, AuthorizationReservationRecord, field_name="effect_proof.reservation_locator", require_signed=require_signed)
+        ex = _load_p1(store, parsed.execution_locator, ExecutionReceipt, field_name="effect_proof.execution_locator", require_signed=require_signed)
+        cn = _load_p1(store, parsed.consumption_locator, AuthorizationConsumptionRecord, field_name="effect_proof.consumption_locator", require_signed=require_signed)
+        verify_four_record_effect_proof(effect_proof=parsed, authorization=auth, reservation=resv, execution=ex, consumption=cn, expected_action=parsed.action, expected_dag_slot=parsed.dag_slot, expected_result_type=parsed.action_result_locator.artifact_type, require_signed=require_signed)
+        return
+    m = require_mapping(parsed, label="effect_proof")
+    _, res_t, exp_slot = _OTHER_ADR_EFFECT_SPECS[m["action"]]
+    a_loc, r_loc = ArtifactLocator.from_dict(m["authorization_locator"], expected_type=AuthorizationReceipt.SCHEMA), ArtifactLocator.from_dict(m["reservation_locator"], expected_type=AuthorizationReservationRecord.SCHEMA)
+    e_loc, c_loc = ArtifactLocator.from_dict(m["execution_locator"], expected_type=ExecutionReceipt.SCHEMA), ArtifactLocator.from_dict(m["consumption_locator"], expected_type=AuthorizationConsumptionRecord.SCHEMA)
+    res_loc = ArtifactLocator.from_dict(m["action_result_locator"], expected_type=res_t)
+    recs = [(_validate_non_pr4_effect_envelope(raw, sc, require_signed=require_signed), raw, sl, sc) for sl, sc in ((a_loc, AuthorizationReceipt), (r_loc, AuthorizationReservationRecord), (e_loc, ExecutionReceipt), (c_loc, AuthorizationConsumptionRecord)) for raw in (store.get_json_artifact(sl),)]
+    if any(ArtifactLocator.for_canonical_bytes(sc.SCHEMA, canonicalize_jcs(raw)) != sl for _, raw, sl, sc in recs):
+        raise ClosedValidationError(f"effect_proof[{loc.object_ref!r}]: linked record digest mismatch")
+    ad, rd, ed, cd = (pair[0] for pair in recs)
+    subj_jcs = canonicalize_jcs(ad["subject"])
+    times = (_utc_micros(ad["issued_at_utc"]), _utc_micros(rd["reserved_at_utc"]), _utc_micros(ed["executed_at_utc"]), _utc_micros(cd["consumed_at_utc"]), _utc_micros(m["verified_at_utc"]))
+    reg_locs = {P1Integrity.from_dict(d["integrity"]).key_registry_snapshot_locator for d in (ad, rd, ed, cd, m) if "integrity" in d}
+    if (
+        len(reg_locs) > 1 or any((d["action"], d["dag_slot"], ArtifactLocator.from_dict(d["migration_run_context_locator"])) != (m["action"], exp_slot, ArtifactLocator.from_dict(m["migration_run_context_locator"])) for d in (ad, rd, ed, cd))
+        or len({ad["single_use_nonce"], rd["single_use_nonce"], ed["single_use_nonce"], cd["single_use_nonce"]}) != 1
+        or (ArtifactLocator.from_dict(rd["authorization_locator"]), rd["authorization_receipt_digest"]) != (a_loc, a_loc.content_digest)
+        or (ArtifactLocator.from_dict(ed["authorization_locator"]), ArtifactLocator.from_dict(ed["reservation_locator"]), ArtifactLocator.from_dict(ed["action_result_locator"])) != (a_loc, r_loc, res_loc)
+        or (ArtifactLocator.from_dict(cd["authorization_locator"]), cd["authorization_receipt_digest"], ArtifactLocator.from_dict(cd["reservation_locator"]), ArtifactLocator.from_dict(cd["execution_locator"])) != (a_loc, a_loc.content_digest, r_loc, e_loc)
+        or canonicalize_jcs(rd["subject"]) != subj_jcs or canonicalize_jcs(ed["subject"]) != subj_jcs
+        or not all(times[i] <= times[i + 1] for i in range(4)) or times[2] >= _utc_micros(ad["valid_until_utc"])
+    ):
+        raise ClosedValidationError(f"effect_proof[{loc.object_ref!r}]: non-PR4 four-record chain or chronology mismatch")
+
 
 @cache
 def _schema_parsers() -> Mapping[str, Callable[[Mapping[str, Any], bool], Any]]:
@@ -187,33 +269,29 @@ def _schema_parsers() -> Mapping[str, Callable[[Mapping[str, Any], bool], Any]]:
         AnalysisReplayInputBundle, ReportExecution, ToleranceProfile, NativeRequestProjection,
         Certification7BRecord, Certification7ARecord,
     )
-    embedded_pairs: tuple[tuple[str, type[Any]], ...] = (
-        ("smart_ads/canonical_query_contract/v1", CanonicalQueryContract),
-        ("smart_ads/analytics_landing_row/v1", AnalyticsLandingRow),
-        ("smart_ads/normalized_collection_fact/v1", NormalizedCollectionFact),
-        ("smart_ads/semantic_observation_projection/v1", SemanticObservationProjection),
-        (DerivedMetricDefinition.SCHEMA, DerivedMetricDefinition),
-        (RegressionFixtureV1.SCHEMA, RegressionFixtureV1),
-        (CanonicalResultSet.SCHEMA, CanonicalResultSet),
-    )
     effects = (AuthorizationReceipt, AuthorizationReservationRecord, ExecutionReceipt, AuthorizationConsumptionRecord, EffectProof)
     out: dict[str, Callable[[Mapping[str, Any], bool], Any]] = {c.SCHEMA: (lambda d, req, _c=c: _c.from_dict(d, require_signed=req)) for c in p1_classes}
-    out.update({sch: (lambda d, _req, _c=c: _c.from_dict(d)) for sch, c in embedded_pairs})
+    out[RegressionFixtureV1.SCHEMA] = lambda d, _req: RegressionFixtureV1.from_dict(d)
+    out.update({sch: (lambda d, _req: canonicalize_jcs(d)) for sch in _OTHER_ADR_STANDALONE_SCHEMAS})
     out.update({c.SCHEMA: (lambda d, req, _c=c: _validate_non_pr4_effect_envelope(d, _c, require_signed=req)) for c in effects})
     return MappingProxyType(out)
 
 def _validate_resolved_json_doc(loc: ArtifactLocator, raw_doc: object, *, require_signed: bool) -> Any:
+    if loc.artifact_type == ArtifactLocator.SCHEMA or loc.artifact_type in _BINARY_LOCATOR_SCHEMAS:
+        raise ClosedValidationError(f"resolved_artifact[{loc.object_ref!r}]: embedded locator schema {loc.artifact_type!r} forbidden as standalone artifact")
     mapping = require_mapping(raw_doc, label=f"resolved_artifact[{loc.object_ref!r}]")
     if mapping.get("$schema") != loc.artifact_type:
         raise ClosedValidationError(f"resolved_artifact[{loc.object_ref!r}]: '$schema' != {loc.artifact_type!r}")
-    if loc.artifact_type in ADR_P1_DOMAIN_PREFIXES and (require_signed or "integrity" in mapping):
+    if (loc.artifact_type in ADR_P1_DOMAIN_PREFIXES and require_signed) or "integrity" in mapping:
         if "integrity" not in mapping:
             raise ClosedValidationError(f"resolved_artifact[{loc.object_ref!r}]: missing P1 integrity")
         integ = P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed)
         if integ.is_signed and integ.content_digest != p1_content_digest(mapping):
             raise ClosedValidationError(f"resolved_artifact[{loc.object_ref!r}]: P1 content_digest mismatch")
     parser = _schema_parsers().get(loc.artifact_type)
-    return None if parser is None else parser(mapping, require_signed)
+    if parser is None:
+        raise ClosedValidationError(f"resolved_artifact[{loc.object_ref!r}]: unknown or unprofiled standalone schema {loc.artifact_type!r}")
+    return parser(mapping, require_signed)
 
 def _verify_embedded_binary_locator(node: Mapping[str, Any], *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None) -> str:
     schema = node.get("$schema")
@@ -306,8 +384,14 @@ def _visit_locator(
         raise ClosedValidationError(f"retention_reachability_graph: resolved JSON digest mismatch on {loc.object_ref!r}")
     visiting.remove(loc_key)
     visiting_refs.remove(loc.object_ref)
-    if isinstance(parsed, RetentionRoot):
+    if loc.artifact_type == EffectProof.SCHEMA:
+        _verify_visited_effect_proof(loc, parsed, store=store, require_signed=require_signed)
+    elif isinstance(parsed, RetentionRoot):
         _verify_visited_retention_root(parsed, loc, adjacency)
+    elif isinstance(parsed, RetentionRootSetHead) and parsed.predecessor_head_locator is not None:
+        pred = _load_p1(store, parsed.predecessor_head_locator, RetentionRootSetHead, field_name="head.predecessor_head_locator", require_signed=require_signed)
+        if (pred.cell_ref, pred.head_epoch) != (parsed.cell_ref, parsed.head_epoch - 1):
+            raise ClosedValidationError("retention_root_set_head: predecessor_head_locator cell_ref or head_epoch mismatch")
     visited[loc_key] = loc
     adjacency[loc_key] = (sorted_children, sorted_bins)
     all_object_refs.update((loc.object_ref, *sorted_bins))
@@ -347,14 +431,15 @@ def build_retention_root(
     checked_int = _validate_optional_integrity(integrity, label="integrity")
     run_loc = _typed_locator(migration_run_context_locator, field_name="migration_run_context_locator", expected_type=_RUN_CONTEXT_SCHEMA)
     target_loc = _typed_locator(target_artifact_locator, field_name="target_artifact_locator")
-    if target_loc.artifact_type == RetentionRoot.SCHEMA:
-        raise ClosedValidationError("target_artifact_locator: retention_root cannot target another retention_root")
-    closure = _compute_reachability(_root_seed_locators(target_loc, run_loc, checked_int), store=checked_store, parquet_codec=parquet_codec, require_signed=False)
+    if target_loc.artifact_type == RetentionRoot.SCHEMA or target_loc.artifact_type == ArtifactLocator.SCHEMA or target_loc.artifact_type in _BINARY_LOCATOR_SCHEMAS or target_loc.artifact_type not in _schema_parsers():
+        raise ClosedValidationError(f"target_artifact_locator: invalid or unprofiled target schema {target_loc.artifact_type!r}")
+    req_signed = bool(checked_int is not None and checked_int.is_signed)
+    closure = _compute_reachability(_root_seed_locators(target_loc, run_loc, checked_int), store=checked_store, parquet_codec=parquet_codec, require_signed=req_signed)
     root = RetentionRoot(root_id, cell_ref, run_loc, target_loc, closure.reachable_object_refs, created_at_utc, integrity=checked_int)
     if root.locator().object_ref in root.pinned_object_refs or target_loc.object_ref not in root.pinned_object_refs:
         raise ClosedValidationError("retention_root: self-referential cycle or missing 0-hop target ref")
     stored_loc = checked_store.put_json_artifact(RetentionRoot.SCHEMA, root.to_dict())
-    verify_retention_root(root, store=checked_store, parquet_codec=parquet_codec, require_signed=bool(checked_int is not None and checked_int.is_signed))
+    verify_retention_root(root, store=checked_store, parquet_codec=parquet_codec, require_signed=req_signed)
     return root, stored_loc
 
 
@@ -388,7 +473,9 @@ def head_pinned_object_refs(head: RetentionRootSetHead, *, store: CellObjectStor
     return _head_pinned_object_refs(head, store=_check_store_and_codec(store, parquet_codec), parquet_codec=parquet_codec, require_signed=False)
 
 
-def _validate_integrities_map(integrities: Mapping[str, P1Integrity] | None, *, allowed_keys: frozenset[str], require_signed: bool) -> dict[str, P1Integrity]:
+def _validate_integrities_map(
+    integrities: Mapping[str, P1Integrity] | None, *, required_keys: frozenset[str], allowed_keys: frozenset[str], require_signed: bool,
+) -> dict[str, P1Integrity]:
     if integrities is None:
         if require_signed:
             raise ClosedValidationError("integrities: signed P1Integrity mapping required when require_signed=True")
@@ -396,9 +483,10 @@ def _validate_integrities_map(integrities: Mapping[str, P1Integrity] | None, *, 
     if not isinstance(integrities, Mapping) or any(type(k) is not str or k not in allowed_keys for k in integrities):
         raise ClosedValidationError("integrities: invalid mapping or unsupported envelope key")
     out = {k: _validate_optional_integrity(v, label=f"integrities[{k!r}]", require_signed=require_signed) for k, v in integrities.items()}
-    if require_signed and "reservation" not in out:
-        raise ClosedValidationError("integrities['reservation']: required when require_signed=True")
-    return {k: v for k, v in out.items() if v is not None}
+    clean = {k: v for k, v in out.items() if v is not None}
+    if require_signed and not required_keys.issubset(clean):
+        raise ClosedValidationError(f"integrities: missing required signed keys {sorted(required_keys - set(clean))!r}")
+    return clean
 
 def _check_key_registry_consistency(*envelopes: Any) -> None:
     if len({e.integrity.key_registry_snapshot_locator for e in envelopes if getattr(e, "integrity", None) is not None}) > 1:
@@ -453,6 +541,7 @@ class RetentionRootSetService:
         checked_store = _check_store_and_codec(store, parquet_codec, require_signed)
         init_loc = _typed_locator(initial_head_locator, field_name="initial_head_locator", expected_type=RetentionRootSetHead.SCHEMA)
         init_head = _load_p1(checked_store, init_loc, RetentionRootSetHead, field_name="initial_head_locator", require_signed=require_signed)
+        _compute_reachability((init_loc,), store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
         _head_pinned_object_refs(init_head, store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
         self._store, self._parquet_codec, self._require_signed = checked_store, parquet_codec, require_signed
         self._head_locator, self._head = init_loc, init_head
@@ -483,8 +572,8 @@ class RetentionRootSetService:
         r_us, c_us, v_us = _utc_micros(reserved_at_utc), _utc_micros(committed_at_utc), _utc_micros(verified_at_utc)
         if not (r_us <= c_us <= v_us):
             raise ClosedValidationError("retention_root_set_service: require reserved_at_utc <= committed_at_utc <= verified_at_utc")
-        allowed = frozenset({"reservation", "in_doubt_reservation", "new_head", "cas_receipt", result_key, "execution", "consumption", "effect_proof", proof_key})
-        checked_ints = _validate_integrities_map(integrities, allowed_keys=allowed, require_signed=self._require_signed)
+        req_keys = frozenset({"reservation", "in_doubt_reservation", "new_head", "cas_receipt", result_key, "execution", "consumption", "effect_proof", proof_key})
+        checked_ints = _validate_integrities_map(integrities, required_keys=req_keys, allowed_keys=req_keys | {"ambiguous_in_doubt_reservation"}, require_signed=self._require_signed)
         auth_loc = _typed_locator(authorization_locator, field_name="authorization_locator", expected_type=AuthorizationReceipt.SCHEMA)
         auth = _load_p1(self._store, auth_loc, AuthorizationReceipt, field_name="authorization_locator", require_signed=self._require_signed)
         if (auth.action, auth.dag_slot, type(auth.subject)) != (expected_action, expected_slot, expected_subject_cls) or not (_utc_micros(auth.issued_at_utc) <= r_us < _utc_micros(auth.valid_until_utc)):
@@ -492,8 +581,11 @@ class RetentionRootSetService:
         auth_key = canonicalize_jcs(auth_loc.to_dict())
         if auth_key in self._auth_states or auth.single_use_nonce in self._nonce_states:
             raise ClosedValidationError(f"retention_root_set_service: nonce {auth.single_use_nonce!r} already reserved/terminal")
-        if "in_doubt_reservation" in checked_ints:
-            _reparse_exact(AuthorizationReservationRecord(reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "in_doubt", "pre_mutation_conflict_or_drift", reserved_at_utc, checked_ints["in_doubt_reservation"]), AuthorizationReservationRecord, label="in_doubt_reservation", require_signed=self._require_signed)
+        pre_seeds = _dedup_sorted_locators([self._head_locator, auth.migration_run_context_locator, *auth.predecessor_locators, *(() if auth.integrity is None else (auth.integrity.key_registry_snapshot_locator,)), *(v.key_registry_snapshot_locator for v in checked_ints.values())], field_name="reserve.seeds")
+        _compute_reachability(pre_seeds, store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
+        for k, reason in (("in_doubt_reservation", "pre_mutation_conflict_or_drift"), ("ambiguous_in_doubt_reservation", "ambiguous_external_effect")):
+            if k in checked_ints:
+                _reparse_exact(AuthorizationReservationRecord(reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "in_doubt", reason, reserved_at_utc, checked_ints[k]), AuthorizationReservationRecord, label=k, require_signed=self._require_signed)  # type: ignore[arg-type]
         resv = _reparse_exact(AuthorizationReservationRecord(reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "reserved", None, reserved_at_utc, checked_ints.get("reservation")), AuthorizationReservationRecord, label="reservation", require_signed=self._require_signed)
         resv_loc = self._store.put_json_artifact(AuthorizationReservationRecord.SCHEMA, resv.to_dict())
         self._used_ids.add(resv_tag)
@@ -504,8 +596,8 @@ class RetentionRootSetService:
     def _quarantine_in_doubt(self, auth_key: bytes, auth: AuthorizationReceipt, auth_loc: ArtifactLocator, resv: AuthorizationReservationRecord, ints: Mapping[str, P1Integrity]) -> None:
         self._nonce_states[auth.single_use_nonce] = "in_doubt"
         self._auth_states[auth_key] = "in_doubt"
-        fallback_int = None if auth.integrity is None else P1Integrity(auth.integrity.key_id, auth.integrity.key_registry_snapshot_locator)
-        in_doubt_rec = AuthorizationReservationRecord(resv.reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "in_doubt", "pre_mutation_conflict_or_drift", resv.reserved_at_utc, ints.get("in_doubt_reservation", fallback_int))
+        in_doubt_int = ints["in_doubt_reservation"] if self._require_signed else ints.get("in_doubt_reservation")
+        in_doubt_rec = _reparse_exact(AuthorizationReservationRecord(resv.reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "in_doubt", "pre_mutation_conflict_or_drift", resv.reserved_at_utc, in_doubt_int), AuthorizationReservationRecord, label="in_doubt_reservation", require_signed=self._require_signed)
         self._store.put_json_artifact(AuthorizationReservationRecord.SCHEMA, in_doubt_rec.to_dict())
 
     def _build_cas_and_effect_envelopes(
@@ -527,17 +619,30 @@ class RetentionRootSetService:
         return new_head, cas_rec, act_res, ex, cn, ef
 
     def _commit_envelopes(
-        self, *, new_head: RetentionRootSetHead, prior_envs: Sequence[Any], proof: _T,
-        verifier_fn: Callable[..., _T], nonce: str, auth_key: bytes, post_ids: set[str],
+        self, *, new_head: RetentionRootSetHead, prior_envs: Sequence[Any], proof: _T, verifier_fn: Callable[..., _T],
+        auth: AuthorizationReceipt, auth_loc: ArtifactLocator, resv: AuthorizationReservationRecord,
+        ints: Mapping[str, P1Integrity], auth_key: bytes, post_ids: set[str],
     ) -> tuple[_T, ArtifactLocator]:
-        for env in (new_head, *prior_envs):
-            self._store.put_json_artifact(env.SCHEMA, env.to_dict())
-        proof_loc = self._store.put_json_artifact(proof.SCHEMA, proof.to_dict())  # type: ignore[attr-defined]
-        verified = verifier_fn(proof, store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
-        self._head_locator, self._head = new_head.locator(), new_head
-        self._nonce_states[nonce] = "consumed"
-        self._auth_states[auth_key] = "consumed"
         self._used_ids.update(post_ids)
+        try:
+            for env in (new_head, *prior_envs):
+                self._store.put_json_artifact(env.SCHEMA, env.to_dict())
+            proof_loc = self._store.put_json_artifact(proof.SCHEMA, proof.to_dict())  # type: ignore[attr-defined]
+            verified = verifier_fn(proof, store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
+        except ClosedValidationError:
+            self._nonce_states[auth.single_use_nonce] = "in_doubt"
+            self._auth_states[auth_key] = "in_doubt"
+            amb_int = ints.get("ambiguous_in_doubt_reservation")
+            if not self._require_signed or amb_int is not None:
+                try:
+                    amb_rec = _reparse_exact(AuthorizationReservationRecord(resv.reservation_id, auth.migration_run_context_locator, auth_loc, auth_loc.content_digest, auth.single_use_nonce, auth.action, auth.dag_slot, auth.subject, "in_doubt", "ambiguous_external_effect", resv.reserved_at_utc, amb_int), AuthorizationReservationRecord, label="ambiguous_in_doubt_reservation", require_signed=self._require_signed)
+                    self._store.put_json_artifact(AuthorizationReservationRecord.SCHEMA, amb_rec.to_dict())
+                except ClosedValidationError:
+                    pass
+            raise
+        self._head_locator, self._head = new_head.locator(), new_head
+        self._nonce_states[auth.single_use_nonce] = "consumed"
+        self._auth_states[auth_key] = "consumed"
         return verified, proof_loc
 
     def _check_expected_head_and_expiry(self, auth: AuthorizationReceipt, target: Any, committed_at_utc: str) -> None:
@@ -560,6 +665,7 @@ class RetentionRootSetService:
         try:
             target: RetentionRootAdmissionTarget = auth.subject  # type: ignore[assignment]
             self._check_expected_head_and_expiry(auth, target, committed_at_utc)
+            _compute_reachability((auth_loc, self._head_locator, auth.migration_run_context_locator), store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
             proposed, prop_dig, _, b_dig, adm_cl, after_cl = _verify_admission_roots_and_closures(b_head=self._head, admitted_locs=target.admitted_root_locators, run_loc=auth.migration_run_context_locator, store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
             if (target.admitted_object_refs, target.before_reachability_graph_digest, target.after_reachability_graph_digest, target.proposed_root_set_digest) != (adm_cl.reachable_object_refs, b_dig, after_cl.reachability_graph_digest, prop_dig):
                 raise ClosedValidationError("retention_root_admission: target object set or reachability digest mismatch")
@@ -570,7 +676,7 @@ class RetentionRootSetService:
         except ClosedValidationError:
             self._quarantine_in_doubt(auth_key, auth, auth_loc, resv, ints)
             raise
-        return self._commit_envelopes(new_head=nh, prior_envs=(cas_rec, adm_res, ex, cn, ef), proof=proof, verifier_fn=verify_retention_root_admission_proof, nonce=auth.single_use_nonce, auth_key=auth_key, post_ids=post_ids)
+        return self._commit_envelopes(new_head=nh, prior_envs=(cas_rec, adm_res, ex, cn, ef), proof=proof, verifier_fn=verify_retention_root_admission_proof, auth=auth, auth_loc=auth_loc, resv=resv, ints=ints, auth_key=auth_key, post_ids=post_ids)
 
     def release_roots(
         self, *, authorization_locator: ArtifactLocator, reservation_id: str, reserved_at_utc: str, cas_receipt_id: str,
@@ -588,6 +694,7 @@ class RetentionRootSetService:
         try:
             target: RetentionReleaseTarget = auth.subject  # type: ignore[assignment]
             self._check_expected_head_and_expiry(auth, target, committed_at_utc)
+            _compute_reachability((auth_loc, self._head_locator, auth.migration_run_context_locator), store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
             retained_roots, prop_dig, _, b_dig, after_cl = _verify_release_roots_and_closures(b_head=self._head, released_locs=target.released_root_locators, claimed_rel_refs=target.released_object_refs, store=self._store, parquet_codec=self._parquet_codec, require_signed=self._require_signed)
             if (target.retained_root_locators, target.before_reachability_graph_digest, target.after_reachability_graph_digest, target.proposed_root_set_digest) != (retained_roots, b_dig, after_cl.reachability_graph_digest, prop_dig):
                 raise ClosedValidationError("retention_release: retained roots or reachability digest mismatch")
@@ -598,12 +705,12 @@ class RetentionRootSetService:
         except ClosedValidationError:
             self._quarantine_in_doubt(auth_key, auth, auth_loc, resv, ints)
             raise
-        return self._commit_envelopes(new_head=nh, prior_envs=(cas_rec, rel_res, ex, cn, ef), proof=proof, verifier_fn=verify_retention_release_proof, nonce=auth.single_use_nonce, auth_key=auth_key, post_ids=post_ids)
+        return self._commit_envelopes(new_head=nh, prior_envs=(cas_rec, rel_res, ex, cn, ef), proof=proof, verifier_fn=verify_retention_release_proof, auth=auth, auth_loc=auth_loc, resv=resv, ints=ints, auth_key=auth_key, post_ids=post_ids)
 
 
 def _load_and_verify_proof_backbone(
-    proof: Any, *, result_loc: ArtifactLocator, result_cls: type[_T], expected_action: str,
-    expected_slot: str, expected_cas_op: str, store: CellObjectStorePort, require_signed: bool,
+    proof: Any, *, result_loc: ArtifactLocator, result_cls: type[_T], expected_action: str, expected_slot: str,
+    expected_cas_op: str, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None, require_signed: bool,
 ) -> tuple[AuthorizationReceipt, _T, RetentionRootSetCasReceipt, RetentionRootSetHead, RetentionRootSetHead]:
     ef = _load_p1(store, proof.effect_proof_locator, EffectProof, field_name="proof.effect_proof_locator", require_signed=require_signed)
     auth = _load_p1(store, ef.authorization_locator, AuthorizationReceipt, field_name="ef.authorization_locator", require_signed=require_signed)
@@ -616,6 +723,8 @@ def _load_and_verify_proof_backbone(
     b_head = _load_p1(store, proof.before_head_locator, RetentionRootSetHead, field_name="proof.before_head_locator", require_signed=require_signed)
     a_head = _load_p1(store, proof.after_head_locator, RetentionRootSetHead, field_name="proof.after_head_locator", require_signed=require_signed)
     _check_key_registry_consistency(auth, resv, ex, cn, ef, res, cas, b_head, a_head, proof)
+    backbone_seeds = _dedup_sorted_locators([proof.effect_proof_locator, result_loc, proof.cas_receipt_locator, proof.before_head_locator, proof.after_head_locator, proof.migration_run_context_locator, *(() if proof.integrity is None else (proof.integrity.key_registry_snapshot_locator,))], field_name="proof.backbone")
+    _compute_reachability(backbone_seeds, store=store, parquet_codec=parquet_codec, require_signed=require_signed)
     times = (_utc_micros(auth.issued_at_utc), _utc_micros(resv.reserved_at_utc), _utc_micros(cas.committed_at_utc), _utc_micros(ex.executed_at_utc), _utc_micros(cn.consumed_at_utc), _utc_micros(ef.verified_at_utc), _utc_micros(proof.verified_at_utc))
     chronology_ok = all(times[i] <= times[i + 1] for i in range(len(times) - 1)) and times[3] < _utc_micros(auth.valid_until_utc)
     if (
@@ -635,7 +744,7 @@ def verify_retention_root_admission_proof(
     """Independently verify `RetentionRootAdmissionProof`, effect chain, CAS, and full reachability."""
     checked_store = _check_store_and_codec(store, parquet_codec, require_signed)
     fresh = _reparse_exact(proof, RetentionRootAdmissionProof, label="proof", require_signed=require_signed)
-    auth, res, cas, b_head, a_head = _load_and_verify_proof_backbone(fresh, result_loc=fresh.admission_result_locator, result_cls=RetentionRootAdmissionResult, expected_action="retention_root_admission", expected_slot="retention_root_admission_effect_proof", expected_cas_op="admit_roots", store=checked_store, require_signed=require_signed)
+    auth, res, cas, b_head, a_head = _load_and_verify_proof_backbone(fresh, result_loc=fresh.admission_result_locator, result_cls=RetentionRootAdmissionResult, expected_action="retention_root_admission", expected_slot="retention_root_admission_effect_proof", expected_cas_op="admit_roots", store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     proposed, prop_dig, b_objs, b_dig, adm_cl, _ = _verify_admission_roots_and_closures(b_head=b_head, admitted_locs=fresh.admitted_root_locators, run_loc=fresh.migration_run_context_locator, store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     a_objs, a_dig = _head_pinned_object_refs(a_head, store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     exp_target = RetentionRootAdmissionTarget(fresh.migration_run_context_locator, fresh.cell_ref, fresh.before_head_locator, b_head.head_epoch, fresh.before_head_locator.content_digest, fresh.admitted_root_locators, adm_cl.reachable_object_refs, b_dig, a_dig, prop_dig)
@@ -651,7 +760,7 @@ def verify_retention_release_proof(
     """Independently verify `RetentionReleaseProof`, non-vacuous retained non-reachability, and zero deletion."""
     checked_store = _check_store_and_codec(store, parquet_codec, require_signed)
     fresh = _reparse_exact(proof, RetentionReleaseProof, label="proof", require_signed=require_signed)
-    auth, res, cas, b_head, a_head = _load_and_verify_proof_backbone(fresh, result_loc=fresh.release_result_locator, result_cls=RetentionReleaseResult, expected_action="retention_release", expected_slot="retention_release_effect_proof", expected_cas_op="release_roots", store=checked_store, require_signed=require_signed)
+    auth, res, cas, b_head, a_head = _load_and_verify_proof_backbone(fresh, result_loc=fresh.release_result_locator, result_cls=RetentionReleaseResult, expected_action="retention_release", expected_slot="retention_release_effect_proof", expected_cas_op="release_roots", store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     exp_retained, prop_dig, b_objs, b_dig, _ = _verify_release_roots_and_closures(b_head=b_head, released_locs=fresh.released_root_locators, claimed_rel_refs=fresh.released_object_refs, store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     ret_objs, a_dig = _head_pinned_object_refs(a_head, store=checked_store, parquet_codec=parquet_codec, require_signed=require_signed)
     exp_rel_refs = sort_cell_object_refs(b_objs - ret_objs, allow_empty=True)

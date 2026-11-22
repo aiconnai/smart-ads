@@ -659,6 +659,20 @@ def _check_chain_links_and_identities(
         raise ClosedValidationError("effect_proof: key_registry_snapshot_locator mismatch across chain")
 
 
+def _check_chain_chronology(
+    auth: AuthorizationReceipt, resv: AuthorizationReservationRecord,
+    exec_rec: ExecutionReceipt, cons: AuthorizationConsumptionRecord, proof: EffectProof,
+) -> None:
+    issued = parse_timestamp_utc_micros(auth.issued_at_utc, allow_whole_seconds=True)
+    valid_until = parse_timestamp_utc_micros(auth.valid_until_utc, allow_whole_seconds=True)
+    reserved = parse_timestamp_utc_micros(resv.reserved_at_utc, allow_whole_seconds=True)
+    executed = parse_timestamp_utc_micros(exec_rec.executed_at_utc, allow_whole_seconds=True)
+    consumed = parse_timestamp_utc_micros(cons.consumed_at_utc, allow_whole_seconds=True)
+    verified = parse_timestamp_utc_micros(proof.verified_at_utc, allow_whole_seconds=True)
+    if not (issued <= reserved <= executed <= consumed <= verified) or not (executed < valid_until):
+        raise ClosedValidationError("effect_proof: causal chronology or authorization expiry violated")
+
+
 def verify_four_record_effect_proof(
     *, effect_proof: EffectProof, authorization: AuthorizationReceipt, reservation: AuthorizationReservationRecord,
     execution: ExecutionReceipt, consumption: AuthorizationConsumptionRecord, expected_action: str,
@@ -685,6 +699,7 @@ def verify_four_record_effect_proof(
     if exec_rec.action_result_locator != proof.action_result_locator or proof.action_result_locator.artifact_type != expected_result_type:
         raise ClosedValidationError("effect_proof: action_result_locator mismatch")
     _check_chain_links_and_identities(auth, resv, exec_rec, cons, proof)
+    _check_chain_chronology(auth, resv, exec_rec, cons, proof)
     return proof
 
 

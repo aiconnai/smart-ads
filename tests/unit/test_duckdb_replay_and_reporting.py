@@ -26,7 +26,7 @@ from smart_ads.analytics.replay_bundle import (
     AnalysisReplayInputBundle, DuckDbBinaryObjectLocator, DuckDbExtensionBinaryLocator,
     DuckDbExtensionSpec, DuckDbQueryDefinition, DuckDbSessionSetting, DuckDbViewDefinition,
 )
-from smart_ads.analytics.reporting import REPORT_EXECUTION_SCHEMA, CanonicalReportInput, ReportExecution, render_canonical_report_result, verify_report_execution
+from smart_ads.analytics.reporting import REPORT_EXECUTION_SCHEMA, CanonicalReportInput, ReportExecution, derive_snapshot_restatement_history, render_canonical_report_result, verify_report_execution
 from smart_ads.analytics.results import AnalysisExecution, CanonicalResultEntry, CanonicalResultSet
 import smart_ads.application as application_pkg
 from smart_ads.application.curation_pipeline import GlobalDatasetCatalogService, build_sanitized_candidate_fact_set, materialize_parquet_generation, publish_dataset_snapshot
@@ -214,8 +214,14 @@ class SignedPipelineWorld:
     def _store_inventory_and_context(self) -> tuple[ExpectedResourceInventory, ArtifactLocator, EvaluationContext]:
         inv = ExpectedResourceInventory("inventory:eval-001", self.cw.reg_loc, self.cw.reg_loc.content_digest, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", DateRange("2026-11-01", "2026-11-10", True), (ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", _CAMP_A, "campaign", "2026-11-10"),), _unsigned_p1())
         signed_inv, inv_loc = _store_signed(self.store, inv)
+        self.cur2 = CurationExecution.from_dict(self.store.get_json_artifact(self.gm2.curation_execution_locator), require_signed=True)
+        self.decoded_rows = {
+            gm.locator().object_ref: tuple(r for pq in gm.parquet_object_locators for r in self.codec.decode_and_verify_landing_rows(self.store.get_bytes(pq.object_ref, expected_size_bytes=pq.size_bytes), expected_partition_key=pq.partition_key))
+            for gm in (self.gm1, self.gm2)
+        }
+        rest_hist = derive_snapshot_restatement_history(signed_inv, tuple(r for rows in self.decoded_rows.values() for r in rows))
         scope = EvaluationScope("tenant:ibvi", "scope:campaigns-active", "campaign", "meta", "BRL")
-        return signed_inv, inv_loc, EvaluationContext(self.policy, scope, "2026-11-11T03:15:00.000000Z", "2026-11-10", 7, "2026-11-10", signed_inv, "result:metrics", ())
+        return signed_inv, inv_loc, EvaluationContext(self.policy, scope, "2026-11-11T03:15:00.000000Z", "2026-11-10", 1, "2026-11-10", signed_inv, "result:metrics", rest_hist)
 
     def build_signed_bundle(
         self, *, duckdb_bytes: bytes | None = None, engine_version: str = "1.5.5",
@@ -374,7 +380,7 @@ def test_offline_signed_certified_report_and_operational_proof_propagation(pipel
         replay_bundle=pw.bundle, execution=s_exec, results=(s_res_pairs[0][0],), result_schemas=(pw.metrics_schema,),
         policy_obj=pw.policy, findings=tuple(f for f, _ in f_pairs), certifications=(cert_out,),
         evaluation_context=pw.eval_ctx, attested_inputs=attested, template_provenance=pw.tmpl_prov,
-        render_provenance=pw.rnd_prov, require_signed=True,
+        render_provenance=pw.rnd_prov, curation_execution=pw.cur2, decoded_generation_rows=pw.decoded_rows, require_signed=True,
     ) == rep
 
 
@@ -456,7 +462,7 @@ def test_live_cli_duckdb_security_lockdown_views_and_full_pipeline(live_duckdb_w
         replay_bundle=bundle, execution=exec_obj, results=(res_pairs[0][0],), result_schemas=(lw.pw.metrics_schema,),
         policy_obj=lw.pw.policy, findings=tuple(f for f, _ in f_pairs), certifications=(cert_rec,),
         evaluation_context=lw.pw.eval_ctx, attested_inputs=attested, template_provenance=lw.pw.tmpl_prov,
-        render_provenance=lw.pw.rnd_prov, require_signed=False,
+        render_provenance=lw.pw.rnd_prov, curation_execution=lw.pw.cur2, decoded_generation_rows=lw.pw.decoded_rows, require_signed=False,
     ) == rep
 
 

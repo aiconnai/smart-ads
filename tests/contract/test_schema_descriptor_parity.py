@@ -372,7 +372,7 @@ def _pr4_curation_and_catalog_instances(eff_ev: dict[str, Any], alg_id: Any, row
     cand_loc = eff_ev["smart_ads/sanitized_candidate_fact_set/v1"].locator()
     epoch0_cat = catalog.DatasetCatalog("catalog:cell-0", "cell:ibvi-primary", 0, "2026-11-11T03:00:00Z", (), UNSIGNED)
     gen_rec = catalog.DatasetCatalogGenesisRecord("genesis:cell-0", "cell:ibvi-primary", run_loc, epoch0_cat.locator(), epoch0_cat.locator().content_digest, "principal:bootstrap-authority", "2026-11-11T03:00:00Z", UNSIGNED)
-    cur_exec = curation.CurationExecution(run_loc, "curation:cur-001", "genesis", "2026-11-10", "America/Sao_Paulo", "2026a", 1, DateRange("2026-11-10", "2026-11-10", True), cand_loc, alg_id, gen_rec.locator(), epoch0_cat.locator(), None, None, (), "2026-11-11T03:05:00Z", UNSIGNED)
+    cur_exec = curation.CurationExecution(run_loc, "curation:cur-001", "genesis", "2026-11-10", "America/Sao_Paulo", "2026a", 1, DateRange("2026-11-10", "2026-11-10", True), cand_loc, dataclasses.replace(alg_id, schema_id=curation.CurationExecution.SCHEMA), gen_rec.locator(), epoch0_cat.locator(), None, None, (), "2026-11-11T03:05:00Z", UNSIGNED)
     pq_loc = catalog.ParquetObjectLocator("year=2026/month=11", "sha256:" + ("d" * 64), 512)
     _, logical_digest = catalog.compute_logical_rows_digest((row,))
     gen_man = catalog.GenerationManifest(run_loc, "generation:gen-001", "year=2026/month=11", None, "2026-11-11T03:06:00Z", 1, logical_digest, reg_loc, cur_exec.locator(), epoch0_cat.locator(), (op_ev_loc,), (pq_loc,), integrity=UNSIGNED)
@@ -443,7 +443,7 @@ def _pr4_replay_and_report_instances(
     rep_in = reporting.CanonicalReportInput(ds_snap.snapshot_digest, c_set.canonical_result_digest, "2026-11-11T03:10:00.000000Z", "2026-11-10", "result:spend", inv_loc, cur_cat["smart_ads/curation_execution/v1"].locator(), (), attested, (), formulas.DerivedCertificationStatus.VERIFIED, False)
     rep_res = reporting.render_canonical_report_result(rep_in, ())
     op_ev = eff_ev["smart_ads/operational_read_evidence/v1"]
-    rep_exec = reporting.ReportExecution("report:rep-001", run_loc, ds_snap.locator(), bundle.locator(), a_exec.locator(), pol_loc, (), (cert_rec.locator(),), (op_ev.locator(),), (op_ev.effect_proof_locator,), prov_loc, alg_id, rep_in, rep_res, "2026-11-11T03:11:00Z", integrity=UNSIGNED)
+    rep_exec = reporting.ReportExecution("report:rep-001", run_loc, ds_snap.locator(), bundle.locator(), a_exec.locator(), pol_loc, (), (cert_rec.locator(),), (op_ev.locator(),), (op_ev.effect_proof_locator,), prov_loc, dataclasses.replace(alg_id, schema_id=reporting.ReportExecution.SCHEMA), rep_in, rep_res, "2026-11-11T03:11:00Z", integrity=UNSIGNED)
     return {
         "smart_ads/duckdb_binary_object_locator/v1": db_bin,
         "smart_ads/duckdb_extension_binary_locator/v1": ext_bin,

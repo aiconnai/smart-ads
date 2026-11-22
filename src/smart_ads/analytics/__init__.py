@@ -133,6 +133,7 @@ from smart_ads.analytics.reporting import (
     CanonicalReportResult,
     ReportExecution,
     ReportFindingSummary,
+    derive_snapshot_restatement_history,
     render_canonical_report_result,
     verify_report_execution,
 )
@@ -249,6 +250,7 @@ __all__ = [
     "compute_topological_order",
     "decimal6_to_micros",
     "derive_effective_state",
+    "derive_snapshot_restatement_history",
     "divide_count_by_count",
     "divide_money_by_count",
     "divide_money_by_money",

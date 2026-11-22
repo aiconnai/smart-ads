@@ -184,6 +184,15 @@ def _lstat_or_none(path: Path) -> os.stat_result | None:
         ) from exc
 
 
+def _stat_regular_or_none(path: Path) -> os.stat_result | None:
+    st = _lstat_or_none(path)
+    if st is None:
+        return None
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        raise ClosedValidationError(f"filesystem_object_store: symlink or non-regular file at {path}")
+    return st
+
+
 def _validate_non_symlink_dir(path: Path, *, create: bool, parents: bool) -> None:
     st = _lstat_or_none(path)
     if st is None:
@@ -191,7 +200,12 @@ def _validate_non_symlink_dir(path: Path, *, create: bool, parents: bool) -> Non
             raise ClosedValidationError(
                 f"filesystem_object_store: missing directory {path}"
             )
-        path.mkdir(parents=parents, exist_ok=True)
+        try:
+            path.mkdir(parents=parents, exist_ok=True)
+        except OSError as exc:
+            raise ClosedValidationError(
+                f"filesystem_object_store: failed to create directory {path}: {exc}"
+            ) from exc
         st = _lstat_or_none(path)
     if st is None or stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
         raise ClosedValidationError(
@@ -200,36 +214,20 @@ def _validate_non_symlink_dir(path: Path, *, create: bool, parents: bool) -> Non
 
 
 def _read_regular_nofollow(path: Path) -> bytes:
-    st = _lstat_or_none(path)
+    st = _stat_regular_or_none(path)
     if st is None:
-        raise ClosedValidationError(
-            f"filesystem_object_store: object missing at {path}"
-        )
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-        raise ClosedValidationError(
-            f"filesystem_object_store: symlink or non-regular file forbidden: {path}"
-        )
+        raise ClosedValidationError(f"filesystem_object_store: object missing at {path}")
     if st.st_size > _MAX_OBJECT_BYTES:
-        raise ClosedValidationError(
-            f"filesystem_object_store: file size {st.st_size} exceeds ceiling"
-        )
+        raise ClosedValidationError(f"filesystem_object_store: file size {st.st_size} exceeds ceiling")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
-        raise ClosedValidationError(
-            f"filesystem_object_store: failed to open {path}: {exc}"
-        ) from exc
+        raise ClosedValidationError(f"filesystem_object_store: failed to open {path}: {exc}") from exc
     try:
         fst = os.fstat(fd)
-        if (
-            not stat.S_ISREG(fst.st_mode)
-            or fst.st_ino != st.st_ino
-            or fst.st_dev != st.st_dev
-        ):
-            raise ClosedValidationError(
-                f"filesystem_object_store: inode changed during open on {path}"
-            )
+        if not stat.S_ISREG(fst.st_mode) or fst.st_ino != st.st_ino or fst.st_dev != st.st_dev:
+            raise ClosedValidationError(f"filesystem_object_store: inode changed during open on {path}")
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -241,15 +239,22 @@ def _read_regular_nofollow(path: Path) -> bytes:
                 raise ClosedValidationError("filesystem_object_store: oversized read")
             chunks.append(chunk)
         return b"".join(chunks)
+    except OSError as exc:
+        raise ClosedValidationError(f"filesystem_object_store: read error on {path}: {exc}") from exc
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
-def _atomic_write_readonly_blob(sha_dir: Path, target: Path, raw: bytes) -> None:
-    fd, tmp_name = tempfile.mkstemp(prefix=".tmp-cas-", dir=str(sha_dir))
+def _atomic_write_readonly_blob(sha_dir: Path, target: Path, raw: bytes) -> bool:
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".tmp-cas-", dir=str(sha_dir))
+    except OSError as exc:
+        raise ClosedValidationError(f"filesystem_object_store: mkstemp failed in {sha_dir}: {exc}") from exc
     tmp_path = Path(tmp_name)
     closed = False
-    moved = False
     try:
         view = memoryview(raw)
         written = 0
@@ -259,17 +264,26 @@ def _atomic_write_readonly_blob(sha_dir: Path, target: Path, raw: bytes) -> None
         os.fchmod(fd, 0o444)
         os.close(fd)
         closed = True
-        if _lstat_or_none(target) is not None:
-            raise ClosedValidationError(
-                f"filesystem_object_store: concurrent or symlink target at {target}"
-            )
-        os.replace(tmp_path, target)
-        moved = True
+        try:
+            os.link(tmp_path, target)
+            return True
+        except FileExistsError:
+            return False
+    except OSError as exc:
+        raise ClosedValidationError(f"filesystem_object_store: write/link error on {target}: {exc}") from exc
     finally:
         if not closed:
-            os.close(fd)
-        if not moved and _lstat_or_none(tmp_path) is not None:
-            os.unlink(tmp_path)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if _lstat_or_none(tmp_path) is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise ClosedValidationError(f"filesystem_object_store: unlink failed on {tmp_path}: {exc}") from exc
 
 
 class FilesystemCellObjectStore(CellObjectStorePort):
@@ -290,35 +304,30 @@ class FilesystemCellObjectStore(CellObjectStorePort):
         _validate_non_symlink_dir(self._root, create=True, parents=True)
         _validate_non_symlink_dir(self._sha_dir, create=True, parents=False)
 
-    def _object_path(self, digest_hex: str) -> Path:
+    def _object_paths(self, digest_hex: str) -> tuple[Path, Path]:
         _validate_non_symlink_dir(self._root, create=False, parents=False)
         _validate_non_symlink_dir(self._sha_dir, create=False, parents=False)
-        return self._sha_dir / digest_hex
+        return self._sha_dir / digest_hex, self._sha_dir / f"{digest_hex}.json"
 
     def put_bytes(self, raw: bytes) -> str:
         checked = _require_raw_bytes(raw)
         digest_hex = _sha256_hex(checked)
         object_ref = f"cell-object:sha256:{digest_hex}"
-        target = self._object_path(digest_hex)
-        st = _lstat_or_none(target)
-        if st is not None:
+        target, json_target = self._object_paths(digest_hex)
+        st_c, st_j = _stat_regular_or_none(target), _stat_regular_or_none(json_target)
+        if st_c is not None or st_j is not None:
             existing = self.get_bytes(object_ref, expected_size_bytes=len(checked))
             if existing != checked:
-                raise ClosedValidationError(
-                    f"filesystem_object_store: byte mismatch at {target}"
-                )
+                raise ClosedValidationError(f"filesystem_object_store: byte mismatch at {target}")
             return object_ref
-        _atomic_write_readonly_blob(self._sha_dir, target, checked)
-        final_st = _lstat_or_none(target)
-        if final_st is None or stat.S_IMODE(final_st.st_mode) != 0o444:
-            raise ClosedValidationError(
-                f"filesystem_object_store: failed to enforce 0o444 mode on {target}"
-            )
+        newly_linked = _atomic_write_readonly_blob(self._sha_dir, target, checked)
+        if newly_linked:
+            final_st = _stat_regular_or_none(target)
+            if final_st is None or stat.S_IMODE(final_st.st_mode) != 0o444:
+                raise ClosedValidationError(f"filesystem_object_store: failed to enforce 0o444 mode on {target}")
         verified = self.get_bytes(object_ref, expected_size_bytes=len(checked))
         if verified != checked:
-            raise ClosedValidationError(
-                f"filesystem_object_store: post-write readback mismatch on {target}"
-            )
+            raise ClosedValidationError(f"filesystem_object_store: post-write readback mismatch on {target}")
         return object_ref
 
     def get_bytes(
@@ -327,25 +336,32 @@ class FilesystemCellObjectStore(CellObjectStorePort):
         checked_ref, digest_hex, exp_size = _parse_object_ref(
             object_ref, expected_size_bytes=expected_size_bytes
         )
-        target = self._object_path(digest_hex)
-        raw = _read_regular_nofollow(target)
+        target, json_target = self._object_paths(digest_hex)
+        st_c, st_j = _stat_regular_or_none(target), _stat_regular_or_none(json_target)
+        if st_c is None and st_j is None:
+            raise ClosedValidationError(f"filesystem_object_store: object missing at {target}")
+        if st_c is not None and st_j is not None:
+            raw_c = _verify_object_bytes(_read_regular_nofollow(target), object_ref=checked_ref, expected_hex=digest_hex, expected_size_bytes=exp_size)
+            raw_j = _verify_object_bytes(_read_regular_nofollow(json_target), object_ref=checked_ref, expected_hex=digest_hex, expected_size_bytes=exp_size)
+            if raw_c != raw_j:
+                raise ClosedValidationError(f"filesystem_object_store: dual-path divergence on {checked_ref!r}")
+            return raw_c
+        chosen = target if st_c is not None else json_target
         return _verify_object_bytes(
-            raw,
+            _read_regular_nofollow(chosen),
             object_ref=checked_ref,
             expected_hex=digest_hex,
             expected_size_bytes=exp_size,
         )
 
     def has_object(self, object_ref: str) -> bool:
-        _, digest_hex, _ = _parse_object_ref(object_ref)
-        target = self._object_path(digest_hex)
-        st = _lstat_or_none(target)
-        if st is None:
+        checked_ref, digest_hex, _ = _parse_object_ref(object_ref)
+        target, json_target = self._object_paths(digest_hex)
+        st_c, st_j = _stat_regular_or_none(target), _stat_regular_or_none(json_target)
+        if st_c is None and st_j is None:
             return False
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-            raise ClosedValidationError(
-                f"filesystem_object_store: symlink or non-regular file at {target}"
-            )
+        if st_c is not None and st_j is not None:
+            self.get_bytes(checked_ref)
         return True
 
     def put_json_artifact(
