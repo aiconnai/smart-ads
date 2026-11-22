@@ -159,6 +159,9 @@ def verify_operational_read_evidence(
         or (result.normalized_fact_set, result.normalized_fact_set_digest, fresh_ev.normalized_fact_set_digest) != (completeness.normalized_fact_set, completeness.normalized_fact_set_digest, completeness.normalized_fact_set_digest)
     ):
         raise ClosedValidationError(f"operational_read_evidence: completeness status {completeness.status!r} != 'complete'")
+    projected = tuple(sorted((project_collection_fact_to_landing_row(f, result.retrieval_context, query_currency=admitted.currency) for f in result.normalized_fact_set), key=lambda r: r.candidate_sort_key_jcs()))
+    if projected != result.candidates:
+        raise ClosedValidationError("operational_read_evidence: candidate projection mismatch")
     _verify_operational_effect_chain(fresh_ev, admitted, store=checked_store, require_signed=require_signed)
     return admitted, result
 
@@ -185,16 +188,13 @@ def _derive_bijective_candidates(
         ev = _load_p1(store, ev_loc, OperationalReadEvidence, field_name="operational_read_evidence_locators[]", require_signed=require_signed)
         if ev.migration_run_context_locator != run_loc:
             raise ClosedValidationError("sanitized_candidate_fact_set: cross-run OperationalReadEvidence is forbidden")
-        admitted, result = verify_operational_read_evidence(ev, store=store, require_signed=require_signed)
+        _, result = verify_operational_read_evidence(ev, store=store, require_signed=require_signed)
         res_key = canonicalize_jcs(ev.collection_result_locator.to_dict())
         if res_key in seen_res_keys:
             raise ClosedValidationError("sanitized_candidate_fact_set: duplicate collection_result_locator breaks 1-to-1 bijection")
         seen_res_keys.add(res_key)
         res_locs.append(ev.collection_result_locator)
-        projected = tuple(sorted((project_collection_fact_to_landing_row(f, result.retrieval_context, query_currency=admitted.currency) for f in (result.normalized_fact_set or ())), key=lambda r: r.candidate_sort_key_jcs()))
-        if projected != result.candidates:
-            raise ClosedValidationError("sanitized_candidate_fact_set: candidate projection mismatch")
-        for row in projected:
+        for row in result.candidates:
             _merge_unique_row_by_k(rows_by_k, row, label="sanitized_candidate_fact_set")
     sorted_src_locs = sort_artifact_locators(res_locs, expected_type=CollectionResult.SCHEMA, allow_empty=False, field_name="source_collection_result_locators")
     return sorted_src_locs, order_candidates(pair[0] for pair in rows_by_k.values())
@@ -438,8 +438,9 @@ def _verify_manifest_curation_and_parent(
 ) -> tuple[CurationExecution, SanitizedCandidateFactSet, tuple[GenerationManifest, ...]]:
     curation = _load_p1(store, manifest.curation_execution_locator, CurationExecution, field_name="manifest.curation_execution_locator", require_signed=require_signed)
     candidate_set, base_catalog, hist_manifests = verify_curation_execution(curation, store=store, require_signed=require_signed)
-    if (manifest.migration_run_context_locator, manifest.base_dataset_catalog_locator, manifest.operational_read_evidence_locators) != (curation.migration_run_context_locator, curation.base_dataset_catalog_locator, candidate_set.operational_read_evidence_locators):
-        raise ClosedValidationError("generation_manifest: run, base catalog, or evidence mismatch")
+    target_pk = _validate_candidates_in_single_partition_window(candidate_set.candidates, curation.curation_window)
+    if (manifest.partition_key, manifest.migration_run_context_locator, manifest.base_dataset_catalog_locator, manifest.operational_read_evidence_locators) != (target_pk, curation.migration_run_context_locator, curation.base_dataset_catalog_locator, candidate_set.operational_read_evidence_locators):
+        raise ClosedValidationError("generation_manifest: partition_key, run, base catalog, or evidence mismatch")
     _check_parent_against_base_catalog(base_catalog, manifest.partition_key, manifest.parent_generation_manifest_locator)
     return curation, candidate_set, hist_manifests
 
@@ -540,26 +541,28 @@ def _verify_generation_for_cas(
         return
     _verify_manifest_curation_and_parent(manifest, store=store, require_signed=require_signed)
     for pq_loc in manifest.parquet_object_locators:
+        if pq_loc.partition_key != manifest.partition_key:
+            raise ClosedValidationError("generation_manifest: Parquet locator partition_key mismatch")
         raw_pq = store.get_bytes(pq_loc.object_ref, expected_size_bytes=pq_loc.size_bytes)
-        if "sha256:" + hashlib.sha256(raw_pq).hexdigest() != pq_loc.physical_parquet_digest:
-            raise ClosedValidationError("generation_manifest: Parquet SHA-256 mismatch")
+        if len(raw_pq) != pq_loc.size_bytes or "sha256:" + hashlib.sha256(raw_pq).hexdigest() != pq_loc.physical_parquet_digest:
+            raise ClosedValidationError("generation_manifest: Parquet SHA-256 or size mismatch")
 
 
 def _build_cut_envelopes(
     *, old_loc: ArtifactLocator, old_cat: DatasetCatalog, new_gen: GenerationManifest, gen_man_loc: ArtifactLocator,
     cut_id: str, cas_linearization_id: str, committed_at_utc: str, new_catalog_id: str,
     genesis_record_locator: ArtifactLocator | None, consumption_integrity: P1Integrity | None,
-    catalog_integrity: P1Integrity | None, receipt_integrity: P1Integrity | None,
+    catalog_integrity: P1Integrity | None, receipt_integrity: P1Integrity | None, require_signed: bool = False,
 ) -> tuple[DatasetCatalog, ArtifactLocator, DatasetCatalogGenesisConsumptionRecord | None, DatasetCatalogCutReceipt]:
     op, seq, new_heads = _expected_catalog_transition(old_cat, old_loc, new_gen, gen_man_loc)
-    new_catalog = DatasetCatalog(new_catalog_id, old_cat.cell_ref, old_cat.catalog_epoch + 1, committed_at_utc, new_heads, catalog_integrity)
+    new_catalog = _reparse_p1(DatasetCatalog(new_catalog_id, old_cat.cell_ref, old_cat.catalog_epoch + 1, committed_at_utc, new_heads, catalog_integrity), DatasetCatalog, label="new_catalog", require_signed=require_signed)
     new_cat_loc = new_catalog.locator()
-    cons_rec = None if genesis_record_locator is None else DatasetCatalogGenesisConsumptionRecord(
-        genesis_record_locator, genesis_record_locator.content_digest, old_loc, old_loc.content_digest,
-        new_cat_loc, new_cat_loc.content_digest, cut_id, cas_linearization_id, committed_at_utc, consumption_integrity,
+    cons_rec = None if genesis_record_locator is None else _reparse_p1(
+        DatasetCatalogGenesisConsumptionRecord(genesis_record_locator, genesis_record_locator.content_digest, old_loc, old_loc.content_digest, new_cat_loc, new_cat_loc.content_digest, cut_id, cas_linearization_id, committed_at_utc, consumption_integrity),
+        DatasetCatalogGenesisConsumptionRecord, label="genesis_consumption", require_signed=require_signed,
     )
     cons_loc = None if cons_rec is None else cons_rec.locator()
-    receipt = DatasetCatalogCutReceipt(
+    raw_receipt = DatasetCatalogCutReceipt(
         cut_id=cut_id, cell_ref=old_cat.cell_ref, migration_run_context_locator=new_gen.migration_run_context_locator,
         old_catalog_locator=old_loc, old_catalog_digest=old_loc.content_digest, old_catalog_epoch=old_cat.catalog_epoch,
         new_catalog_locator=new_cat_loc, new_catalog_digest=new_cat_loc.content_digest, new_catalog_epoch=new_catalog.catalog_epoch,
@@ -568,7 +571,7 @@ def _build_cut_envelopes(
         genesis_record_locator=genesis_record_locator, genesis_record_digest=None if genesis_record_locator is None else genesis_record_locator.content_digest,
         genesis_consumption_locator=cons_loc, genesis_consumption_digest=None if cons_loc is None else cons_loc.content_digest, integrity=receipt_integrity,
     )
-    return new_catalog, new_cat_loc, cons_rec, receipt
+    return new_catalog, new_cat_loc, cons_rec, _reparse_p1(raw_receipt, DatasetCatalogCutReceipt, label="cut_receipt", require_signed=require_signed)
 
 
 class GlobalDatasetCatalogService:
@@ -641,7 +644,8 @@ class GlobalDatasetCatalogService:
             old_loc=self._head_locator, old_cat=self._head_catalog, new_gen=new_gen, gen_man_loc=gen_man_loc,
             cut_id=cut_id, cas_linearization_id=cas_linearization_id, committed_at_utc=committed_at_utc,
             new_catalog_id=new_catalog_id, genesis_record_locator=genesis_record_locator,
-            consumption_integrity=consumption_integrity, catalog_integrity=catalog_integrity, receipt_integrity=receipt_integrity,
+            consumption_integrity=consumption_integrity, catalog_integrity=catalog_integrity,
+            receipt_integrity=receipt_integrity, require_signed=self._require_signed,
         )
         self._store.put_json_artifact(DatasetCatalog.SCHEMA, new_catalog.to_dict())
         if cons_rec is not None and genesis_record_locator is not None:
@@ -673,7 +677,8 @@ def publish_dataset_snapshot(
     checked_store = _require_store_and_bool(store, False)
     checked_cut_loc = _typed_locator(cut_receipt_locator, field_name="cut_receipt_locator", expected_type=DatasetCatalogCutReceipt.SCHEMA)
     cut_receipt = _load_p1(checked_store, checked_cut_loc, DatasetCatalogCutReceipt, field_name="cut_receipt_locator")
-    _, new_catalog, _ = _verify_cut_receipt_metadata(cut_receipt, store=checked_store, require_signed=False)
+    _, new_catalog, new_gen = _verify_cut_receipt_metadata(cut_receipt, store=checked_store, require_signed=False)
+    _verify_generation_for_cas(new_gen, store=checked_store, parquet_codec=None, require_signed=False)
     snapshot = DatasetSnapshot(snapshot_id, new_catalog.catalog_epoch, cut_receipt.new_catalog_locator, checked_cut_loc, created_at, new_catalog.partition_heads, integrity=integrity)
     return snapshot, checked_store.put_json_artifact(DatasetSnapshot.SCHEMA, snapshot.to_dict())
 

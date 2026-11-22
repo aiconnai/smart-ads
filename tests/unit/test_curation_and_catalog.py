@@ -37,8 +37,9 @@ from smart_ads.domain import (
     PipeboardPhase1Contract, PipeboardTransportLimits,
 )
 from smart_ads.domain.catalog import (
-    DatasetCatalog, DatasetCatalogCutReceipt, DatasetCatalogGenesisConsumptionRecord,
-    DatasetCatalogGenesisRecord, DatasetSnapshot, GenerationManifest, compute_logical_rows_digest,
+    ActivePartitionHead, CatalogCasRequestProjection, DatasetCatalog, DatasetCatalogCutReceipt,
+    DatasetCatalogGenesisConsumptionRecord, DatasetCatalogGenesisRecord, DatasetSnapshot,
+    GenerationManifest, ParquetObjectLocator, compute_logical_rows_digest,
 )
 from smart_ads.domain.curation import CurationExecution, compute_curation_window
 
@@ -105,7 +106,7 @@ def _make_prereqs(purpose: CollectionPurpose) -> PurposePrerequisiteLocators:
 
 
 def _make_facts(
-    metric_date: str, *, clicks_val: str | None = "15", clicks_presence: str = "observed"
+    metric_date: str, *, clicks_val: str | None = "15", clicks_presence: str = "observed", spend_currency: str = "BRL"
 ) -> tuple[NormalizedCollectionFact, ...]:
     fk_c = FactKey("binding:meta-primary", "account:ibvi-01", _CAMP_A, "campaign", metric_date, "metric:clicks_v1", "source-metric:provider:pipeboard.clicks:v1", "attribution:not_applicable", "breakdown:none")
     fk_i = FactKey("binding:meta-primary", "account:ibvi-01", _CAMP_A, "campaign", metric_date, "metric:impressions_v1", "source-metric:provider:pipeboard.impressions:v1", "attribution:not_applicable", "breakdown:none")
@@ -117,7 +118,7 @@ def _make_facts(
         "count" if clicks_presence == "observed" else None, None,
     )
     f_i = NormalizedCollectionFact(fk_i, "observed", "int64_count", "200", "count", None)
-    f_s = NormalizedCollectionFact(fk_s, "observed", "int64_minor_currency", "5000", "minor_currency", "BRL")
+    f_s = NormalizedCollectionFact(fk_s, "observed", "int64_minor_currency", "5000", "minor_currency", spend_currency)
     return compute_normalized_fact_set_digest((f_c, f_i, f_s))[0]
 
 
@@ -376,6 +377,23 @@ def test_operational_read_evidence_happy_path_and_signed_enforcement(curation_wo
     )
     with pytest.raises(ClosedValidationError, match="ProviderCallTarget"):
         verify_operational_read_evidence(bad_deleg_ev, store=curation_world.store)
+
+    usd_facts = _make_facts("2026-11-10", spend_currency="USD")
+    _, usd_dig = compute_normalized_fact_set_digest(usd_facts)
+    usd_rctx = RetrievalContext("2026-11-11T03:02:00.000000Z", "observation:usd-01", "pipeboard-0.1.0", "1.0.0")
+    usd_cands = tuple(sorted((project_collection_fact_to_landing_row(f, usd_rctx, query_currency="USD") for f in usd_facts), key=lambda r: r.candidate_sort_key_jcs()))
+    usd_res = CollectionResult(
+        ev_u.admitted_collection_locator, ev_u.admitted_collection_digest, "operational", curation_world.reg_loc, curation_world.reg_loc.content_digest,
+        adm_u.requested_capabilities, adm_u.requested_capabilities, usd_rctx, _clean_transport(), usd_cands, usd_facts, usd_dig, (),
+    )
+    usd_res_loc = curation_world.store.put_json_artifact(CollectionResult.SCHEMA, usd_res.to_dict())
+    a3, r3, x3, c3, pf3 = curation_world.store_effect_chain(adm_u, ev_u.admitted_collection_locator, usd_res_loc, tag="usd-cur", signed=False)
+    usd_ev = dataclasses.replace(
+        ev_u, collection_result_locator=usd_res_loc, collection_result_digest=usd_res_loc.content_digest,
+        normalized_fact_set_digest=usd_dig, authorization_locator=a3, reservation_locator=r3, execution_locator=x3, consumption_locator=c3, effect_proof_locator=pf3,
+    )
+    with pytest.raises(ClosedValidationError, match="currency|projection"):
+        verify_operational_read_evidence(usd_ev, store=curation_world.store)
 
 
 def test_operational_read_evidence_rejects_7a_7b_partial_and_failed(curation_world: CurationWorld) -> None:
@@ -699,15 +717,67 @@ def test_signed_end_to_end_snapshot_and_call_side_rejection(curation_world: Cura
     cat_s = dataclasses.replace(cat_u, integrity=cat_int)
     cons_u = DatasetCatalogGenesisConsumptionRecord(gen_s_loc, gen_s_loc.content_digest, ep0_s_loc, ep0_s_loc.content_digest, cat_s.locator(), cat_s.locator().content_digest, "cut:s-1", "lin:s-1", "2026-11-11T03:07:00Z")
     cons_int = _signed_p1_for(cons_u.to_dict())
-    cons_s = dataclasses.replace(cons_u, integrity=cons_int)
-    svc_s = GlobalDatasetCatalogService(store, ep0_s_loc, parquet_codec=codec, require_signed=True)
+    signed_ledger: set[str] = set()
+    svc_s = GlobalDatasetCatalogService(store, ep0_s_loc, parquet_codec=codec, consumed_genesis_digests=signed_ledger, require_signed=True)
     _, _, rec_u, _ = GlobalDatasetCatalogService(store, ep0_s_loc, parquet_codec=codec).commit_partition_cut(cut_id="cut:s-1", cas_linearization_id="lin:s-1", committed_at_utc="2026-11-11T03:07:00Z", expected_old_catalog_locator=ep0_s_loc, expected_old_catalog_epoch=0, generation_manifest_locator=man_s_loc, new_catalog_id="catalog:s-1", genesis_record_locator=gen_s_loc, consumption_integrity=cons_int, catalog_integrity=cat_int)
+    for bad_cat_int, bad_cons_int, bad_rec_int in ((None, cons_int, _signed_p1_for(rec_u.to_dict())), (cat_int, _unsigned_p1(), None), (cat_int, cons_int, None)):
+        with pytest.raises(ClosedValidationError):
+            svc_s.commit_partition_cut(cut_id="cut:s-1", cas_linearization_id="lin:s-1", committed_at_utc="2026-11-11T03:07:00Z", expected_old_catalog_locator=ep0_s_loc, expected_old_catalog_epoch=0, generation_manifest_locator=man_s_loc, new_catalog_id="catalog:s-1", genesis_record_locator=gen_s_loc, consumption_integrity=bad_cons_int, catalog_integrity=bad_cat_int, receipt_integrity=bad_rec_int)
+    assert svc_s.current_head()[0] == ep0_s_loc and signed_ledger == set()
     _, _, _, rec_s_loc = svc_s.commit_partition_cut(cut_id="cut:s-1", cas_linearization_id="lin:s-1", committed_at_utc="2026-11-11T03:07:00Z", expected_old_catalog_locator=ep0_s_loc, expected_old_catalog_epoch=0, generation_manifest_locator=man_s_loc, new_catalog_id="catalog:s-1", genesis_record_locator=gen_s_loc, consumption_integrity=cons_int, catalog_integrity=cat_int, receipt_integrity=_signed_p1_for(rec_u.to_dict()))
     snap_u, _ = publish_dataset_snapshot(snapshot_id="snapshot:s-e2e", created_at="2026-11-11T03:08:00Z", cut_receipt_locator=rec_s_loc, store=store)
     snap_s, _ = publish_dataset_snapshot(snapshot_id="snapshot:s-e2e", created_at="2026-11-11T03:08:00Z", cut_receipt_locator=rec_s_loc, store=store, integrity=_signed_p1_for(snap_u.to_dict()))
     assert verify_dataset_snapshot(snap_s, store=store, parquet_codec=codec, require_signed=True) == snap_s
     with pytest.raises(ClosedValidationError):
         verify_dataset_snapshot(snap_u, store=store, parquet_codec=codec, require_signed=True)
+
+
+def test_codec_free_cas_and_snapshot_publish_reject_manifest_partition_mismatch(curation_world: CurationWorld) -> None:
+    man_valid, valid_man_loc = curation_world.build_genesis_generation(tag="cf-1", metric_date="2026-11-10")
+    raw_pq = curation_world.store.get_bytes(man_valid.parquet_object_locators[0].object_ref)
+    bad_pq_loc = ParquetObjectLocator.for_parquet_bytes("year=2026/month=12", raw_pq)
+    bad_man = GenerationManifest(
+        man_valid.migration_run_context_locator, "gen:bad-pk", "year=2026/month=12", None, man_valid.created_at_utc,
+        man_valid.row_count, man_valid.logical_rows_digest, man_valid.registry_snapshot_locator,
+        man_valid.curation_execution_locator, man_valid.base_dataset_catalog_locator,
+        man_valid.operational_read_evidence_locators, (bad_pq_loc,),
+    )
+    bad_man_loc = curation_world.store.put_json_artifact(GenerationManifest.SCHEMA, bad_man.to_dict())
+    cf_ledger: set[str] = set()
+    svc_cf = GlobalDatasetCatalogService(curation_world.store, curation_world.epoch0_loc, parquet_codec=None, consumed_genesis_digests=cf_ledger)
+    with pytest.raises(ClosedValidationError, match="partition_key"):
+        svc_cf.commit_partition_cut(
+            cut_id="cut:bad-pk", cas_linearization_id="lin:bad-pk", committed_at_utc="2026-11-11T03:07:00Z",
+            expected_old_catalog_locator=curation_world.epoch0_loc, expected_old_catalog_epoch=0,
+            generation_manifest_locator=bad_man_loc, new_catalog_id="catalog:bad-pk", genesis_record_locator=curation_world.genesis_loc,
+        )
+    assert svc_cf.current_head() == (curation_world.epoch0_loc, curation_world.epoch0_cat) and cf_ledger == set()
+    _, cf_cat_loc, _, _ = svc_cf.commit_partition_cut(
+        cut_id="cut:ok-cf", cas_linearization_id="lin:ok-cf", committed_at_utc="2026-11-11T03:07:00Z",
+        expected_old_catalog_locator=curation_world.epoch0_loc, expected_old_catalog_epoch=0,
+        generation_manifest_locator=valid_man_loc, new_catalog_id="catalog:ok-cf", genesis_record_locator=curation_world.genesis_loc,
+    )
+    assert svc_cf.current_head()[0] == cf_cat_loc
+
+    forged_cat = DatasetCatalog("catalog:forged-pk", "cell:ibvi-primary", 1, "2026-11-11T03:07:00Z", (ActivePartitionHead("year=2026/month=12", 1, bad_man_loc),))
+    forged_cat_loc = curation_world.store.put_json_artifact(DatasetCatalog.SCHEMA, forged_cat.to_dict())
+    forged_cons = DatasetCatalogGenesisConsumptionRecord(
+        curation_world.genesis_loc, curation_world.genesis_loc.content_digest, curation_world.epoch0_loc,
+        curation_world.epoch0_loc.content_digest, forged_cat_loc, forged_cat_loc.content_digest, "cut:forged", "lin:forged", "2026-11-11T03:07:00Z",
+    )
+    forged_cons_loc = curation_world.store.put_json_artifact(DatasetCatalogGenesisConsumptionRecord.SCHEMA, forged_cons.to_dict())
+    forged_rec = DatasetCatalogCutReceipt(
+        cut_id="cut:forged", cell_ref="cell:ibvi-primary", migration_run_context_locator=man_valid.migration_run_context_locator,
+        old_catalog_locator=curation_world.epoch0_loc, old_catalog_digest=curation_world.epoch0_loc.content_digest, old_catalog_epoch=0,
+        new_catalog_locator=forged_cat_loc, new_catalog_digest=forged_cat_loc.content_digest, new_catalog_epoch=1,
+        cas_request_projection=CatalogCasRequestProjection("add_partition", 0, curation_world.epoch0_loc.content_digest, "year=2026/month=12", 1, bad_man_loc),
+        cas_linearization_id="lin:forged", committed_at_utc="2026-11-11T03:07:00Z",
+        genesis_record_locator=curation_world.genesis_loc, genesis_record_digest=curation_world.genesis_loc.content_digest,
+        genesis_consumption_locator=forged_cons_loc, genesis_consumption_digest=forged_cons_loc.content_digest,
+    )
+    forged_rec_loc = curation_world.store.put_json_artifact(DatasetCatalogCutReceipt.SCHEMA, forged_rec.to_dict())
+    with pytest.raises(ClosedValidationError, match="partition_key"):
+        publish_dataset_snapshot(snapshot_id="snapshot:forged", created_at="2026-11-11T03:08:00Z", cut_receipt_locator=forged_rec_loc, store=curation_world.store)
 
 
 def test_application_package_reexports_all_curation_and_catalog_symbols() -> None:
