@@ -1319,7 +1319,8 @@ def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
         )
 
 
-_EXPECTED_31_CORE_SCHEMA_IDS = {
+_EXPECTED_54_CORE_SCHEMA_IDS = {
+    "smart_ads/active_partition_head/v1",
     "smart_ads/admitted_collection/v1",
     "smart_ads/analysis_execution/v1",
     "smart_ads/analysis_policy/v1",
@@ -1327,6 +1328,9 @@ _EXPECTED_31_CORE_SCHEMA_IDS = {
     "smart_ads/analysis_result_schema/v1",
     "smart_ads/analytics_landing_row/v1",
     "smart_ads/artifact_locator/v1",
+    "smart_ads/authorization_consumption_record/v1",
+    "smart_ads/authorization_receipt/v1",
+    "smart_ads/authorization_reservation_record/v1",
     "smart_ads/base_metric_definition/v1",
     "smart_ads/canonical_query_contract/v1",
     "smart_ads/canonical_result_set/v1",
@@ -1336,19 +1340,38 @@ _EXPECTED_31_CORE_SCHEMA_IDS = {
     "smart_ads/certification_7b_record/v1",
     "smart_ads/certification_record/v1",
     "smart_ads/collection_result/v1",
+    "smart_ads/curation_execution/v1",
+    "smart_ads/dataset_catalog/v1",
+    "smart_ads/dataset_catalog_cut_receipt/v1",
+    "smart_ads/dataset_catalog_genesis_consumption_record/v1",
+    "smart_ads/dataset_catalog_genesis_record/v1",
+    "smart_ads/dataset_snapshot/v1",
     "smart_ads/derived_metric_definition/v1",
+    "smart_ads/effect_proof/v1",
+    "smart_ads/execution_receipt/v1",
     "smart_ads/expected_resource_inventory/v1",
     "smart_ads/fact_evidence_selector/v1",
     "smart_ads/fact_reconciliation/v1",
     "smart_ads/finding/v1",
     "smart_ads/formula_bundle/v1",
+    "smart_ads/generation_manifest/v1",
     "smart_ads/git_artifact_provenance/v1",
     "smart_ads/native_request_projection/v1",
     "smart_ads/negative_security_test_report/v1",
     "smart_ads/normalized_collection_fact/v1",
+    "smart_ads/operational_read_evidence/v1",
+    "smart_ads/parquet_object_locator/v1",
     "smart_ads/pipeboard_phase1_contract/v1",
     "smart_ads/private_registry_snapshot/v1",
     "smart_ads/regression_fixture/v1",
+    "smart_ads/retention_release_proof/v1",
+    "smart_ads/retention_release_result/v1",
+    "smart_ads/retention_root/v1",
+    "smart_ads/retention_root_admission_proof/v1",
+    "smart_ads/retention_root_admission_result/v1",
+    "smart_ads/retention_root_set_cas_receipt/v1",
+    "smart_ads/retention_root_set_head/v1",
+    "smart_ads/sanitized_candidate_fact_set/v1",
     "smart_ads/semantic_observation_projection/v1",
     "smart_ads/tolerance_profile/v1",
 }
@@ -1357,9 +1380,9 @@ _EXPECTED_31_CORE_SCHEMA_IDS = {
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
     assert schema_ids == sorted(schema_ids, key=lambda s: s.encode("utf-8"))
-    assert len(schema_ids) == 31
+    assert len(schema_ids) == 54
     assert len(set(schema_ids)) == len(schema_ids)
-    assert set(schema_ids) == _EXPECTED_31_CORE_SCHEMA_IDS
+    assert set(schema_ids) == _EXPECTED_54_CORE_SCHEMA_IDS
 
     by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}
     for sid, desc in by_id.items():

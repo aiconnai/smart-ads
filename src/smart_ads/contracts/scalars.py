@@ -366,6 +366,22 @@ def parse_timestamp_utc_micros(
     return (((days * 24 + hour) * 60 + minute) * 60 + second) * 1_000_000 + micros
 
 
+def validate_envelope_timestamp_utc(
+    value: object,
+    *,
+    field_name: str = "timestamp",
+) -> str:
+    """Validate canonical whole-second or 6-digit microsecond UTC timestamp (`Z`)."""
+    if type(value) is not str:
+        raise ClosedValidationError(
+            f"{field_name}: expected UTC timestamp str, got {type(value).__name__}"
+        )
+    parse_timestamp_utc_micros(
+        value, field_name=field_name, allow_whole_seconds=True
+    )
+    return value
+
+
 __all__ = [
     "CANONICAL_RESOURCE_REF_RE",
     "ClosedValidationError",
@@ -375,6 +391,7 @@ __all__ = [
     "require_mapping",
     "validate_currency_iso4217",
     "validate_ed25519_key_id",
+    "validate_envelope_timestamp_utc",
     "validate_hex40",
     "validate_iso_date",
     "validate_non_empty_str",

@@ -697,6 +697,24 @@ ADR_P1_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
         "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
         "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
+        "smart_ads/sanitized_candidate_fact_set/v1": "SMART-ADS:SANITIZED-CANDIDATES:V1\n",
+        "smart_ads/curation_execution/v1": "SMART-ADS:CURATION:V1\n",
+        "smart_ads/generation_manifest/v1": "SMART-ADS:GENERATION:V1\n",
+        "smart_ads/dataset_catalog_genesis_record/v1": "SMART-ADS:DATASET-CATALOG-GENESIS:V1\n",
+        "smart_ads/dataset_catalog_genesis_consumption_record/v1": "SMART-ADS:DATASET-CATALOG-GENESIS-CONSUMPTION:V1\n",
+        "smart_ads/dataset_catalog/v1": "SMART-ADS:DATASET-CATALOG:V1\n",
+        "smart_ads/dataset_catalog_cut_receipt/v1": "SMART-ADS:DATASET-CATALOG-CUT:V1\n",
+        "smart_ads/dataset_snapshot/v1": "SMART-ADS:DATASET-SNAPSHOT:V1\n",
+        "smart_ads/analysis_replay_input_bundle/v1": "SMART-ADS:ANALYSIS-REPLAY-BUNDLE:V1\n",
+        "smart_ads/report_execution/v1": "SMART-ADS:REPORT-EXECUTION:V1\n",
+        "smart_ads/retention_root/v1": "SMART-ADS:RETENTION-ROOT:V1\n",
+        "smart_ads/retention_root_set_head/v1": "SMART-ADS:RETENTION-ROOT-SET:V1\n",
+        "smart_ads/retention_root_set_cas_receipt/v1": "SMART-ADS:RETENTION-ROOT-CAS:V1\n",
+        "smart_ads/retention_release_result/v1": "SMART-ADS:RETENTION-RELEASE-RESULT:V1\n",
+        "smart_ads/retention_release_proof/v1": "SMART-ADS:RETENTION-RELEASE:V1\n",
+        "smart_ads/retention_root_admission_result/v1": "SMART-ADS:RETENTION-ADMISSION-RESULT:V1\n",
+        "smart_ads/retention_root_admission_proof/v1": "SMART-ADS:RETENTION-ADMISSION:V1\n",
+        "smart_ads/operational_read_evidence/v1": "SMART-ADS:OPERATIONAL-READ-EVIDENCE:V1\n",
     }
 )
 
@@ -710,6 +728,7 @@ ADR_DATA_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "semantic_observation": "SMART-ADS:SEMANTIC-OBSERVATION:V1\n",
         "row": "SMART-ADS:ROW:V1\n",
         "logical_rows": "SMART-ADS:LOGICAL-ROWS:V1\n",
+        "parquet_object_set": "SMART-ADS:PARQUET-OBJECT-SET:V1\n",
     }
 )
 

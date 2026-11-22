@@ -24,7 +24,7 @@ import pytest
 
 import smart_ads
 from smart_ads.analytics import cells, certification, formulas, intelligence, lattice, policy, results
-from smart_ads.contracts import git_provenance, negative_security
+from smart_ads.contracts import effects, git_provenance, negative_security, operational_evidence, retention
 from smart_ads.contracts.jcs import (
     ADR_P1_DOMAIN_PREFIXES,
     ArtifactLocator,
@@ -33,8 +33,14 @@ from smart_ads.contracts.jcs import (
 )
 from smart_ads.contracts.numerics import PHASE1_BASE_METRICS
 from smart_ads.contracts.scalars import ClosedValidationError
-from smart_ads.contracts.schemas import CORE_SCHEMA_DESCRIPTORS
+from smart_ads.contracts.schemas import (
+    CORE_SCHEMA_DESCRIPTORS,
+    AnalyticsLandingRow,
+    DateRange,
+    FactKey,
+)
 import smart_ads.contracts.schemas as schemas_module
+from smart_ads.domain import catalog, curation
 from smart_ads.reconciliation import bundle_7b, tolerance
 import smart_ads.reconciliation.certification_7a as certification_7a
 from tests.unit._bundle_7b_builders import CLICKS, native_dict, profile_dict
@@ -57,6 +63,27 @@ P1_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/git_artifact_provenance/v1": git_provenance.GitArtifactProvenance,
     "smart_ads/negative_security_test_report/v1": negative_security.NegativeSecurityTestReport,
     "smart_ads/certification_7a_record/v1": certification_7a.Certification7ARecord,
+    "smart_ads/authorization_receipt/v1": effects.AuthorizationReceipt,
+    "smart_ads/authorization_reservation_record/v1": effects.AuthorizationReservationRecord,
+    "smart_ads/execution_receipt/v1": effects.ExecutionReceipt,
+    "smart_ads/authorization_consumption_record/v1": effects.AuthorizationConsumptionRecord,
+    "smart_ads/effect_proof/v1": effects.EffectProof,
+    "smart_ads/operational_read_evidence/v1": operational_evidence.OperationalReadEvidence,
+    "smart_ads/sanitized_candidate_fact_set/v1": operational_evidence.SanitizedCandidateFactSet,
+    "smart_ads/retention_root/v1": retention.RetentionRoot,
+    "smart_ads/retention_root_set_head/v1": retention.RetentionRootSetHead,
+    "smart_ads/retention_root_set_cas_receipt/v1": retention.RetentionRootSetCasReceipt,
+    "smart_ads/retention_root_admission_result/v1": retention.RetentionRootAdmissionResult,
+    "smart_ads/retention_root_admission_proof/v1": retention.RetentionRootAdmissionProof,
+    "smart_ads/retention_release_result/v1": retention.RetentionReleaseResult,
+    "smart_ads/retention_release_proof/v1": retention.RetentionReleaseProof,
+    "smart_ads/curation_execution/v1": curation.CurationExecution,
+    "smart_ads/generation_manifest/v1": catalog.GenerationManifest,
+    "smart_ads/dataset_catalog_genesis_record/v1": catalog.DatasetCatalogGenesisRecord,
+    "smart_ads/dataset_catalog_genesis_consumption_record/v1": catalog.DatasetCatalogGenesisConsumptionRecord,
+    "smart_ads/dataset_catalog/v1": catalog.DatasetCatalog,
+    "smart_ads/dataset_catalog_cut_receipt/v1": catalog.DatasetCatalogCutReceipt,
+    "smart_ads/dataset_snapshot/v1": catalog.DatasetSnapshot,
 }
 EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/regression_fixture/v1": lattice.RegressionFixtureV1,
@@ -64,11 +91,17 @@ EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/canonical_result_set/v1": results.CanonicalResultSet,
     "smart_ads/fact_evidence_selector/v1": bundle_7b.FactEvidenceSelector,
     "smart_ads/fact_reconciliation/v1": bundle_7b.FactReconciliation,
+    "smart_ads/parquet_object_locator/v1": catalog.ParquetObjectLocator,
+    "smart_ads/active_partition_head/v1": catalog.ActivePartitionHead,
 }
 PR2_SCHEMA_TYPES: dict[str, type] = {**P1_SCHEMA_TYPES, **EMBEDDED_SCHEMA_TYPES}
-# Embedded value objects of ADR section 5.4 L1133-1146 carry no `$schema` member on the wire.
+# Embedded value objects of ADR section 5.4 L1133-1146 and section 6.3 L1788-1799 carry no `$schema` member on the wire.
 SCHEMALESS_EMBEDDED = frozenset(
-    {"smart_ads/fact_evidence_selector/v1", "smart_ads/fact_reconciliation/v1"}
+    {
+        "smart_ads/fact_evidence_selector/v1",
+        "smart_ads/fact_reconciliation/v1",
+        "smart_ads/active_partition_head/v1",
+    }
 )
 
 # Module-level schema id constants that must agree with the class constant and the descriptor.
@@ -280,6 +313,96 @@ def _pr3_7a_instances() -> dict[str, Any]:
     }
 
 
+def _pr4_effect_and_evidence_instances() -> tuple[dict[str, Any], Any, Any]:
+    run_loc, adm_loc = _loc("smart_ads/migration_run_context/v1", "1"), _loc("smart_ads/admitted_collection/v1", "2")
+    reg_loc, inv_loc = _loc("smart_ads/private_registry_snapshot/v1", "3"), _loc("smart_ads/expected_resource_inventory/v1", "4")
+    res_loc, prov_loc = _loc("smart_ads/collection_result/v1", "5"), _loc("smart_ads/git_artifact_provenance/v1", "6")
+    subj = effects.ProviderCallTarget(run_loc, adm_loc, "operational", "provider-target:pipeboard-hosted", "sha256:" + ("7" * 64), reg_loc, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", _loc("smart_ads/ibvi_ads_delegation_context/v1", "8"))
+    auth = effects.AuthorizationReceipt("auth:op-001", run_loc, "provider_operational_read", "operational_provider_read_effect_proof", subj, "sha256:" + ("a" * 64), (adm_loc,), "principal:operator-01", "2026-11-11T03:00:00Z", "2026-11-11T04:00:00Z", "nonce-op-001", UNSIGNED)
+    auth_loc = auth.locator()
+    resv = effects.AuthorizationReservationRecord("resv:op-001", run_loc, auth_loc, auth_loc.content_digest, "nonce-op-001", "provider_operational_read", "operational_provider_read_effect_proof", subj, "consumed", None, "2026-11-11T03:01:00Z", UNSIGNED)
+    exec_rec = effects.ExecutionReceipt("exec:op-001", run_loc, auth_loc, resv.locator(), "nonce-op-001", "provider_operational_read", "operational_provider_read_effect_proof", subj, "succeeded", res_loc, "2026-11-11T03:02:00Z", UNSIGNED)
+    cons = effects.AuthorizationConsumptionRecord("cons:op-001", run_loc, auth_loc, auth_loc.content_digest, resv.locator(), exec_rec.locator(), "nonce-op-001", "provider_operational_read", "operational_provider_read_effect_proof", "consumed", "2026-11-11T03:03:00Z", UNSIGNED)
+    eff_proof = effects.EffectProof("proof:op-001", run_loc, "provider_operational_read", "operational_provider_read_effect_proof", auth_loc, resv.locator(), exec_rec.locator(), cons.locator(), res_loc, "2026-11-11T03:04:00Z", UNSIGNED)
+    op_ev = operational_evidence.OperationalReadEvidence(run_loc, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", "sha256:" + ("7" * 64), reg_loc, reg_loc.content_digest, inv_loc, adm_loc, adm_loc.content_digest, res_loc, res_loc.content_digest, "sha256:" + ("b" * 64), auth_loc, resv.locator(), exec_rec.locator(), cons.locator(), eff_proof.locator(), UNSIGNED)
+    alg_id = operational_evidence.AlgorithmProvenanceIdentity("algorithm:sanitizer-v1", "1.0.0", prov_loc, "aiconnai/smart-ads", "a" * 40, "src/smart_ads/application/curation_pipeline.py", "b" * 40, "sha256:" + ("c" * 64), "cpython-3.12", "smart_ads/sanitized_candidate_fact_set/v1")
+    row = AnalyticsLandingRow(FactKey("binding:meta-primary", "account:ibvi-01", "resource:" + ("a" * 52), "campaign", "2026-11-10", "metric:clicks_v1", "source-metric:provider:pipeboard.clicks:v1", "attribution:not_applicable", "breakdown:none"), "int64_count", "10", "count", None, "provider_observation", "observed", None, "not_applicable", "2026-11-11T03:02:00.000000Z", "observation:obs-001", "pipeboard-0.1.0", "1.0.0")
+    cand_set = operational_evidence.SanitizedCandidateFactSet(run_loc, alg_id, (res_loc,), (op_ev.locator(),), (row,), integrity=UNSIGNED)
+    out = {
+        "smart_ads/authorization_receipt/v1": auth,
+        "smart_ads/authorization_reservation_record/v1": resv,
+        "smart_ads/execution_receipt/v1": exec_rec,
+        "smart_ads/authorization_consumption_record/v1": cons,
+        "smart_ads/effect_proof/v1": eff_proof,
+        "smart_ads/operational_read_evidence/v1": op_ev,
+        "smart_ads/sanitized_candidate_fact_set/v1": cand_set,
+    }
+    return out, alg_id, row
+
+
+def _pr4_curation_and_catalog_instances(eff_ev: dict[str, Any], alg_id: Any, row: Any) -> tuple[dict[str, Any], Any]:
+    run_loc, reg_loc = _loc("smart_ads/migration_run_context/v1", "1"), _loc("smart_ads/private_registry_snapshot/v1", "3")
+    op_ev_loc = eff_ev["smart_ads/operational_read_evidence/v1"].locator()
+    cand_loc = eff_ev["smart_ads/sanitized_candidate_fact_set/v1"].locator()
+    epoch0_cat = catalog.DatasetCatalog("catalog:cell-0", "cell:ibvi-primary", 0, "2026-11-11T03:00:00Z", (), UNSIGNED)
+    gen_rec = catalog.DatasetCatalogGenesisRecord("genesis:cell-0", "cell:ibvi-primary", run_loc, epoch0_cat.locator(), epoch0_cat.locator().content_digest, "principal:bootstrap-authority", "2026-11-11T03:00:00Z", UNSIGNED)
+    cur_exec = curation.CurationExecution(run_loc, "curation:cur-001", "genesis", "2026-11-10", "America/Sao_Paulo", "2026a", 1, DateRange("2026-11-10", "2026-11-10", True), cand_loc, alg_id, gen_rec.locator(), epoch0_cat.locator(), None, None, (), "2026-11-11T03:05:00Z", UNSIGNED)
+    pq_loc = catalog.ParquetObjectLocator("year=2026/month=11", "sha256:" + ("d" * 64), 512)
+    _, logical_digest = catalog.compute_logical_rows_digest((row,))
+    gen_man = catalog.GenerationManifest(run_loc, "generation:gen-001", "year=2026/month=11", None, "2026-11-11T03:06:00Z", 1, logical_digest, reg_loc, cur_exec.locator(), epoch0_cat.locator(), (op_ev_loc,), (pq_loc,), integrity=UNSIGNED)
+    part_head = catalog.ActivePartitionHead("year=2026/month=11", 1, gen_man.locator())
+    epoch1_cat = catalog.DatasetCatalog("catalog:cell-1", "cell:ibvi-primary", 1, "2026-11-11T03:07:00Z", (part_head,), UNSIGNED)
+    gen_cons = catalog.DatasetCatalogGenesisConsumptionRecord(gen_rec.locator(), gen_rec.locator().content_digest, epoch0_cat.locator(), epoch0_cat.locator().content_digest, epoch1_cat.locator(), epoch1_cat.locator().content_digest, "cut:cut-001", "lin:cat-001", "2026-11-11T03:07:00Z", UNSIGNED)
+    cas_proj = catalog.CatalogCasRequestProjection("add_partition", 0, epoch0_cat.locator().content_digest, "year=2026/month=11", 1, gen_man.locator())
+    cut_rec = catalog.DatasetCatalogCutReceipt("cut:cut-001", "cell:ibvi-primary", run_loc, epoch0_cat.locator(), epoch0_cat.locator().content_digest, 0, epoch1_cat.locator(), epoch1_cat.locator().content_digest, 1, cas_proj, "lin:cat-001", "2026-11-11T03:07:00Z", gen_rec.locator(), gen_rec.locator().content_digest, gen_cons.locator(), gen_cons.locator().content_digest, UNSIGNED)
+    ds_snap = catalog.DatasetSnapshot("snapshot:snap-001", 1, epoch1_cat.locator(), cut_rec.locator(), "2026-11-11T03:08:00Z", (part_head,), integrity=UNSIGNED)
+    out = {
+        "smart_ads/curation_execution/v1": cur_exec,
+        "smart_ads/parquet_object_locator/v1": pq_loc,
+        "smart_ads/generation_manifest/v1": gen_man,
+        "smart_ads/active_partition_head/v1": part_head,
+        "smart_ads/dataset_catalog_genesis_record/v1": gen_rec,
+        "smart_ads/dataset_catalog_genesis_consumption_record/v1": gen_cons,
+        "smart_ads/dataset_catalog/v1": epoch1_cat,
+        "smart_ads/dataset_catalog_cut_receipt/v1": cut_rec,
+        "smart_ads/dataset_snapshot/v1": ds_snap,
+    }
+    return out, ds_snap
+
+
+def _pr4_retention_instances(ds_snap: Any) -> dict[str, Any]:
+    run_loc = _loc("smart_ads/migration_run_context/v1", "1")
+    snap_ref = ds_snap.locator().object_ref
+    ret_root = retention.RetentionRoot("root:snap-001", "cell:ibvi-primary", run_loc, ds_snap.locator(), (snap_ref,), "2026-11-11T03:09:00Z", integrity=UNSIGNED)
+    head0 = retention.RetentionRootSetHead("head:ret-0", "cell:ibvi-primary", 0, (), None, "2026-11-11T03:00:00Z", integrity=UNSIGNED)
+    head1 = retention.RetentionRootSetHead("head:ret-1", "cell:ibvi-primary", 1, (ret_root.locator(),), head0.locator(), "2026-11-11T03:10:00Z", integrity=UNSIGNED)
+    head2 = retention.RetentionRootSetHead("head:ret-2", "cell:ibvi-primary", 2, (), head1.locator(), "2026-11-11T03:12:00Z", integrity=UNSIGNED)
+    adm_proj = retention.RetentionRootSetCasRequestProjection("admit_roots", 0, head0.locator().content_digest, (ret_root.locator(),), head1.root_set_digest)
+    ret_cas = retention.RetentionRootSetCasReceipt("cas:ret-001", "cell:ibvi-primary", "admit_roots", adm_proj, head0.locator(), head0.locator().content_digest, 0, head1.locator(), head1.locator().content_digest, 1, "committed", "lin:ret-001", "2026-11-11T03:10:00Z", UNSIGNED)
+    adm_res = retention.RetentionRootAdmissionResult(run_loc, "cell:ibvi-primary", ret_cas.locator(), ret_cas.locator().content_digest, "lin:ret-001", head0.locator(), head0.locator().content_digest, head1.locator(), head1.locator().content_digest, (ret_root.locator(),), (snap_ref,), "admitted", "2026-11-11T03:10:00Z", UNSIGNED)
+    adm_proof = retention.RetentionRootAdmissionProof(run_loc, "cell:ibvi-primary", _loc("smart_ads/effect_proof/v1", "e"), adm_res.locator(), ret_cas.locator(), head0.locator(), head1.locator(), (ret_root.locator(),), (snap_ref,), "sha256:" + ("0" * 64), "sha256:" + ("1" * 64), "2026-11-11T03:11:00Z", UNSIGNED)
+    rel_proj = retention.RetentionRootSetCasRequestProjection("release_roots", 1, head1.locator().content_digest, (ret_root.locator(),), head2.root_set_digest)
+    rel_cas = retention.RetentionRootSetCasReceipt("cas:ret-002", "cell:ibvi-primary", "release_roots", rel_proj, head1.locator(), head1.locator().content_digest, 1, head2.locator(), head2.locator().content_digest, 2, "committed", "lin:ret-002", "2026-11-11T03:12:00Z", UNSIGNED)
+    rel_res = retention.RetentionReleaseResult(run_loc, "cell:ibvi-primary", rel_cas.locator(), rel_cas.locator().content_digest, "lin:ret-002", head1.locator(), head1.locator().content_digest, head2.locator(), head2.locator().content_digest, (ret_root.locator(),), (snap_ref,), "logically_unpinned", "2026-11-11T03:12:00Z", UNSIGNED)
+    rel_proof = retention.RetentionReleaseProof(run_loc, "cell:ibvi-primary", _loc("smart_ads/effect_proof/v1", "f"), rel_res.locator(), rel_cas.locator(), head1.locator(), head2.locator(), (ret_root.locator(),), (), (snap_ref,), (), "sha256:" + ("1" * 64), "sha256:" + ("0" * 64), True, "2026-11-11T03:13:00Z", UNSIGNED)
+    return {
+        "smart_ads/retention_root/v1": ret_root,
+        "smart_ads/retention_root_set_head/v1": head1,
+        "smart_ads/retention_root_set_cas_receipt/v1": ret_cas,
+        "smart_ads/retention_root_admission_result/v1": adm_res,
+        "smart_ads/retention_root_admission_proof/v1": adm_proof,
+        "smart_ads/retention_release_result/v1": rel_res,
+        "smart_ads/retention_release_proof/v1": rel_proof,
+    }
+
+
+def _pr4_instances() -> dict[str, Any]:
+    eff_ev, alg_id, row = _pr4_effect_and_evidence_instances()
+    cur_cat, ds_snap = _pr4_curation_and_catalog_instances(eff_ev, alg_id, row)
+    ret = _pr4_retention_instances(ds_snap)
+    return {**eff_ev, **cur_cat, **ret}
+
+
 @pytest.fixture(scope="module")
 def instances() -> dict[str, Any]:
     built = {
@@ -287,6 +410,7 @@ def instances() -> dict[str, Any]:
         **_formula_and_policy_instances(),
         **_reconciliation_instances(),
         **_pr3_7a_instances(),
+        **_pr4_instances(),
     }
     assert set(built) == set(PR2_SCHEMA_TYPES)
     for schema_id, obj in built.items():
@@ -297,13 +421,13 @@ def instances() -> dict[str, Any]:
 # ---------------------------------------------------------------- descriptor registry shape
 
 
-def test_registry_has_31_unique_descriptors_sorted_by_utf8_schema_id() -> None:
+def test_registry_has_54_unique_descriptors_sorted_by_utf8_schema_id() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
-    assert len(CORE_SCHEMA_DESCRIPTORS) == 31
+    assert len(CORE_SCHEMA_DESCRIPTORS) == 54
     assert len(set(schema_ids)) == len(schema_ids)
     assert schema_ids == _utf8_sorted(schema_ids)
     assert set(schema_ids) == PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)
-    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 18
+    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 41
 
 
 def test_every_descriptor_is_immutable_with_sorted_unique_fields() -> None:
@@ -388,21 +512,65 @@ def _declared_key_constants() -> list[tuple[str, frozenset[str], frozenset[str] 
         ("smart_ads/git_artifact_provenance/v1", frozenset(git_provenance.GitArtifactProvenance.KEYS), frozenset(git_provenance.GitArtifactProvenance.CORE_KEYS)),
         ("smart_ads/negative_security_test_report/v1", frozenset(negative_security.NegativeSecurityTestReport.KEYS), frozenset(negative_security.NegativeSecurityTestReport.CORE_KEYS)),
         ("smart_ads/certification_7a_record/v1", frozenset(certification_7a.Certification7ARecord.KEYS), frozenset(certification_7a.Certification7ARecord.CORE_KEYS)),
+        ("smart_ads/authorization_receipt/v1", frozenset(effects.AuthorizationReceipt.KEYS), frozenset(effects.AuthorizationReceipt.CORE_KEYS)),
+        ("smart_ads/authorization_reservation_record/v1", frozenset(effects.AuthorizationReservationRecord.KEYS), frozenset(effects.AuthorizationReservationRecord.CORE_KEYS)),
+        ("smart_ads/execution_receipt/v1", frozenset(effects.ExecutionReceipt.KEYS), frozenset(effects.ExecutionReceipt.CORE_KEYS)),
+        ("smart_ads/authorization_consumption_record/v1", frozenset(effects.AuthorizationConsumptionRecord.KEYS), frozenset(effects.AuthorizationConsumptionRecord.CORE_KEYS)),
+        ("smart_ads/effect_proof/v1", frozenset(effects.EffectProof.KEYS), frozenset(effects.EffectProof.CORE_KEYS)),
+        ("smart_ads/operational_read_evidence/v1", frozenset(operational_evidence.OperationalReadEvidence.KEYS), frozenset(operational_evidence.OperationalReadEvidence.CORE_KEYS)),
+        ("smart_ads/sanitized_candidate_fact_set/v1", frozenset(operational_evidence.SanitizedCandidateFactSet.KEYS), frozenset(operational_evidence.SanitizedCandidateFactSet.CORE_KEYS)),
+        ("smart_ads/retention_root/v1", frozenset(retention.RetentionRoot.KEYS), frozenset(retention.RetentionRoot.CORE_KEYS)),
+        ("smart_ads/retention_root_set_head/v1", frozenset(retention.RetentionRootSetHead.KEYS), frozenset(retention.RetentionRootSetHead.CORE_KEYS)),
+        ("smart_ads/retention_root_set_cas_receipt/v1", frozenset(retention.RetentionRootSetCasReceipt.KEYS), frozenset(retention.RetentionRootSetCasReceipt.CORE_KEYS)),
+        ("smart_ads/retention_root_admission_result/v1", frozenset(retention.RetentionRootAdmissionResult.KEYS), frozenset(retention.RetentionRootAdmissionResult.CORE_KEYS)),
+        ("smart_ads/retention_root_admission_proof/v1", frozenset(retention.RetentionRootAdmissionProof.KEYS), frozenset(retention.RetentionRootAdmissionProof.CORE_KEYS)),
+        ("smart_ads/retention_release_result/v1", frozenset(retention.RetentionReleaseResult.KEYS), frozenset(retention.RetentionReleaseResult.CORE_KEYS)),
+        ("smart_ads/retention_release_proof/v1", frozenset(retention.RetentionReleaseProof.KEYS), frozenset(retention.RetentionReleaseProof.CORE_KEYS)),
+        ("smart_ads/curation_execution/v1", frozenset(curation.CurationExecution.KEYS), frozenset(curation.CurationExecution.CORE_KEYS)),
+        ("smart_ads/generation_manifest/v1", frozenset(catalog.GenerationManifest.KEYS), frozenset(catalog.GenerationManifest.CORE_KEYS)),
+        ("smart_ads/dataset_catalog_genesis_record/v1", frozenset(catalog.DatasetCatalogGenesisRecord.KEYS), frozenset(catalog.DatasetCatalogGenesisRecord.CORE_KEYS)),
+        ("smart_ads/dataset_catalog_genesis_consumption_record/v1", frozenset(catalog.DatasetCatalogGenesisConsumptionRecord.KEYS), frozenset(catalog.DatasetCatalogGenesisConsumptionRecord.CORE_KEYS)),
+        ("smart_ads/dataset_catalog/v1", frozenset(catalog.DatasetCatalog.KEYS), frozenset(catalog.DatasetCatalog.CORE_KEYS)),
+        ("smart_ads/dataset_catalog_cut_receipt/v1", frozenset(catalog.DatasetCatalogCutReceipt.KEYS), frozenset(catalog.DatasetCatalogCutReceipt.CORE_KEYS)),
+        ("smart_ads/dataset_snapshot/v1", frozenset(catalog.DatasetSnapshot.KEYS), frozenset(catalog.DatasetSnapshot.CORE_KEYS)),
+        ("smart_ads/parquet_object_locator/v1", frozenset(catalog.ParquetObjectLocator.KEYS), None),
+        ("smart_ads/active_partition_head/v1", frozenset(catalog.ActivePartitionHead.KEYS), None),
         ("smart_ads/fact_evidence_selector/v1", frozenset(bundle_7b.FactEvidenceSelector.KEYS), None),
         ("smart_ads/fact_reconciliation/v1", frozenset(bundle_7b.FactReconciliation.KEYS), None),
     ]
 
 
-_PR3_P1_SCHEMA_IDS = frozenset(
+_PR3_AND_PR4_P1_SCHEMA_IDS = frozenset(
     {
         "smart_ads/git_artifact_provenance/v1",
         "smart_ads/negative_security_test_report/v1",
         "smart_ads/certification_7a_record/v1",
+        "smart_ads/authorization_receipt/v1",
+        "smart_ads/authorization_reservation_record/v1",
+        "smart_ads/execution_receipt/v1",
+        "smart_ads/authorization_consumption_record/v1",
+        "smart_ads/effect_proof/v1",
+        "smart_ads/operational_read_evidence/v1",
+        "smart_ads/sanitized_candidate_fact_set/v1",
+        "smart_ads/retention_root/v1",
+        "smart_ads/retention_root_set_head/v1",
+        "smart_ads/retention_root_set_cas_receipt/v1",
+        "smart_ads/retention_root_admission_result/v1",
+        "smart_ads/retention_root_admission_proof/v1",
+        "smart_ads/retention_release_result/v1",
+        "smart_ads/retention_release_proof/v1",
+        "smart_ads/curation_execution/v1",
+        "smart_ads/generation_manifest/v1",
+        "smart_ads/dataset_catalog_genesis_record/v1",
+        "smart_ads/dataset_catalog_genesis_consumption_record/v1",
+        "smart_ads/dataset_catalog/v1",
+        "smart_ads/dataset_catalog_cut_receipt/v1",
+        "smart_ads/dataset_snapshot/v1",
     }
 )
 
 
-@pytest.mark.parametrize("schema_id", sorted(_PR3_P1_SCHEMA_IDS))
+@pytest.mark.parametrize("schema_id", sorted(_PR3_AND_PR4_P1_SCHEMA_IDS))
 def test_p1_types_enforce_require_signed_roundtrip(
     schema_id: str, instances: dict[str, Any]
 ) -> None:

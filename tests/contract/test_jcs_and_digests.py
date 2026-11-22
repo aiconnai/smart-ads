@@ -38,6 +38,7 @@ from smart_ads.contracts import (
     sort_utf8_strings,
     validate_currency_iso4217,
     validate_ed25519_key_id,
+    validate_envelope_timestamp_utc,
     validate_hex40,
     validate_iso_date,
     validate_non_empty_str,
@@ -82,6 +83,7 @@ def test_contracts_package_reexports_public_api() -> None:
         "sort_utf8_strings",
         "validate_currency_iso4217",
         "validate_ed25519_key_id",
+        "validate_envelope_timestamp_utc",
         "validate_hex40",
         "validate_iso_date",
         "validate_non_empty_str",
@@ -642,8 +644,8 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         ADR_DATA_DOMAIN_PREFIXES,
         SUPPLEMENTAL_DOMAIN_PREFIXES,
     )
-    assert len(ADR_P1_DOMAIN_PREFIXES) == 39
-    assert len(ADR_DATA_DOMAIN_PREFIXES) == 8
+    assert len(ADR_P1_DOMAIN_PREFIXES) == 57
+    assert len(ADR_DATA_DOMAIN_PREFIXES) == 9
     assert len(SUPPLEMENTAL_DOMAIN_PREFIXES) == 2
 
     all_values: list[str] = []
@@ -656,9 +658,57 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
             assert prefix.startswith("SMART-ADS:") and prefix.endswith(":V1\n")
             all_values.append(prefix)
 
-    # All 49 prefix values across the 3 tables are pairwise disjoint
-    assert len(all_values) == 49
-    assert len(set(all_values)) == 49
+    # All 68 prefix values across the 3 tables are pairwise disjoint
+    assert len(all_values) == 68
+    assert len(set(all_values)) == 68
+
+
+_EXPECTED_ADR_PREFIX_GROUPS = (
+    {
+        "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
+        "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
+        "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
+        "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
+        "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
+    },
+    {
+        "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
+        "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
+        "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
+        "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
+        "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
+        "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
+        "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
+        "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
+        "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
+        "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
+    },
+    {
+        "smart_ads/git_artifact_provenance/v1": "SMART-ADS:GIT-ARTIFACT:V1\n",
+        "smart_ads/negative_security_test_report/v1": "SMART-ADS:NEGATIVE-SECURITY:V1\n",
+        "smart_ads/certification_7a_record/v1": "SMART-ADS:CERTIFICATION-7A:V1\n",
+    },
+    {
+        "smart_ads/sanitized_candidate_fact_set/v1": "SMART-ADS:SANITIZED-CANDIDATES:V1\n",
+        "smart_ads/curation_execution/v1": "SMART-ADS:CURATION:V1\n",
+        "smart_ads/generation_manifest/v1": "SMART-ADS:GENERATION:V1\n",
+        "smart_ads/dataset_catalog_genesis_record/v1": "SMART-ADS:DATASET-CATALOG-GENESIS:V1\n",
+        "smart_ads/dataset_catalog_genesis_consumption_record/v1": "SMART-ADS:DATASET-CATALOG-GENESIS-CONSUMPTION:V1\n",
+        "smart_ads/dataset_catalog/v1": "SMART-ADS:DATASET-CATALOG:V1\n",
+        "smart_ads/dataset_catalog_cut_receipt/v1": "SMART-ADS:DATASET-CATALOG-CUT:V1\n",
+        "smart_ads/dataset_snapshot/v1": "SMART-ADS:DATASET-SNAPSHOT:V1\n",
+        "smart_ads/analysis_replay_input_bundle/v1": "SMART-ADS:ANALYSIS-REPLAY-BUNDLE:V1\n",
+        "smart_ads/report_execution/v1": "SMART-ADS:REPORT-EXECUTION:V1\n",
+        "smart_ads/retention_root/v1": "SMART-ADS:RETENTION-ROOT:V1\n",
+        "smart_ads/retention_root_set_head/v1": "SMART-ADS:RETENTION-ROOT-SET:V1\n",
+        "smart_ads/retention_root_set_cas_receipt/v1": "SMART-ADS:RETENTION-ROOT-CAS:V1\n",
+        "smart_ads/retention_release_result/v1": "SMART-ADS:RETENTION-RELEASE-RESULT:V1\n",
+        "smart_ads/retention_release_proof/v1": "SMART-ADS:RETENTION-RELEASE:V1\n",
+        "smart_ads/retention_root_admission_result/v1": "SMART-ADS:RETENTION-ADMISSION-RESULT:V1\n",
+        "smart_ads/retention_root_admission_proof/v1": "SMART-ADS:RETENTION-ADMISSION:V1\n",
+        "smart_ads/operational_read_evidence/v1": "SMART-ADS:OPERATIONAL-READ-EVIDENCE:V1\n",
+    },
+)
 
 
 def test_domain_prefix_tables_match_adr_proposals() -> None:
@@ -672,42 +722,15 @@ def test_domain_prefix_tables_match_adr_proposals() -> None:
         row["schema"]: row["domain_prefix"]
         for row in decomposition_admission.profile_proposals(adr_bytes)
     }
-    expected_groups = (
-        {
-            "smart_ads/sealed_sandbox_profile/v1": "SMART-ADS:SANDBOX:V1\n",
-            "smart_ads/wheel_build_provenance/v1": "SMART-ADS:WHEEL-BUILD:V1\n",
-            "smart_ads/wheel_boundary_report/v1": "SMART-ADS:WHEEL-BOUNDARY:V1\n",
-            "smart_ads/mcp_rejection_matrix_report/v1": "SMART-ADS:MCP-REJECTION:V1\n",
-            "smart_ads/gov1_convergence_record/v1": "SMART-ADS:GOV1-CONVERGENCE:V1\n",
-        },
-        {
-            "smart_ads/formula_bundle/v1": "SMART-ADS:FORMULA-BUNDLE:V1\n",
-            "smart_ads/analysis_policy/v1": "SMART-ADS:ANALYSIS-POLICY:V1\n",
-            "smart_ads/analysis_result_schema/v1": "SMART-ADS:ANALYSIS-RESULT-SCHEMA:V1\n",
-            "smart_ads/analysis_result/v1": "SMART-ADS:ANALYSIS-RESULT:V1\n",
-            "smart_ads/analysis_execution/v1": "SMART-ADS:ANALYSIS-EXECUTION:V1\n",
-            "smart_ads/finding/v1": "SMART-ADS:FINDING:V1\n",
-            "smart_ads/certification_record/v1": "SMART-ADS:CERTIFICATION:V1\n",
-            "smart_ads/tolerance_profile/v1": "SMART-ADS:TOLERANCE:V1\n",
-            "smart_ads/native_request_projection/v1": "SMART-ADS:NATIVE-REQUEST:V1\n",
-            "smart_ads/certification_7b_record/v1": "SMART-ADS:CERTIFICATION-7B:V1\n",
-        },
-        {
-            "smart_ads/git_artifact_provenance/v1": "SMART-ADS:GIT-ARTIFACT:V1\n",
-            "smart_ads/negative_security_test_report/v1": "SMART-ADS:NEGATIVE-SECURITY:V1\n",
-            "smart_ads/certification_7a_record/v1": "SMART-ADS:CERTIFICATION-7A:V1\n",
-        },
-    )
-    for expected_map in expected_groups:
+    for expected_map in _EXPECTED_ADR_PREFIX_GROUPS:
         for schema, expected_prefix in expected_map.items():
             assert ADR_P1_DOMAIN_PREFIXES[schema] == expected_prefix
             assert proposals_by_schema[schema] == expected_prefix
 
-    assert (
-        ADR_DATA_DOMAIN_PREFIXES["7b_row_universe"]
-        == "SMART-ADS:7B-ROW-UNIVERSE:V1\n"
-    )
+    assert ADR_DATA_DOMAIN_PREFIXES["7b_row_universe"] == "SMART-ADS:7B-ROW-UNIVERSE:V1\n"
     assert b'UTF8("SMART-ADS:7B-ROW-UNIVERSE:V1\\n")' in adr_bytes
+    assert ADR_DATA_DOMAIN_PREFIXES["parquet_object_set"] == "SMART-ADS:PARQUET-OBJECT-SET:V1\n"
+    assert b'UTF8("SMART-ADS:PARQUET-OBJECT-SET:V1\\n")' in adr_bytes
 
 
 def test_mapping_and_scalar_validators() -> None:
@@ -869,3 +892,19 @@ def test_calendar_dates_and_utc_timestamps() -> None:
     )
     with pytest.raises(ClosedValidationError):
         parse_timestamp_utc_micros(ts_sec, allow_whole_seconds=False)
+
+
+def test_validate_envelope_timestamp_utc() -> None:
+    ts6 = "2026-11-11T03:00:00.500000Z"
+    ts_sec = "2026-11-11T03:00:00Z"
+    assert validate_envelope_timestamp_utc(ts_sec, field_name="ts") == ts_sec
+    assert validate_envelope_timestamp_utc(ts6, field_name="ts") == ts6
+    for bad_env_ts in (
+        "2026-11-11T03:00:00.500Z",
+        "2026-12-31T23:59:60Z",
+        "2026-11-11T03:00:00+00:00",
+        123,
+        None,
+    ):
+        with pytest.raises(ClosedValidationError):
+            validate_envelope_timestamp_utc(bad_env_ts, field_name="ts")
