@@ -152,7 +152,7 @@ def _validate_optional_integrity(value: object, *, label: str, require_signed: b
 _OTHER_ADR_STANDALONE_SCHEMAS: Final[frozenset[str]] = frozenset(
     f"smart_ads/{n}/v1"
     for n in (
-        "acceptance_profile artifact_contract_inventory business_calendar cell_trust_anchor_config "
+        "acceptance_profile artifact_contract_inventory business_calendar "
         "consumer_deployment_readback consumer_feature_flag_contract current_key_state current_key_state_head "
         "cutover_execution_result daily_acceptance_token decomposition_fork_adjudication decomposition_manifest "
         "decomposition_manifest_head delivery_mode_decision_receipt deployment_config_execution_result "
@@ -236,8 +236,8 @@ def _verify_visited_effect_proof(loc: ArtifactLocator, parsed: Any, *, store: Ce
     e_loc, c_loc = ArtifactLocator.from_dict(m["execution_locator"], expected_type=ExecutionReceipt.SCHEMA), ArtifactLocator.from_dict(m["consumption_locator"], expected_type=AuthorizationConsumptionRecord.SCHEMA)
     res_loc = ArtifactLocator.from_dict(m["action_result_locator"], expected_type=res_t)
     recs = [(_validate_non_pr4_effect_envelope(raw, sc, require_signed=require_signed), raw, sl, sc) for sl, sc in ((a_loc, AuthorizationReceipt), (r_loc, AuthorizationReservationRecord), (e_loc, ExecutionReceipt), (c_loc, AuthorizationConsumptionRecord)) for raw in (store.get_json_artifact(sl),)]
-    if any(ArtifactLocator.for_canonical_bytes(sc.SCHEMA, canonicalize_jcs(raw)) != sl for _, raw, sl, sc in recs):
-        raise ClosedValidationError(f"effect_proof[{loc.object_ref!r}]: linked record digest mismatch")
+    if any(not isinstance(rec, Mapping) or ArtifactLocator.for_canonical_bytes(sc.SCHEMA, canonicalize_jcs(raw)) != sl for rec, raw, sl, sc in recs):
+        raise ClosedValidationError(f"effect_proof[{loc.object_ref!r}]: cross-family or digest-mismatched linked record")
     ad, rd, ed, cd = (pair[0] for pair in recs)
     subj_jcs = canonicalize_jcs(ad["subject"])
     times = (_utc_micros(ad["issued_at_utc"]), _utc_micros(rd["reserved_at_utc"]), _utc_micros(ed["executed_at_utc"]), _utc_micros(cd["consumed_at_utc"]), _utc_micros(m["verified_at_utc"]))

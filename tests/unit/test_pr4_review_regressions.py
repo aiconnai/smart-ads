@@ -426,6 +426,7 @@ def test_shallow_002_rejects_standalone_embedded_locators_and_unprofiled_schemas
         (DuckDbBinaryObjectLocator.SCHEMA, DuckDbBinaryObjectLocator.for_binary_bytes(b"duck").to_dict()),
         (WheelObjectLocator.SCHEMA, WheelObjectLocator.for_wheel_bytes(b"whl").to_dict()),
         ("smart_ads/active_partition_head/v1", {"$schema": "smart_ads/active_partition_head/v1", "x": 1}),
+        ("smart_ads/cell_trust_anchor_config/v1", {"$schema": "smart_ads/cell_trust_anchor_config/v1", "anchors": []}),
         ("smart_ads/unprofiled_custom/v1", {"$schema": "smart_ads/unprofiled_custom/v1", "x": 1}),
     )
     for schema_id, payload in embedded_and_unknown:
@@ -583,4 +584,51 @@ def test_contracts_006_and_deep_1_003_dangling_predecessor_and_signed_in_doubt(
         if b'"resv:sgst"' in raw and b'"in_doubt"' in raw
     ]
     assert len(sgst_recs) == 1 and sgst_recs[0].integrity is not None and sgst_recs[0].integrity.is_signed
+
+
+def test_delta_001_cross_family_effect_proof_link_fails_closed_and_quarantines_in_doubt(
+    retention_world: RetentionWorld,
+) -> None:
+    from smart_ads.contracts import jcs_sha256
+    from smart_ads.contracts.effects import RetentionRootAdmissionTarget, sort_cell_object_refs
+    from smart_ads.contracts.retention import RetentionRoot, compute_root_locator_set_digest
+
+    rw = retention_world
+    cut_pf_loc = _put_prereq_effect_chain(
+        rw.store, rw.run_loc, rw.key_reg_loc, action="cutover_execution",
+        slot="cutover_effect_proof", subject_kind="cutover_target",
+        result_schema="smart_ads/cutover_execution_result/v1", tag="d001",
+    )
+    cut_pf_doc = rw.store.get_json_artifact(cut_pf_loc)
+    pr4_ev_doc = rw.store.get_json_artifact(rw.rep1.operational_read_evidence_locators[0])
+    pr4_auth_dict = pr4_ev_doc["authorization_locator"]
+    _, bad_pf_loc = _put_signed_envelope(rw.store, EffectProof.SCHEMA, {**cut_pf_doc, "authorization_locator": pr4_auth_dict}, rw.key_reg_loc)
+
+    with pytest.raises(ClosedValidationError, match="cross-family"):
+        compute_retention_reachability_graph((bad_pf_loc,), store=rw.store, parquet_codec=rw.codec)
+
+    pinned = sort_cell_object_refs({bad_pf_loc.object_ref, rw.run_loc.object_ref, rw.key_reg_loc.object_ref})
+    _, bad_root_loc = _put_signed_model(
+        rw.store, RetentionRoot("root:d001-bad", rw.cell_ref, rw.run_loc, bad_pf_loc, pinned, "2026-11-11T03:27:00Z"), rw.key_reg_loc,
+    )
+    svc = RetentionRootSetService(rw.store, rw.head0_loc, parquet_codec=rw.codec)
+    target = RetentionRootAdmissionTarget(
+        rw.run_loc, rw.cell_ref, rw.head0_loc, 0, rw.head0_loc.content_digest,
+        (bad_root_loc,), pinned, "sha256:" + ("0" * 64), "sha256:" + ("1" * 64),
+        compute_root_locator_set_digest((bad_root_loc,), allow_empty=False),
+    )
+    _, auth_loc = _put_signed_model(
+        rw.store,
+        AuthorizationReceipt("auth:d001", rw.run_loc, "retention_root_admission", "retention_root_admission_effect_proof", target, jcs_sha256(target.to_dict()), (), "principal:ret-01", "2026-11-11T03:30:00Z", "2026-11-11T04:30:00Z", "nonce-delta-001"),
+        rw.key_reg_loc,
+    )
+    with pytest.raises(ClosedValidationError, match="cross-family"):
+        svc.admit_roots(
+            authorization_locator=auth_loc, reservation_id="resv:d001", reserved_at_utc="2026-11-11T03:31:00Z",
+            cas_receipt_id="cas:d001", cas_linearization_id="lin:d001", committed_at_utc="2026-11-11T03:32:00Z",
+            new_head_id="head:d001", execution_id="exec:d001", consumption_id="cons:d001",
+            effect_proof_id="efp:d001", verified_at_utc="2026-11-11T03:33:00Z",
+        )
+    assert svc.reservation_status_for(auth_loc) == "in_doubt"
+    assert svc.current_head() == (rw.head0_loc, rw.head0)
 
