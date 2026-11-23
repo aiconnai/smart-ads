@@ -48,6 +48,15 @@ from smart_ads.transports.mcp.schemas import ALLOWED_MCP_METHODS
 
 _LEGACY_REPO: Final[str] = "mbras-tech/mbras-campaigns"
 _ALLOWED_SURFACES_SET: Final[frozenset[str]] = frozenset(ALLOWED_MCP_METHODS)
+_ACTIVE_PHASE1_SURFACES: Final[frozenset[str]] = frozenset({
+    "smart_ads.queries.get_campaign_performance_v1",
+    "smart_ads.queries.get_intelligence_findings_v1",
+    "smart_ads.reports.generate_recurrent_summary_v1",
+})
+_DEFERRED_PHASE1_SURFACES: Final[frozenset[str]] = frozenset({
+    "smart_ads.queries.get_adset_performance_v1",
+    "smart_ads.queries.get_ad_performance_v1",
+})
 
 
 def verify_legacy_seam_contract(
@@ -157,6 +166,33 @@ def _serialize_case_descriptor(case: SeamDualProjectionCase) -> dict[str, Any]:
     }
 
 
+def _validate_admitted_surface_wire_outcome(
+    surface_id: str,
+    case_id: str,
+    admitted_request: object,
+    canonical_wire: object,
+    legacy_wire: object,
+) -> None:
+    admitted_method = getattr(admitted_request, "method", None) if admitted_request is not None else None
+    if admitted_request is None or admitted_method != surface_id:
+        raise ClosedValidationError(
+            f"case[{case_id!r}]: pre-admission rejection or method mismatch ({admitted_method!r} != {surface_id!r})"
+        )
+    if not isinstance(canonical_wire, Mapping) or not isinstance(legacy_wire, Mapping):
+        raise ClosedValidationError(f"case[{case_id!r}]: canonical and legacy wire payloads must be JSON objects")
+    if surface_id in _ACTIVE_PHASE1_SURFACES:
+        if "result" not in canonical_wire or "error" in canonical_wire or "result" not in legacy_wire or "error" in legacy_wire:
+            raise ClosedValidationError(f"case[{case_id!r}]: active surface {surface_id!r} requires non-error result wire")
+        return
+    if surface_id in _DEFERRED_PHASE1_SURFACES:
+        for side_lbl, wire in (("canonical", canonical_wire), ("legacy", legacy_wire)):
+            err = wire.get("error")
+            if "error" not in wire or "result" in wire or not isinstance(err, Mapping) or type(err.get("code")) is not int or err.get("code") != -32603:
+                raise ClosedValidationError(f"case[{case_id!r}]: deferred surface {surface_id!r} requires {side_lbl} -32603 error")
+        return
+    raise ClosedValidationError(f"case[{case_id!r}]: unprofiled MCP surface {surface_id!r}")
+
+
 def _evaluate_single_surface_parity(
     surface: CompatibilitySurfaceSpec,
     cases: Sequence[SeamDualProjectionCase],
@@ -180,26 +216,18 @@ def _evaluate_single_surface_parity(
     canonical_projections: list[dict[str, Any]] = []
     for case in checked_cases:
         case_descriptors.append(_serialize_case_descriptor(case))
-        outcome = handle_mcp_request_bytes(
-            case.mcp_wire_request_bytes, case.mcp_runtime_context, handler=canonical_handler
-        )
-        if outcome.admitted_request is not None and outcome.admitted_request.method != surface.surface_id:
-            raise ClosedValidationError(f"case[{case.case_id!r}]: admitted MCP method != {surface.surface_id!r}")
+        outcome = handle_mcp_request_bytes(case.mcp_wire_request_bytes, case.mcp_runtime_context, handler=canonical_handler)
         canonical_wire = loads_strict_json(outcome.wire_bytes)
-        raw_legacy = legacy_projector.project_legacy_surface(
-            surface_id=surface.surface_id, mapping_contract_ref=surface.mapping_contract_ref, case=case
-        )
+        raw_legacy = legacy_projector.project_legacy_surface(surface_id=surface.surface_id, mapping_contract_ref=surface.mapping_contract_ref, case=case)
         legacy_wire = loads_strict_json(canonicalize_jcs(raw_legacy))
+        _validate_admitted_surface_wire_outcome(surface.surface_id, case.case_id, outcome.admitted_request, canonical_wire, legacy_wire)
         canonical_projections.append({"case_id": case.case_id, "projection": canonical_wire})
         legacy_projections.append({"case_id": case.case_id, "projection": legacy_wire})
     leg_digest = jcs_sha256(legacy_projections)
     can_digest = jcs_sha256(canonical_projections)
     if leg_digest != can_digest:
         raise ClosedValidationError(f"seam_parity[{surface.surface_id!r}]: legacy != canonical projection digest")
-    return SurfaceParityComparison(
-        surface.surface_id, surface.mapping_contract_ref, jcs_sha256(case_descriptors),
-        len(checked_cases), leg_digest, can_digest, True,
-    )
+    return SurfaceParityComparison(surface.surface_id, surface.mapping_contract_ref, jcs_sha256(case_descriptors), len(checked_cases), leg_digest, can_digest, True)
 
 
 def _evaluate_seam_dual_projections(

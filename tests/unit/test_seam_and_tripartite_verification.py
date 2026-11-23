@@ -670,6 +670,91 @@ def test_negative_matrix_across_decomposition_parity_readback_and_tripartite() -
         verify_tripartite_target(bad_target, expected_run_locator=run_loc, expected_active_decomposition_head_locator=head_loc, wheel_boundary_report_locator=can["bound_loc"], certification_7a_locator=can["cert7a_loc"], gov1_convergence_locator=can["conv_loc"], seam_raw_bytes=seam_bytes, conductor_raw_bytes=cons["cond_bytes"], routing_analyzer=analyzer, store=store, signature_verifier=verifier)
 
 
+def test_seam_parity_rejects_pre_admission_and_active_surface_error_outcomes() -> None:
+    store, verifier = InMemoryCellObjectStore(), FullDomainP1Verifier()
+    key_reg_loc = store.put_json_artifact("smart_ads/key_authorization_registry/v1", {"$schema": "smart_ads/key_authorization_registry/v1", "keys": [_KEY_ID]})
+    head_loc, manifest_loc, _, _ = _build_real_decomposition_artifacts(store, key_reg_loc)
+    run_loc, _, _ = _build_run_and_merge_artifacts(store, key_reg_loc, release_sha="e" * 40, reviewed_sha="d" * 40)
+    _, _, _, rel_loc, seam_bytes = _build_legacy_seam_artifacts(store, key_reg_loc, run_loc, head_loc, manifest_loc)
+    can = _build_canonical_chain_in_store(store, key_reg_loc, run_loc)
+    alg_p, alg_loc = _put_git_prov(store, key_reg_loc, "aiconnai/smart-ads", can["commit_sha"], "src/smart_ads/application/seam_parity.py", b"# seam")
+    seam_alg = AlgorithmProvenanceIdentity("algorithm:seam-parity-v1", "1.0.0", alg_loc, alg_p.repository, alg_p.commit_sha, alg_p.path, alg_p.git_blob_oid, alg_p.file_content_sha256, "cpython-3.12", SeamParityRecord.SCHEMA)
+    handler, cases = _build_mcp_cases_and_handler()
+    active_surf = "smart_ads.queries.get_campaign_performance_v1"
+    orig_case = cases[active_surf][0]
+
+    # (a) Pre-admission rejection (outcome.admitted_request is None) and wrong-method admitted request both fail closed:
+    pre_rej_wire = loads_strict_json(handle_mcp_request_bytes(orig_case.mcp_wire_request_bytes, None, handler=handler).wire_bytes)
+    findings_case = cases["smart_ads.queries.get_intelligence_findings_v1"][0]
+    for bad_case in (
+        SeamDualProjectionCase("case-pre-rej", active_surf, orig_case.mcp_wire_request_bytes, None, {"expected_wire": pre_rej_wire}),
+        SeamDualProjectionCase("case-wrong-method", active_surf, findings_case.mcp_wire_request_bytes, findings_case.mcp_runtime_context, findings_case.legacy_input_payload),
+    ):
+        with pytest.raises(ClosedValidationError):
+            build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface={**cases, active_surf: (bad_case,)}, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier)
+
+    # (b) Post-admission -32603 error on active surface fails closed even when legacy_projector returns matching -32603:
+    uncov_wire = canonicalize_jcs({"jsonrpc": "2.0", "id": "req-uncov", "method": active_surf, "params": {"tenant_ref": "tenant:ibvi", "binding_ref": "binding:meta-primary", "resource_scope_ref": "scope:campaigns-active", "date_range": {"start_date": "2026-01-01", "end_date": "2026-01-02"}}})
+    active_out = handle_mcp_request_bytes(uncov_wire, orig_case.mcp_runtime_context, handler=handler)
+    assert active_out.admitted_request is not None and loads_strict_json(active_out.wire_bytes)["error"]["code"] == -32603
+    err_cases = {**cases, active_surf: (SeamDualProjectionCase("case-err-32603", active_surf, uncov_wire, orig_case.mcp_runtime_context, {"expected_wire": loads_strict_json(active_out.wire_bytes)}),)}
+    with pytest.raises(ClosedValidationError):
+        build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface=err_cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier)
+
+
+def test_fix_round1_scope_digest_pre_seam_merge_and_sorted_record_digest() -> None:
+    store, verifier = InMemoryCellObjectStore(), FullDomainP1Verifier()
+    key_reg_loc = store.put_json_artifact("smart_ads/key_authorization_registry/v1", {"$schema": "smart_ads/key_authorization_registry/v1", "keys": [_KEY_ID]})
+    head_loc, manifest_loc, head_s, _ = _build_real_decomposition_artifacts(store, key_reg_loc)
+    run_loc, merge_loc, pol_dig = _build_run_and_merge_artifacts(store, key_reg_loc, release_sha="e" * 40, reviewed_sha="d" * 40)
+    can = _build_canonical_chain_in_store(store, key_reg_loc, run_loc)
+
+    # 1. Tampered head["scope_digest"] must fail closed against manifest.source_inventory.inventory_scope:
+    _, bad_scope_head = _put_signed_dict(store, {**head_s, "scope_digest": "sha256:" + ("f" * 64)}, key_reg_loc)
+    with pytest.raises(ClosedValidationError):
+        verify_stored_decomposition_tip(store, head_locator=bad_scope_head, expected_active_head_locator=bad_scope_head, manifest_locator=manifest_loc, expected_manifest_digest=manifest_loc.content_digest, signature_verifier=verifier)
+
+    # 2. All 5 pinned pre-seam historical mbras-tech/mbras-campaigns commits must be rejected as merge SHAs:
+    merge_raw = store.get_json_artifact(merge_loc)
+    for pre_seam_sha in ("d26c73d8508c7c3d43161fe36a80c44a46bf0f2d", "25cc756c5f46db9ee67f17844196c4301c977ad6", "b4d4537f4df56248df872c51ab3cd7e3d1aed098", "020d3e0c4a48ef9f059645eeb07968f68499c43b", "a26f055dc7f9a4847310f21d34ba019da87bcca6"):
+        _, bad_mrg_loc = _put_signed_dict(store, {**merge_raw, "protected_merge_sha": pre_seam_sha}, key_reg_loc)
+        with pytest.raises(ClosedValidationError):
+            verify_stored_legacy_merge_evidence(store, bad_mrg_loc, expected_repository="mbras-tech/mbras-campaigns", expected_protected_ref="main", expected_pr_number=77, expected_reviewed_head_sha="d" * 40, expected_protected_merge_sha=pre_seam_sha, expected_adr_git_identity=_ADR_IDENTITY, expected_branch_policy_digest=pol_dig, signature_verifier=verifier)
+
+    # 3. Tampered wheel_boundary_report["sorted_record_digest"] must fail closed:
+    _, bad_bound_loc = _put_signed_dict(store, {**can["bound_u"], "sorted_record_digest": "sha256:" + ("f" * 64)}, key_reg_loc)
+    w7a = build_valid_7a_world()
+    rec7a_bad, cert7a_bad = _put_signed_model(store, replace(w7a.record, migration_run_context_locator=run_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_boundary_report_locator=bad_bound_loc, wheel_digest=can["whl_obj"].wheel_digest, integrity=None), key_reg_loc)
+    _, conv_bad = _put_signed_dict(store, {**can["conv_u"], "wheel_boundary_report_locator": bad_bound_loc.to_dict(), "certification_7a_record_locator": cert7a_bad.to_dict()}, key_reg_loc)
+    with pytest.raises(ClosedValidationError):
+        verify_stored_canonical_build_chain(store, wheel_locator=can["whl_obj"], wheel_digest=can["whl_obj"].wheel_digest, build_provenance_locator=can["prov_loc"], wheel_boundary_report_locator=bad_bound_loc, certification_7a_locator=cert7a_bad, gov1_convergence_locator=conv_bad, expected_run_locator=run_loc, expected_commit_sha=can["commit_sha"], signature_verifier=verifier)
+
+
+def test_require_signed_false_accepts_unsigned_2key_integrity_with_verifier() -> None:
+    store, verifier = InMemoryCellObjectStore(), FullDomainP1Verifier()
+    key_reg_loc = store.put_json_artifact("smart_ads/key_authorization_registry/v1", {"$schema": "smart_ads/key_authorization_registry/v1", "keys": [_KEY_ID]})
+    g2_rec_loc = ArtifactLocator.from_digest("smart_ads/gate2_approval_receipt/v1", "sha256:" + ("5" * 64))
+    run_u = gov_artifacts.build_migration_run_context(gate2_receipt_locator=g2_rec_loc.to_dict(), approved_adr_git_identity=_ADR_IDENTITY, legacy_source_identity=gov_scope.LEGACY_SOURCE_IDENTITY, tenant_ref="tenant:ibvi", cell_ref="cell:ibvi-primary", run_id="run:unsigned-2key", created_at_utc="2026-11-10T00:00:00Z", key_registry_snapshot_locator=key_reg_loc.to_dict(), signer_key_id=_KEY_ID)
+    run_loc = store.put_json_artifact(str(run_u["$schema"]), run_u)
+    assert verify_stored_migration_run_context(store, run_loc, signature_verifier=verifier, require_signed=False)["run_id"] == "run:unsigned-2key"
+    assert verifier.verified_schemas == []
+
+    cond_bytes = b"# signed conductor policy\n"
+    _, cond_loc = _put_git_prov(store, key_reg_loc, "limaronaldo/hermes-ronaldo", "7" * 40, "conductor/ibvi_ads.py", cond_bytes)
+    unsigned_del = IbviAdsDelegationContract(run_loc, "limaronaldo/hermes-ronaldo", "7" * 40, cond_loc, "conductor:hermes", "front:pinna", "/ibvi-ads", "sha256:" + ("8" * 64), ALLOWED_MCP_METHODS, True, P1Integrity(_KEY_ID, key_reg_loc))
+    # Verify both in-memory unstored and stored unsigned 2-key model while verifying signed child provenance:
+    assert verify_ibvi_ads_delegation_contract(unsigned_del, conductor_raw_bytes=cond_bytes, store=store, signature_verifier=verifier, require_signed=False) == unsigned_del
+    del_u_loc = store.put_json_artifact(IbviAdsDelegationContract.SCHEMA, unsigned_del.to_dict())
+    assert verify_ibvi_ads_delegation_contract(del_u_loc, conductor_raw_bytes=cond_bytes, store=store, signature_verifier=verifier, require_signed=False) == unsigned_del
+    assert "smart_ads/git_artifact_provenance/v1" in verifier.verified_schemas
+    # Signed envelope with tampered signature STILL fails closed under require_signed=False when verifier supplied:
+    bad_sig = {**_sign_dict(run_u, key_reg_loc)}
+    bad_sig["integrity"] = {**bad_sig["integrity"], "signature_base64": base64.b64encode(b"\x00" * 64).decode("ascii")}
+    bad_sig_loc = store.put_json_artifact(str(bad_sig["$schema"]), bad_sig)
+    with pytest.raises(ClosedValidationError):
+        verify_stored_migration_run_context(store, bad_sig_loc, signature_verifier=verifier, require_signed=False)
+
+
 def test_task4_modules_pure_layer_ast_and_application_exports() -> None:
     expected_exports = (
         "build_seam_parity_record", "verify_consumer_deployment_readback", "verify_consumer_feature_flag_contract",

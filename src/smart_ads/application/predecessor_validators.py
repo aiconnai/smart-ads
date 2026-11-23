@@ -66,6 +66,13 @@ _ADR_REL_PATH: Final[str] = "docs/adr/ADR-0001-smart-ads-read-gateway.md"
 _LEGACY_REPO: Final[str] = "mbras-tech/mbras-campaigns"
 _LEGACY_COMMIT: Final[str] = "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d"
 _LEGACY_TREE: Final[str] = "68ff6d6dbd6d7ecaafa3bca7d5de85a54d705798"
+_PRE_SEAM_LEGACY_COMMITS: Final[frozenset[str]] = frozenset({
+    "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
+    "25cc756c5f46db9ee67f17844196c4301c977ad6",
+    "b4d4537f4df56248df872c51ab3cd7e3d1aed098",
+    "020d3e0c4a48ef9f059645eeb07968f68499c43b",
+    "a26f055dc7f9a4847310f21d34ba019da87bcca6",
+})
 _CANONICAL_REPO: Final[str] = "aiconnai/smart-ads"
 _CONSUMER_REPO: Final[str] = "limaronaldo/hermes-ronaldo"
 _POS_DEC_BYTES_RE: Final[re.Pattern[bytes]] = re.compile(rb"\A[1-9][0-9]*\Z")
@@ -189,7 +196,7 @@ def _load_verified_p1_dict(
         integ = P1Integrity.from_dict(m.get("integrity"), require_signed=checked_req)
         if integ.is_signed and integ.content_digest != p1_content_digest(m):
             raise ClosedValidationError(f"{label}.integrity.content_digest: Layer-2 preimage mismatch")
-        if checked_ver is not None:
+        if checked_ver is not None and (checked_req or integ.is_signed):
             _invoke_sig_verifier(checked_ver, envelope=m, domain_prefix=_domain_for_schema(expected_schema), store=checked_store)
     return dict(m)
 
@@ -226,7 +233,7 @@ def _load_verified_p1_model(
             checked_store, loc, expected_schema=schema_id, core_keys=None,
             signature_verifier=checked_ver, require_signed=checked_req, label=label,
         )
-    elif checked_ver is not None and (checked_req or "integrity" in raw_in):
+    elif checked_ver is not None and fresh.integrity is not None and (checked_req or fresh.integrity.is_signed):  # type: ignore[attr-defined]
         _invoke_sig_verifier(checked_ver, envelope=raw_in, domain_prefix=_domain_for_schema(schema_id), store=checked_store)
     return fresh
 
@@ -322,18 +329,10 @@ def _branch_matches_ref(protected_branch: str, expected_ref: str) -> bool:
 
 
 def verify_stored_legacy_merge_evidence(
-    store: CellObjectStorePort,
-    locator: ArtifactLocator,
-    *,
-    expected_repository: str,
-    expected_protected_ref: str,
-    expected_pr_number: int,
-    expected_reviewed_head_sha: str,
-    expected_protected_merge_sha: str,
-    expected_adr_git_identity: Mapping[str, Any],
-    expected_branch_policy_digest: str,
-    signature_verifier: P1SignatureVerifierPort | None = None,
-    require_signed: bool = True,
+    store: CellObjectStorePort, locator: ArtifactLocator, *, expected_repository: str, expected_protected_ref: str,
+    expected_pr_number: int, expected_reviewed_head_sha: str, expected_protected_merge_sha: str,
+    expected_adr_git_identity: Mapping[str, Any], expected_branch_policy_digest: str,
+    signature_verifier: P1SignatureVerifierPort | None = None, require_signed: bool = True,
 ) -> dict[str, Any]:
     """Verify stored `smart_ads/protected_merge_evidence/v1` for a legacy seam release."""
     raw = _load_verified_p1_dict(
@@ -352,6 +351,8 @@ def verify_stored_legacy_merge_evidence(
         raise ClosedValidationError("protected_merge_evidence.pr_number: mismatch")
     exp_rev = validate_hex40(_strict_str(expected_reviewed_head_sha, field_name="expected_reviewed_head_sha"), field_name="expected_reviewed_head_sha")
     exp_mrg = validate_hex40(_strict_str(expected_protected_merge_sha, field_name="expected_protected_merge_sha"), field_name="expected_protected_merge_sha")
+    if exp_mrg in _PRE_SEAM_LEGACY_COMMITS:
+        raise ClosedValidationError("protected_merge_evidence.protected_merge_sha: pre-seam historical commit reuse forbidden")
     if validate_hex40(_strict_str(raw["reviewed_head_sha"], field_name="reviewed_head_sha"), field_name="reviewed_head_sha") != exp_rev:
         raise ClosedValidationError("protected_merge_evidence.reviewed_head_sha: mismatch")
     if validate_hex40(_strict_str(raw["protected_merge_sha"], field_name="protected_merge_sha"), field_name="protected_merge_sha") != exp_mrg:
@@ -473,6 +474,8 @@ def verify_stored_decomposition_tip(
     _validate_decomposition_manifest_fields(
         manifest_dict, manifest_locator=checked_man_loc, update_kind=head_dict["update_kind"]
     )
+    if head_dict["scope_digest"] != jcs_sha256(manifest_dict["source_inventory"]["inventory_scope"]):
+        raise ClosedValidationError("decomposition_manifest_head.scope_digest: mismatch against inventory_scope")
     return head_dict, manifest_dict
 
 
@@ -611,6 +614,8 @@ def _verify_boundary_and_convergence_dicts(
     validate_sha256_prefixed(_strict_str(bound["sorted_record_digest"], field_name="bound.sorted_record_digest"), field_name="bound.sorted_record_digest")
     if type(bound["sorted_record_entries"]) is not list or not bound["sorted_record_entries"] or type(bound["packaged_modules"]) is not list or not bound["packaged_modules"]:
         raise ClosedValidationError("wheel_boundary_report: empty sorted_record_entries or packaged_modules")
+    if bound["sorted_record_digest"] != jcs_sha256(bound["sorted_record_entries"]):
+        raise ClosedValidationError("wheel_boundary_report.sorted_record_digest: mismatch against sorted_record_entries")
     validate_envelope_timestamp_utc(conv["converged_at_utc"], field_name="conv.converged_at_utc")
     if type(conv["convergence_status"]) is not str or conv["convergence_status"] not in {"PASS", "PASSED"}:
         raise ClosedValidationError(f"gov1_convergence_record.convergence_status: invalid {conv['convergence_status']!r}")
