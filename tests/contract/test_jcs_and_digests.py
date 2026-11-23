@@ -644,7 +644,7 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
         ADR_DATA_DOMAIN_PREFIXES,
         SUPPLEMENTAL_DOMAIN_PREFIXES,
     )
-    assert len(ADR_P1_DOMAIN_PREFIXES) == 57
+    assert len(ADR_P1_DOMAIN_PREFIXES) == 63
     assert len(ADR_DATA_DOMAIN_PREFIXES) == 9
     assert len(SUPPLEMENTAL_DOMAIN_PREFIXES) == 2
 
@@ -658,9 +658,9 @@ def test_domain_prefix_tables_immutable_and_pairwise_disjoint() -> None:
             assert prefix.startswith("SMART-ADS:") and prefix.endswith(":V1\n")
             all_values.append(prefix)
 
-    # All 68 prefix values across the 3 tables are pairwise disjoint
-    assert len(all_values) == 68
-    assert len(set(all_values)) == 68
+    # All 74 prefix values across the 3 tables are pairwise disjoint
+    assert len(all_values) == 74
+    assert len(set(all_values)) == 74
 
 
 _EXPECTED_ADR_PREFIX_GROUPS = (
@@ -707,6 +707,15 @@ _EXPECTED_ADR_PREFIX_GROUPS = (
         "smart_ads/retention_root_admission_result/v1": "SMART-ADS:RETENTION-ADMISSION-RESULT:V1\n",
         "smart_ads/retention_root_admission_proof/v1": "SMART-ADS:RETENTION-ADMISSION:V1\n",
         "smart_ads/operational_read_evidence/v1": "SMART-ADS:OPERATIONAL-READ-EVIDENCE:V1\n",
+    },
+    {
+        "smart_ads/legacy_seam_release/v1": "SMART-ADS:LEGACY-SEAM-RELEASE:V1\n",
+        "smart_ads/legacy_seam_contract/v1": "SMART-ADS:LEGACY-SEAM-CONTRACT:V1\n",
+        "smart_ads/seam_parity_record/v1": "SMART-ADS:SEAM-PARITY:V1\n",
+        "smart_ads/ibvi_ads_delegation_context/v1": "SMART-ADS:IBVI-ADS-DELEGATION-CONTEXT:V1\n",
+        "smart_ads/ibvi_ads_delegation_contract/v1": "SMART-ADS:IBVI-ADS-DELEGATION-CONTRACT:V1\n",
+        "smart_ads/consumer_feature_flag_contract/v1": "SMART-ADS:CONSUMER-FEATURE-FLAG:V1\n",
+        "smart_ads/consumer_deployment_readback/v1": "SMART-ADS:CONSUMER-DEPLOYMENT-READBACK:V1\n",
     },
 )
 

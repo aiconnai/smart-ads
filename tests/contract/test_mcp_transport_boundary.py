@@ -73,6 +73,7 @@ def test_mcp_package_constants_exports_and_no_json_loads() -> None:
         "RecurrentSummaryReportParams",
         "handle_mcp_request_bytes",
         "parse_mcp_wire_bytes",
+        "project_delegation_envelope_to_mcp_context",
         "serialize_jsonrpc_result",
         "validate_jsonrpc_request_envelope",
         "validate_mcp_method_params",

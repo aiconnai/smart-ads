@@ -23,32 +23,12 @@ from typing import Any
 import pytest
 
 import smart_ads
-from smart_ads.analytics import (
-    cells,
-    certification,
-    formulas,
-    intelligence,
-    lattice,
-    policy,
-    replay_bundle,
-    reporting,
-    results,
-)
-from smart_ads.contracts import effects, git_provenance, negative_security, operational_evidence, retention
-from smart_ads.contracts.jcs import (
-    ADR_P1_DOMAIN_PREFIXES,
-    ArtifactLocator,
-    P1Integrity,
-    p1_content_digest,
-)
+from smart_ads.analytics import cells, certification, formulas, intelligence, lattice, policy, replay_bundle, reporting, results
+from smart_ads.contracts import consumer, effects, git_provenance, negative_security, operational_evidence, retention, seam
+from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, p1_content_digest
 from smart_ads.contracts.numerics import PHASE1_BASE_METRICS
 from smart_ads.contracts.scalars import ClosedValidationError
-from smart_ads.contracts.schemas import (
-    CORE_SCHEMA_DESCRIPTORS,
-    AnalyticsLandingRow,
-    DateRange,
-    FactKey,
-)
+from smart_ads.contracts.schemas import CORE_SCHEMA_DESCRIPTORS, AnalyticsLandingRow, DateRange, FactKey
 import smart_ads.contracts.schemas as schemas_module
 from smart_ads.domain import catalog, curation
 from smart_ads.reconciliation import bundle_7b, tolerance
@@ -96,6 +76,13 @@ P1_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/dataset_snapshot/v1": catalog.DatasetSnapshot,
     "smart_ads/analysis_replay_input_bundle/v1": replay_bundle.AnalysisReplayInputBundle,
     "smart_ads/report_execution/v1": reporting.ReportExecution,
+    "smart_ads/legacy_seam_contract/v1": seam.LegacySeamContract,
+    "smart_ads/legacy_seam_release/v1": seam.LegacySeamRelease,
+    "smart_ads/seam_parity_record/v1": seam.SeamParityRecord,
+    "smart_ads/ibvi_ads_delegation_context/v1": consumer.IbviAdsDelegationContext,
+    "smart_ads/ibvi_ads_delegation_contract/v1": consumer.IbviAdsDelegationContract,
+    "smart_ads/consumer_feature_flag_contract/v1": consumer.ConsumerFeatureFlagContract,
+    "smart_ads/consumer_deployment_readback/v1": consumer.ConsumerDeploymentReadback,
 }
 EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/regression_fixture/v1": lattice.RegressionFixtureV1,
@@ -107,6 +94,7 @@ EMBEDDED_SCHEMA_TYPES: dict[str, type] = {
     "smart_ads/active_partition_head/v1": catalog.ActivePartitionHead,
     "smart_ads/duckdb_binary_object_locator/v1": replay_bundle.DuckDbBinaryObjectLocator,
     "smart_ads/duckdb_extension_binary_locator/v1": replay_bundle.DuckDbExtensionBinaryLocator,
+    "smart_ads/wheel_object_locator/v1": seam.WheelObjectLocator,
 }
 PR2_SCHEMA_TYPES: dict[str, type] = {**P1_SCHEMA_TYPES, **EMBEDDED_SCHEMA_TYPES}
 # Embedded value objects of ADR section 5.4 L1133-1146 and section 6.3 L1788-1799 carry no `$schema` member on the wire.
@@ -460,6 +448,31 @@ def _pr4_instances() -> dict[str, Any]:
     return {**eff_ev, **cur_cat, **ret, **rep}
 
 
+def _pr5_instances() -> dict[str, Any]:
+    run_loc, prov_loc = _loc("smart_ads/migration_run_context/v1", "1"), _loc("smart_ads/git_artifact_provenance/v1", "6")
+    dm_loc, dmh_loc = _loc("smart_ads/decomposition_manifest/v1", "2"), _loc("smart_ads/decomposition_manifest_head/v1", "3")
+    base_id = seam.LegacyBaselineIdentity()
+    rel_id = seam.GitReleaseIdentity("mbras-tech/mbras-campaigns", "e" * 40, "f" * 40)
+    alg_base = operational_evidence.AlgorithmProvenanceIdentity("algorithm:pr5-v1", "1.0.0", prov_loc, "aiconnai/smart-ads", "a" * 40, "src/smart_ads/contracts/seam.py", "b" * 40, "sha256:" + ("c" * 64), "cpython-3.12", seam.SeamParityRecord.SCHEMA)
+    surf = seam.CompatibilitySurfaceSpec("surface:campaign", "smart_ads/collection_result/v1", "smart_ads/analytics_landing_row/v1", "mapping:campaign-v1")
+    seam_con = seam.LegacySeamContract(run_loc, base_id, rel_id, dm_loc, dm_loc.content_digest, prov_loc, "sha256:" + ("5" * 64), "seam-v1", (surf,), UNSIGNED)
+    edge = seam.GitParentEdge(rel_id.commit_sha, base_id.commit_sha, "cell-object:sha256:" + ("7" * 64))
+    seam_art = seam.SeamGitArtifactRef("scripts/operator/seam.py", "1" * 40, "sha256:" + ("5" * 64), prov_loc)
+    seam_rel = seam.LegacySeamRelease(run_loc, base_id, "cell-object:sha256:" + ("8" * 64), dmh_loc, dm_loc, dm_loc.content_digest, rel_id, (edge,), "refs/heads/main", 1, "2" * 40, rel_id.commit_sha, _loc("smart_ads/protected_merge_evidence/v1", "b"), "sha256:" + ("c" * 64), seam_art, seam_con.locator(), seam_con.locator().content_digest, integrity=UNSIGNED)
+    cmp = seam.SurfaceParityComparison("surface:campaign", "mapping:campaign-v1", "sha256:" + ("1" * 64), 2, "sha256:" + ("e" * 64), "sha256:" + ("e" * 64), True)
+    seam_par = seam.SeamParityRecord(run_loc, seam_rel.locator(), seam_rel.locator().content_digest, seam_con.locator(), seam_con.locator().content_digest, dmh_loc, dm_loc, _loc("smart_ads/wheel_build_provenance/v1", "d"), "sha256:" + ("f" * 64), alg_base, "2026-11-12T12:00:00Z", (cmp,), "PASS", UNSIGNED)
+    del_ctx = consumer.IbviAdsDelegationContext("/ibvi-ads", "conductor:hermes", "front:pinna", "profile:pinna", "tenant:ibvi", "binding:meta-primary", "scope:campaigns-active", "smart_ads.queries.get_campaign_performance_v1", "sha256:" + ("7" * 64), "2026-11-12T12:00:00Z", "2026-11-12T12:15:00Z", "nonce-pr5-1", UNSIGNED)
+    methods = ("smart_ads.queries.get_ad_performance_v1", "smart_ads.queries.get_adset_performance_v1", "smart_ads.queries.get_campaign_performance_v1", "smart_ads.queries.get_intelligence_findings_v1", "smart_ads.reports.generate_recurrent_summary_v1")
+    del_con = consumer.IbviAdsDelegationContract(run_loc, "limaronaldo/hermes-ronaldo", "3" * 40, prov_loc, "conductor:hermes", "front:pinna", "/ibvi-ads", "sha256:" + ("7" * 64), methods, True, UNSIGNED)
+    adp_sha, ff_sha = "sha256:" + ("8" * 64), "sha256:" + ("9" * 64)
+    adp_ref = consumer.TripartiteGitArtifactRef("src/ibvi_ads/adapter.py", "4" * 40, adp_sha, prov_loc)
+    ff_ref = consumer.TripartiteGitArtifactRef("src/ibvi_ads/flags.py", "5" * 40, ff_sha, prov_loc)
+    ff_con = consumer.ConsumerFeatureFlagContract(run_loc, "limaronaldo/hermes-ronaldo", "3" * 40, adp_ref, ff_ref, "ibvi_ads.smart_ads_v1", False, "legacy:mbras_direct", "/ibvi-ads", (consumer.ReadEntrypointSelector("CampaignGateway.fetch", "smart_ads.queries.get_campaign_performance_v1"),), dataclasses.replace(alg_base, schema_id=consumer.ConsumerFeatureFlagContract.SCHEMA), del_con.locator(), UNSIGNED)
+    rb = consumer.ConsumerDeploymentReadback(run_loc, "limaronaldo/hermes-ronaldo", "3" * 40, _loc("smart_ads/deployment_config_execution_result/v1", "a"), "release:hermes-1", "sha256:" + ("b" * 64), _loc("smart_ads/clock_attestation/v1", "c"), "2026-11-12T12:05:00.000000Z", dataclasses.replace(alg_base, schema_id=consumer.ConsumerDeploymentReadback.SCHEMA), "sha256:" + ("d" * 64), adp_ref, f"cell-object:{adp_sha}", ff_ref, f"cell-object:{ff_sha}", "ibvi_ads.smart_ads_v1", False, "legacy:mbras_direct", "/ibvi-ads", ff_con.locator(), ff_con.locator().content_digest, del_con.locator(), del_con.locator().content_digest, integrity=UNSIGNED)
+    whl = seam.WheelObjectLocator.for_wheel_bytes(b"PK\x03\x04-pr5")
+    return {seam_con.SCHEMA: seam_con, seam_rel.SCHEMA: seam_rel, seam_par.SCHEMA: seam_par, del_ctx.SCHEMA: del_ctx, del_con.SCHEMA: del_con, ff_con.SCHEMA: ff_con, rb.SCHEMA: rb, whl.SCHEMA: whl}
+
+
 @pytest.fixture(scope="module")
 def instances() -> dict[str, Any]:
     built = {
@@ -468,6 +481,7 @@ def instances() -> dict[str, Any]:
         **_reconciliation_instances(),
         **_pr3_7a_instances(),
         **_pr4_instances(),
+        **_pr5_instances(),
     }
     assert set(built) == set(PR2_SCHEMA_TYPES)
     for schema_id, obj in built.items():
@@ -478,13 +492,13 @@ def instances() -> dict[str, Any]:
 # ---------------------------------------------------------------- descriptor registry shape
 
 
-def test_registry_has_58_unique_descriptors_sorted_by_utf8_schema_id() -> None:
+def test_registry_has_66_unique_descriptors_sorted_by_utf8_schema_id() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
-    assert len(CORE_SCHEMA_DESCRIPTORS) == 58
+    assert len(CORE_SCHEMA_DESCRIPTORS) == 66
     assert len(set(schema_ids)) == len(schema_ids)
     assert schema_ids == _utf8_sorted(schema_ids)
     assert set(schema_ids) == PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)
-    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 45
+    assert len(PRE_PR2_SCHEMA_IDS | set(PR2_SCHEMA_TYPES)) == 13 + 53
 
 
 def test_every_descriptor_is_immutable_with_sorted_unique_fields() -> None:
@@ -560,76 +574,51 @@ def test_embedded_descriptor_has_no_integrity_and_no_p1_prefix(schema_id: str) -
 def _declared_key_constants() -> list[tuple[str, frozenset[str], frozenset[str] | None]]:
     """(schema id, full key constant, core key constant or None) for types that declare them."""
     with_integrity = {"integrity"}
+    p1_with_keys: tuple[type[Any], ...] = (
+        policy.AnalysisPolicy, intelligence.Finding, certification.AnalyticalCertificationRecord,
+        git_provenance.GitArtifactProvenance, negative_security.NegativeSecurityTestReport,
+        certification_7a.Certification7ARecord, effects.AuthorizationReceipt,
+        effects.AuthorizationReservationRecord, effects.ExecutionReceipt,
+        effects.AuthorizationConsumptionRecord, effects.EffectProof,
+        operational_evidence.OperationalReadEvidence, operational_evidence.SanitizedCandidateFactSet,
+        retention.RetentionRoot, retention.RetentionRootSetHead, retention.RetentionRootSetCasReceipt,
+        retention.RetentionRootAdmissionResult, retention.RetentionRootAdmissionProof,
+        retention.RetentionReleaseResult, retention.RetentionReleaseProof, curation.CurationExecution,
+        catalog.GenerationManifest, catalog.DatasetCatalogGenesisRecord,
+        catalog.DatasetCatalogGenesisConsumptionRecord, catalog.DatasetCatalog,
+        catalog.DatasetCatalogCutReceipt, catalog.DatasetSnapshot,
+        replay_bundle.AnalysisReplayInputBundle, reporting.ReportExecution,
+        seam.LegacySeamContract, seam.LegacySeamRelease, seam.SeamParityRecord,
+        consumer.IbviAdsDelegationContext, consumer.IbviAdsDelegationContract,
+        consumer.ConsumerFeatureFlagContract, consumer.ConsumerDeploymentReadback,
+    )
+    embedded_with_keys: tuple[type[Any], ...] = (
+        catalog.ParquetObjectLocator, catalog.ActivePartitionHead,
+        replay_bundle.DuckDbBinaryObjectLocator, replay_bundle.DuckDbExtensionBinaryLocator,
+        bundle_7b.FactEvidenceSelector, bundle_7b.FactReconciliation, seam.WheelObjectLocator,
+    )
     return [
-        ("smart_ads/analysis_policy/v1", frozenset(policy.AnalysisPolicy.KEYS), frozenset(policy.AnalysisPolicy.CORE_KEYS)),
-        ("smart_ads/finding/v1", frozenset(intelligence.Finding.KEYS), frozenset(intelligence.Finding.CORE_KEYS)),
-        ("smart_ads/certification_record/v1", frozenset(certification.AnalyticalCertificationRecord.KEYS), frozenset(certification.AnalyticalCertificationRecord.CORE_KEYS)),
+        *((c.SCHEMA, frozenset(c.KEYS), frozenset(c.CORE_KEYS)) for c in p1_with_keys),
         ("smart_ads/native_request_projection/v1", frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS) | with_integrity, frozenset(bundle_7b.NativeRequestProjection.CORE_KEYS)),
         ("smart_ads/certification_7b_record/v1", frozenset(bundle_7b.Certification7BRecord.CORE_KEYS) | with_integrity, frozenset(bundle_7b.Certification7BRecord.CORE_KEYS)),
-        ("smart_ads/git_artifact_provenance/v1", frozenset(git_provenance.GitArtifactProvenance.KEYS), frozenset(git_provenance.GitArtifactProvenance.CORE_KEYS)),
-        ("smart_ads/negative_security_test_report/v1", frozenset(negative_security.NegativeSecurityTestReport.KEYS), frozenset(negative_security.NegativeSecurityTestReport.CORE_KEYS)),
-        ("smart_ads/certification_7a_record/v1", frozenset(certification_7a.Certification7ARecord.KEYS), frozenset(certification_7a.Certification7ARecord.CORE_KEYS)),
-        ("smart_ads/authorization_receipt/v1", frozenset(effects.AuthorizationReceipt.KEYS), frozenset(effects.AuthorizationReceipt.CORE_KEYS)),
-        ("smart_ads/authorization_reservation_record/v1", frozenset(effects.AuthorizationReservationRecord.KEYS), frozenset(effects.AuthorizationReservationRecord.CORE_KEYS)),
-        ("smart_ads/execution_receipt/v1", frozenset(effects.ExecutionReceipt.KEYS), frozenset(effects.ExecutionReceipt.CORE_KEYS)),
-        ("smart_ads/authorization_consumption_record/v1", frozenset(effects.AuthorizationConsumptionRecord.KEYS), frozenset(effects.AuthorizationConsumptionRecord.CORE_KEYS)),
-        ("smart_ads/effect_proof/v1", frozenset(effects.EffectProof.KEYS), frozenset(effects.EffectProof.CORE_KEYS)),
-        ("smart_ads/operational_read_evidence/v1", frozenset(operational_evidence.OperationalReadEvidence.KEYS), frozenset(operational_evidence.OperationalReadEvidence.CORE_KEYS)),
-        ("smart_ads/sanitized_candidate_fact_set/v1", frozenset(operational_evidence.SanitizedCandidateFactSet.KEYS), frozenset(operational_evidence.SanitizedCandidateFactSet.CORE_KEYS)),
-        ("smart_ads/retention_root/v1", frozenset(retention.RetentionRoot.KEYS), frozenset(retention.RetentionRoot.CORE_KEYS)),
-        ("smart_ads/retention_root_set_head/v1", frozenset(retention.RetentionRootSetHead.KEYS), frozenset(retention.RetentionRootSetHead.CORE_KEYS)),
-        ("smart_ads/retention_root_set_cas_receipt/v1", frozenset(retention.RetentionRootSetCasReceipt.KEYS), frozenset(retention.RetentionRootSetCasReceipt.CORE_KEYS)),
-        ("smart_ads/retention_root_admission_result/v1", frozenset(retention.RetentionRootAdmissionResult.KEYS), frozenset(retention.RetentionRootAdmissionResult.CORE_KEYS)),
-        ("smart_ads/retention_root_admission_proof/v1", frozenset(retention.RetentionRootAdmissionProof.KEYS), frozenset(retention.RetentionRootAdmissionProof.CORE_KEYS)),
-        ("smart_ads/retention_release_result/v1", frozenset(retention.RetentionReleaseResult.KEYS), frozenset(retention.RetentionReleaseResult.CORE_KEYS)),
-        ("smart_ads/retention_release_proof/v1", frozenset(retention.RetentionReleaseProof.KEYS), frozenset(retention.RetentionReleaseProof.CORE_KEYS)),
-        ("smart_ads/curation_execution/v1", frozenset(curation.CurationExecution.KEYS), frozenset(curation.CurationExecution.CORE_KEYS)),
-        ("smart_ads/generation_manifest/v1", frozenset(catalog.GenerationManifest.KEYS), frozenset(catalog.GenerationManifest.CORE_KEYS)),
-        ("smart_ads/dataset_catalog_genesis_record/v1", frozenset(catalog.DatasetCatalogGenesisRecord.KEYS), frozenset(catalog.DatasetCatalogGenesisRecord.CORE_KEYS)),
-        ("smart_ads/dataset_catalog_genesis_consumption_record/v1", frozenset(catalog.DatasetCatalogGenesisConsumptionRecord.KEYS), frozenset(catalog.DatasetCatalogGenesisConsumptionRecord.CORE_KEYS)),
-        ("smart_ads/dataset_catalog/v1", frozenset(catalog.DatasetCatalog.KEYS), frozenset(catalog.DatasetCatalog.CORE_KEYS)),
-        ("smart_ads/dataset_catalog_cut_receipt/v1", frozenset(catalog.DatasetCatalogCutReceipt.KEYS), frozenset(catalog.DatasetCatalogCutReceipt.CORE_KEYS)),
-        ("smart_ads/dataset_snapshot/v1", frozenset(catalog.DatasetSnapshot.KEYS), frozenset(catalog.DatasetSnapshot.CORE_KEYS)),
-        ("smart_ads/analysis_replay_input_bundle/v1", frozenset(replay_bundle.AnalysisReplayInputBundle.KEYS), frozenset(replay_bundle.AnalysisReplayInputBundle.CORE_KEYS)),
-        ("smart_ads/report_execution/v1", frozenset(reporting.ReportExecution.KEYS), frozenset(reporting.ReportExecution.CORE_KEYS)),
-        ("smart_ads/parquet_object_locator/v1", frozenset(catalog.ParquetObjectLocator.KEYS), None),
-        ("smart_ads/active_partition_head/v1", frozenset(catalog.ActivePartitionHead.KEYS), None),
-        ("smart_ads/duckdb_binary_object_locator/v1", frozenset(replay_bundle.DuckDbBinaryObjectLocator.KEYS), None),
-        ("smart_ads/duckdb_extension_binary_locator/v1", frozenset(replay_bundle.DuckDbExtensionBinaryLocator.KEYS), None),
-        ("smart_ads/fact_evidence_selector/v1", frozenset(bundle_7b.FactEvidenceSelector.KEYS), None),
-        ("smart_ads/fact_reconciliation/v1", frozenset(bundle_7b.FactReconciliation.KEYS), None),
+        *((c.SCHEMA, frozenset(c.KEYS), None) for c in embedded_with_keys),
     ]
 
 
 _PR3_AND_PR4_P1_SCHEMA_IDS = frozenset(
-    {
-        "smart_ads/git_artifact_provenance/v1",
-        "smart_ads/negative_security_test_report/v1",
-        "smart_ads/certification_7a_record/v1",
-        "smart_ads/authorization_receipt/v1",
-        "smart_ads/authorization_reservation_record/v1",
-        "smart_ads/execution_receipt/v1",
-        "smart_ads/authorization_consumption_record/v1",
-        "smart_ads/effect_proof/v1",
-        "smart_ads/operational_read_evidence/v1",
-        "smart_ads/sanitized_candidate_fact_set/v1",
-        "smart_ads/retention_root/v1",
-        "smart_ads/retention_root_set_head/v1",
-        "smart_ads/retention_root_set_cas_receipt/v1",
-        "smart_ads/retention_root_admission_result/v1",
-        "smart_ads/retention_root_admission_proof/v1",
-        "smart_ads/retention_release_result/v1",
-        "smart_ads/retention_release_proof/v1",
-        "smart_ads/curation_execution/v1",
-        "smart_ads/generation_manifest/v1",
-        "smart_ads/dataset_catalog_genesis_record/v1",
-        "smart_ads/dataset_catalog_genesis_consumption_record/v1",
-        "smart_ads/dataset_catalog/v1",
-        "smart_ads/dataset_catalog_cut_receipt/v1",
-        "smart_ads/dataset_snapshot/v1",
-        "smart_ads/analysis_replay_input_bundle/v1",
-        "smart_ads/report_execution/v1",
-    }
+    f"smart_ads/{n}/v1"
+    for n in (
+        "git_artifact_provenance negative_security_test_report certification_7a_record "
+        "authorization_receipt authorization_reservation_record execution_receipt "
+        "authorization_consumption_record effect_proof operational_read_evidence "
+        "sanitized_candidate_fact_set retention_root retention_root_set_head "
+        "retention_root_set_cas_receipt retention_root_admission_result retention_root_admission_proof "
+        "retention_release_result retention_release_proof curation_execution generation_manifest "
+        "dataset_catalog_genesis_record dataset_catalog_genesis_consumption_record dataset_catalog "
+        "dataset_catalog_cut_receipt dataset_snapshot analysis_replay_input_bundle report_execution "
+        "legacy_seam_contract legacy_seam_release seam_parity_record ibvi_ads_delegation_context "
+        "ibvi_ads_delegation_contract consumer_feature_flag_contract consumer_deployment_readback"
+    ).split()
 )
 
 

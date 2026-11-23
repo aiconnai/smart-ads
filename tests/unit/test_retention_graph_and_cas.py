@@ -27,8 +27,8 @@ from smart_ads.application import (
 )
 from smart_ads.contracts import (
     AdmittedCollection, ArtifactLocator, CanonicalQueryContract, ClosedValidationError, CollectionResult,
-    DateRange, P1Integrity, PurposePrerequisiteLocators, RetrievalContext, compute_normalized_fact_set_digest,
-    jcs_sha256, p1_content_digest, project_collection_fact_to_landing_row,
+    DateRange, IbviAdsDelegationContext, P1Integrity, PurposePrerequisiteLocators, RetrievalContext,
+    compute_normalized_fact_set_digest, jcs_sha256, p1_content_digest, project_collection_fact_to_landing_row,
 )
 from smart_ads.contracts.effects import (
     AuthorizationConsumptionRecord, AuthorizationReceipt, AuthorizationReservationRecord, EffectProof,
@@ -125,9 +125,10 @@ def _build_prereqs_and_registry(
             ("trans", "smart_ads/live_certification_transition/v1"),
             ("cert", "smart_ads/live_certification_certificate/v1"),
             ("gate3", "smart_ads/gate3_selection_receipt/v1"),
-            ("deleg", "smart_ads/ibvi_ads_delegation_context/v1"),
         )
     }
+    _, deleg_loc = _put_signed_model(store, IbviAdsDelegationContext("/ibvi-ads", "conductor:hermes", "front:pinna", "profile:pinna", "tenant:ibvi", "binding:meta-primary", "scope:campaigns-active", "smart_ads.queries.get_campaign_performance_v1", "sha256:" + ("8" * 64), "2026-11-11T02:55:00Z", "2026-11-11T04:00:00Z", "nonce-ret-deleg-001"), key_reg_loc)
+    prereq_locs["deleg"] = deleg_loc
     wi_pf = _put_prereq_effect_chain(store, run_loc, key_reg_loc, action="workload_identity_provision", slot="workload_identity_effect_proof", subject_kind="workload_identity_target", result_schema="smart_ads/workload_identity_execution_result/v1", tag="wi")
     dp_pf = _put_prereq_effect_chain(store, run_loc, key_reg_loc, action="deployment_config_apply", slot="deployment_config_effect_proof", subject_kind="deployment_target", result_schema="smart_ads/deployment_config_execution_result/v1", tag="dp")
     prereqs = PurposePrerequisiteLocators(
