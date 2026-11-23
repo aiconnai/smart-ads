@@ -6,7 +6,11 @@ import hashlib
 from itertools import pairwise
 from typing import Any, Final
 
-from smart_ads.application.mcp_read_handler import VerifiedStoreMcpReadHandler, _SignatureVerifyingStoreProxy
+from smart_ads.application.mcp_read_handler import (
+    McpVerifiedReadIndex,
+    VerifiedStoreMcpReadHandler,
+    _SignatureVerifyingStoreProxy,
+)
 from smart_ads.application.predecessor_validators import (
     _check_store_and_verifier,
     _invoke_sig_verifier,
@@ -258,17 +262,27 @@ def _evaluate_single_surface_parity(
 
 def _verify_handler_index_in_store(
     canonical_handler: VerifiedStoreMcpReadHandler, expected_run_loc: ArtifactLocator, *,
-    proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool,
+    checked_store: CellObjectStorePort, checked_ver: P1SignatureVerifierPort | None, checked_req: bool,
 ) -> None:
     idx = canonical_handler.index
-    if require_signed and not idx.require_signed:
+    if checked_req and not idx.require_signed:
         raise ClosedValidationError("canonical_handler.index: built with require_signed=False when require_signed=True")
-    if idx.run_context_locators != frozenset({expected_run_loc}):
-        raise ClosedValidationError("canonical_handler.index: migration_run_context_locator mismatch against LegacySeamRelease")
-    stored_reg = PrivateRegistrySnapshot.from_dict(proxy_store.get_json_artifact(idx.registry_snapshot_locator), require_signed=require_signed)
-    stored_snap = DatasetSnapshot.from_dict(proxy_store.get_json_artifact(idx.active_dataset_snapshot_locator), require_signed=require_signed)
-    if stored_reg != idx.registry_snapshot or stored_snap != idx.active_snapshot:
-        raise ClosedValidationError("canonical_handler.index: registry or dataset snapshot diverged from store")
+    rebuilt = McpVerifiedReadIndex.build(
+        idx.active_dataset_snapshot_locator, idx.registry_snapshot_locator,
+        idx._scope_inventory_locators, idx._findings_entries, idx._summary_report_entries,
+        store=checked_store, parquet_codec=idx._parquet_codec,
+        signature_verifier=checked_ver, require_signed=checked_req,
+    )
+    if (
+        rebuilt.registry_snapshot, rebuilt.active_snapshot, rebuilt.active_rows,
+        dict(rebuilt.scope_inventories), dict(rebuilt.findings_index),
+        dict(rebuilt.summary_reports_index), rebuilt.run_context_locators,
+    ) != (
+        idx.registry_snapshot, idx.active_snapshot, idx.active_rows,
+        dict(idx.scope_inventories), dict(idx.findings_index),
+        dict(idx.summary_reports_index), frozenset({expected_run_loc}),
+    ):
+        raise ClosedValidationError("canonical_handler.index: rebuilt index or run_context_locators diverged from store")
 
 
 def _evaluate_seam_dual_projections(
@@ -297,7 +311,7 @@ def _evaluate_seam_dual_projections(
         signature_verifier=checked_ver, require_signed=checked_req,
     )
     proxy_store = _SignatureVerifyingStoreProxy(checked_store, signature_verifier=checked_ver, require_signed=checked_req)
-    _verify_handler_index_in_store(canonical_handler, release.migration_run_context_locator, proxy_store=proxy_store, require_signed=checked_req)
+    _verify_handler_index_in_store(canonical_handler, release.migration_run_context_locator, checked_store=checked_store, checked_ver=checked_ver, checked_req=checked_req)
     expected_surfaces = {s.surface_id for s in contract.compatibility_surfaces}
     if any(type(k) is not str for k in cases_by_surface) or set(cases_by_surface.keys()) != expected_surfaces:
         raise ClosedValidationError("cases_by_surface: keys must match contract.compatibility_surfaces")

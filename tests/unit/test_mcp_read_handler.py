@@ -521,7 +521,8 @@ def test_exports_and_index_direct_construction_guard(world: McpHandlerWorld) -> 
         VerifiedStoreMcpReadHandler("not-an-index")  # type: ignore[arg-type]
     with pytest.raises(ClosedValidationError):
         McpVerifiedReadIndex(
-            world.reg_loc, world.registry, world.snap2_loc, world.snap2, (), {}, {}, {}, True, frozenset(), object()
+            world.reg_loc, world.registry, world.snap2_loc, world.snap2, (), {}, {}, {},
+            True, frozenset(), world.codec, {}, (), (), object(),
         )
 
 

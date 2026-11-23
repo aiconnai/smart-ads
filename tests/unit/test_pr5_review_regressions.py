@@ -534,6 +534,13 @@ def test_policy_002_decomposition_tip_enforces_closed_44_path_scope_and_lineage_
         with pytest.raises(ClosedValidationError):
             verify_stored_decomposition_tip(store, head_locator=bad_h2, expected_active_head_locator=bad_h2, manifest_locator=corr_loc, expected_manifest_digest=corr_loc.content_digest, signature_verifier=verifier)
 
+    eq_gen = {**base_u, "generated_at": "2026-09-07T00:00:00Z", "supersedes_manifest_locator": manifest_loc.to_dict(), "supersedes_digest": manifest_loc.content_digest, "correction_reason": "reason:same-ts"}
+    eq_gen["manifest_digest"] = gov_decomp.manifest_digest(eq_gen)
+    _, eq_loc = _put_signed_dict(store, eq_gen, key_reg_loc)
+    _, eq_h2 = _put_signed_dict(store, {**head_s, "head_epoch": 2, "active_manifest_locator": eq_loc.to_dict(), "active_manifest_digest": eq_loc.content_digest, "previous_head_locator": head_loc.to_dict(), "previous_head_digest": head_loc.content_digest, "update_kind": "correction", "updated_at_utc": "2026-09-08T00:05:00Z"}, key_reg_loc)
+    with pytest.raises(ClosedValidationError):
+        verify_stored_decomposition_tip(store, head_locator=eq_h2, expected_active_head_locator=eq_h2, manifest_locator=eq_loc, expected_manifest_digest=eq_loc.content_digest, signature_verifier=verifier)
+
     _, ok_h2 = _put_signed_dict(store, {**head_s, "head_epoch": 2, "active_manifest_locator": corr_loc.to_dict(), "active_manifest_digest": corr_loc.content_digest, "previous_head_locator": head_loc.to_dict(), "previous_head_digest": head_loc.content_digest, "update_kind": "correction", "updated_at_utc": "2026-09-08T00:05:00Z"}, key_reg_loc)
     with pytest.raises(ClosedValidationError):
         verify_stored_decomposition_tip(_CorruptBytesStore(store, missing_ref=head_loc.object_ref), head_locator=ok_h2, expected_active_head_locator=ok_h2, manifest_locator=corr_loc, expected_manifest_digest=corr_loc.content_digest, signature_verifier=verifier)
@@ -614,3 +621,79 @@ def test_policy_004_and_shallow_002_seam_parity_requires_signed_before_put_and_g
     ):
         with pytest.raises(ClosedValidationError):
             build_seam_parity_record(**kw, integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=bad_signer, require_signed=True)
+
+
+def test_deep_006_seam_parity_rebuilds_full_mcp_index_against_store_and_verifier() -> None:
+    store, verifier = InMemoryCellObjectStore(), FullDomainP1Verifier()
+    key_reg_loc = store.put_json_artifact("smart_ads/key_authorization_registry/v1", {"$schema": "smart_ads/key_authorization_registry/v1", "keys": [_KEY_ID]})
+    head_loc, manifest_loc, _, _ = _build_real_decomposition_artifacts(store, key_reg_loc)
+    run_loc, _, _ = _build_run_and_merge_artifacts(store, key_reg_loc, release_sha="e" * 40, reviewed_sha="d" * 40)
+    _, _, _, rel_loc, seam_bytes = _build_legacy_seam_artifacts(store, key_reg_loc, run_loc, head_loc, manifest_loc)
+    can = _build_canonical_chain_in_store(store, key_reg_loc, run_loc)
+    alg_p, alg_loc = _put_git_prov(store, key_reg_loc, "aiconnai/smart-ads", can["commit_sha"], "src/smart_ads/application/seam_parity.py", b"# seam")
+    seam_alg = AlgorithmProvenanceIdentity("algorithm:seam-parity-v1", "1.0.0", alg_loc, alg_p.repository, alg_p.commit_sha, alg_p.path, alg_p.git_blob_oid, alg_p.file_content_sha256, "cpython-3.12", SeamParityRecord.SCHEMA)
+    handler, cases = _build_mcp_cases_and_handler(store, key_reg_loc, run_loc, verifier)
+    signer = lambda d, _p: _sign_dict(d, key_reg_loc)
+    _, signed_loc = build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=signer, signature_verifier=verifier)
+
+    idx = handler.index
+    inv_loc = next(iter(idx._scope_inventory_locators.values()))[0]
+    cert_loc, f_loc = idx._findings_entries[1][5], idx._findings_entries[1][6][0]
+    rep_loc = idx._summary_report_entries[0][7]
+    for missing in (inv_loc.object_ref, cert_loc.object_ref, f_loc.object_ref, rep_loc.object_ref):
+        bad_store = _CorruptBytesStore(store, missing_ref=missing)
+        with pytest.raises(ClosedValidationError):
+            build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=bad_store, integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=signer, signature_verifier=verifier)
+        with pytest.raises(ClosedValidationError):
+            verify_seam_parity_record(signed_loc, expected_active_decomposition_head_locator=head_loc, seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=bad_store, signature_verifier=verifier)
+
+    class _SchemaRejectingVerifier(FullDomainP1Verifier):
+        def __init__(self, blocked: str) -> None:
+            super().__init__()
+            self._blocked = blocked
+
+        def verify_p1_envelope_signature(self, *, envelope: Mapping[str, Any], domain_prefix: str, store: CellObjectStorePort) -> None:
+            if envelope.get("$schema") == self._blocked:
+                raise ClosedValidationError(f"rejected {self._blocked}")
+            super().verify_p1_envelope_signature(envelope=envelope, domain_prefix=domain_prefix, store=store)
+
+    for blocked in ("smart_ads/expected_resource_inventory/v1", "smart_ads/finding/v1", "smart_ads/report_execution/v1"):
+        with pytest.raises(ClosedValidationError):
+            verify_seam_parity_record(signed_loc, expected_active_decomposition_head_locator=head_loc, seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, signature_verifier=_SchemaRejectingVerifier(blocked))
+
+
+def test_delta_002_store_proxy_translates_runtime_error_and_rejects_non_mapping_json() -> None:
+    mcp_w = McpHandlerWorld()
+
+    class _FaultyStore(CellObjectStorePort):
+        def __init__(self, *, mode: str) -> None:
+            self._mode = mode
+
+        def put_bytes(self, raw: bytes) -> str:
+            raise RuntimeError("unused")
+
+        def get_bytes(self, object_ref: str, *, expected_size_bytes: int | None = None) -> bytes:
+            if self._mode == "bytes_err":
+                raise RuntimeError("io error")
+            return mcp_w.store.get_bytes(object_ref, expected_size_bytes=expected_size_bytes)
+
+        def has_object(self, object_ref: str) -> bool:
+            return mcp_w.store.has_object(object_ref)
+
+        def put_json_artifact(self, schema_id: str, payload: Mapping[str, Any]) -> ArtifactLocator:
+            raise RuntimeError("unused")
+
+        def get_json_artifact(self, locator: ArtifactLocator) -> Any:
+            if self._mode == "json_err":
+                raise RuntimeError("json store failure")
+            if self._mode == "list_json":
+                return ["integrity"]
+            return mcp_w.store.get_json_artifact(locator)
+
+    list_loc = ArtifactLocator.for_canonical_bytes("smart_ads/private_registry_snapshot/v1", canonicalize_jcs(["integrity"]))
+    with pytest.raises(ClosedValidationError):
+        mcp_w.build_index(registry_snapshot_locator=list_loc, store=_FaultyStore(mode="list_json"), require_signed=False)
+    with pytest.raises(ClosedValidationError):
+        load_verified_snapshot_rows(mcp_w.snap2_loc, store=_FaultyStore(mode="json_err"), parquet_codec=mcp_w.codec, signature_verifier=mcp_w.verifier)
+    with pytest.raises(ClosedValidationError):
+        load_verified_snapshot_rows(mcp_w.snap2_loc, store=_FaultyStore(mode="bytes_err"), parquet_codec=mcp_w.codec, signature_verifier=mcp_w.verifier)

@@ -12,36 +12,20 @@ from smart_ads.analytics.certification import AnalyticalCertificationRecord, ver
 from smart_ads.analytics.intelligence import AnalysisEvidence, EvaluationContext, Finding
 from smart_ads.analytics.policy import AnalysisPolicy, EvaluationScope
 from smart_ads.analytics.replay_bundle import AnalysisReplayInputBundle
-from smart_ads.analytics.reporting import (
-    CanonicalReportInput, CanonicalReportResult, ReportExecution,
-    derive_snapshot_restatement_history, verify_report_execution,
-)
+from smart_ads.analytics.reporting import CanonicalReportInput, CanonicalReportResult, ReportExecution, derive_snapshot_restatement_history, verify_report_execution
 from smart_ads.analytics.results import AnalysisExecution, AnalysisResult
-from smart_ads.application.curation_pipeline import (
-    _load_p1, _require_parquet_codec, _require_store_and_bool,
-    verify_curation_execution, verify_dataset_snapshot, verify_operational_read_evidence,
-)
-from smart_ads.application.duckdb_execution import (
-    _resolve_verified_execution_and_results, _verify_replay_bundle_inputs_and_binaries,
-)
-from smart_ads.application.predecessor_validators import (
-    PREDECESSOR_P1_DOMAIN_PREFIXES, verify_stored_migration_run_context,
-)
+from smart_ads.application.curation_pipeline import _load_p1, _require_parquet_codec, _require_store_and_bool, verify_curation_execution, verify_dataset_snapshot, verify_operational_read_evidence
+from smart_ads.application.duckdb_execution import _resolve_verified_execution_and_results, _verify_replay_bundle_inputs_and_binaries
+from smart_ads.application.predecessor_validators import PREDECESSOR_P1_DOMAIN_PREFIXES, verify_stored_migration_run_context
 from smart_ads.contracts.effects import _typed_locator, sort_artifact_locators
 from smart_ads.contracts.git_provenance import GitArtifactProvenance
 from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs
 from smart_ads.contracts.operational_evidence import OperationalReadEvidence
-from smart_ads.contracts.scalars import (
-    ClosedValidationError, parse_iso_date, parse_timestamp_utc_micros, validate_iso_date, validate_opaque_ref,
-)
+from smart_ads.contracts.scalars import ClosedValidationError, parse_iso_date, parse_timestamp_utc_micros, require_mapping, validate_iso_date, validate_opaque_ref
 from smart_ads.contracts.schemas import AnalyticsLandingRow
-from smart_ads.domain.catalog import (
-    DatasetCatalogCutReceipt, DatasetSnapshot, GenerationManifest, compute_logical_rows_digest,
-)
+from smart_ads.domain.catalog import DatasetCatalogCutReceipt, DatasetSnapshot, GenerationManifest, compute_logical_rows_digest
 from smart_ads.domain.curation import CurationExecution, partition_key_for_metric_date
-from smart_ads.domain.registry import (
-    AuthorizedScopeRelation, ExpectedResourceInventory, PrivateRegistrySnapshot, RegistryBinding,
-)
+from smart_ads.domain.registry import AuthorizedScopeRelation, ExpectedResourceInventory, PrivateRegistrySnapshot, RegistryBinding
 from smart_ads.ports.consumer import P1SignatureVerifierPort
 from smart_ads.ports.storage import CellObjectStorePort, ParquetLandingCodecPort
 from smart_ads.transports.mcp.gateway import AdmittedMcpRequest, McpReadHandlerPort
@@ -82,7 +66,12 @@ class _SignatureVerifyingStoreProxy(CellObjectStorePort):
         raise ClosedValidationError("read-only MCP verification store forbids put_bytes")
 
     def get_bytes(self, object_ref: str, *, expected_size_bytes: int | None = None) -> bytes:
-        return self._store.get_bytes(object_ref, expected_size_bytes=expected_size_bytes)
+        try:
+            return self._store.get_bytes(object_ref, expected_size_bytes=expected_size_bytes)
+        except ClosedValidationError:
+            raise
+        except Exception as exc:
+            raise ClosedValidationError(f"store.get_bytes failed: {exc}") from exc
 
     def has_object(self, object_ref: str) -> bool:
         return self._store.has_object(object_ref)
@@ -94,7 +83,13 @@ class _SignatureVerifyingStoreProxy(CellObjectStorePort):
         if type(locator) is not ArtifactLocator:
             raise ClosedValidationError("locator: expected ArtifactLocator")
         checked_loc = ArtifactLocator.from_dict(locator.to_dict())
-        raw_dict = self._store.get_json_artifact(checked_loc)
+        try:
+            raw_obj = self._store.get_json_artifact(checked_loc)
+        except ClosedValidationError:
+            raise
+        except Exception as exc:
+            raise ClosedValidationError(f"store.get_json_artifact failed: {exc}") from exc
+        raw_dict = dict(require_mapping(raw_obj, label="store.get_json_artifact"))
         if ArtifactLocator.for_canonical_bytes(checked_loc.artifact_type, canonicalize_jcs(raw_dict)) != checked_loc:
             raise ClosedValidationError("store.get_json_artifact: Layer-3 canonical digest mismatch")
         domain_prefix = ADR_P1_DOMAIN_PREFIXES.get(checked_loc.artifact_type) or PREDECESSOR_P1_DOMAIN_PREFIXES.get(checked_loc.artifact_type)
@@ -153,15 +148,10 @@ def _decode_manifest_rows(
 def _verify_snapshot_run_context(
     snapshot: DatasetSnapshot, *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool
 ) -> tuple[ArtifactLocator, dict[str, Any]]:
-    cut = _load_p1(
-        proxy_store, snapshot.catalog_cut_receipt_locator, DatasetCatalogCutReceipt,
-        field_name="snapshot.catalog_cut_receipt_locator", require_signed=require_signed,
-    )
-    run_loc = cut.migration_run_context_locator
-    run_ctx = verify_stored_migration_run_context(
-        proxy_store._store, run_loc, signature_verifier=proxy_store._signature_verifier, require_signed=require_signed
-    )
-    return run_loc, run_ctx
+    cut = _load_p1(proxy_store, snapshot.catalog_cut_receipt_locator, DatasetCatalogCutReceipt, field_name="snapshot.catalog_cut_receipt_locator", require_signed=require_signed)
+    proxy_store.get_json_artifact(cut.migration_run_context_locator)
+    run_ctx = verify_stored_migration_run_context(proxy_store._store, cut.migration_run_context_locator, signature_verifier=proxy_store._signature_verifier, require_signed=require_signed)
+    return cut.migration_run_context_locator, run_ctx
 
 
 def _load_snapshot_rows_from_proxy(
@@ -562,6 +552,10 @@ class McpVerifiedReadIndex:
     summary_reports_index: Mapping[tuple[str, str, str, str, str, str, str], _VerifiedSummaryReportEntry]
     require_signed: bool
     run_context_locators: frozenset[ArtifactLocator]
+    _parquet_codec: ParquetLandingCodecPort
+    _scope_inventory_locators: Mapping[_ScopeKey, tuple[ArtifactLocator, ...]]
+    _findings_entries: tuple[_FindingsInputTuple, ...]
+    _summary_report_entries: tuple[_SummaryInputTuple, ...]
     _build_guard: object
 
     def __post_init__(self) -> None:
@@ -583,37 +577,23 @@ class McpVerifiedReadIndex:
         require_signed: bool = True,
     ) -> McpVerifiedReadIndex:
         """Eagerly verify and cache registry, snapshot rows, inventories, findings, and reports."""
-        proxy_store, checked_codec, checked_req = _prepare_read_ports(
-            store=store, parquet_codec=parquet_codec, signature_verifier=signature_verifier, require_signed=require_signed
-        )
-        checked_reg_loc = _typed_locator(
-            registry_snapshot_locator, field_name="registry_snapshot_locator", expected_type=PrivateRegistrySnapshot.SCHEMA
-        )
-        registry = _load_p1(
-            proxy_store, checked_reg_loc, PrivateRegistrySnapshot, field_name="registry_snapshot_locator", require_signed=checked_req
-        )
-        checked_act_loc, active_snap, active_rows, act_run_loc, act_run_ctx = _load_snapshot_rows_from_proxy(
-            active_dataset_snapshot_locator, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req
-        )
+        proxy_store, checked_codec, checked_req = _prepare_read_ports(store=store, parquet_codec=parquet_codec, signature_verifier=signature_verifier, require_signed=require_signed)
+        checked_reg_loc = _typed_locator(registry_snapshot_locator, field_name="registry_snapshot_locator", expected_type=PrivateRegistrySnapshot.SCHEMA)
+        registry = _load_p1(proxy_store, checked_reg_loc, PrivateRegistrySnapshot, field_name="registry_snapshot_locator", require_signed=checked_req)
+        checked_act_loc, active_snap, active_rows, act_run_loc, act_run_ctx = _load_snapshot_rows_from_proxy(active_dataset_snapshot_locator, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req)
         if act_run_ctx["tenant_ref"] != registry.tenant_ref:
             raise ClosedValidationError("active_dataset_snapshot: migration_run_context.tenant_ref != registry.tenant_ref")
         snap_memo: dict[bytes, _SnapMemoEntry] = {canonicalize_jcs(checked_act_loc.to_dict()): (active_snap, act_run_loc, act_run_ctx)}
-        scope_invs = _index_scope_inventories(
-            scope_inventory_locators, registry=registry, registry_locator=checked_reg_loc,
-            proxy_store=proxy_store, require_signed=checked_req,
-        )
-        findings_idx = _index_findings_entries(
-            findings_entries, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store,
-            parquet_codec=checked_codec, require_signed=checked_req, snap_memo=snap_memo,
-        )
-        reports_idx = _index_summary_report_entries(
-            summary_report_entries, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store,
-            parquet_codec=checked_codec, require_signed=checked_req, snap_memo=snap_memo,
-        )
+        scope_invs = _index_scope_inventories(scope_inventory_locators, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store, require_signed=checked_req)
+        findings_idx = _index_findings_entries(findings_entries, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req, snap_memo=snap_memo)
+        reports_idx = _index_summary_report_entries(summary_report_entries, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req, snap_memo=snap_memo)
+        frozen_invs = MappingProxyType({k: tuple(v) for k, v in scope_inventory_locators.items()})
+        frozen_f = tuple((*e[:6], tuple(e[6]), e[7]) for e in findings_entries)
+        frozen_s = tuple(tuple(e) for e in summary_report_entries)  # type: ignore[misc]
         run_locs = frozenset(entry[1] for entry in snap_memo.values())
         return cls(
-            checked_reg_loc, registry, checked_act_loc, active_snap, active_rows,
-            scope_invs, findings_idx, reports_idx, checked_req, run_locs, _INDEX_BUILD_GUARD,
+            checked_reg_loc, registry, checked_act_loc, active_snap, active_rows, scope_invs, findings_idx,
+            reports_idx, checked_req, run_locs, checked_codec, frozen_invs, frozen_f, frozen_s, _INDEX_BUILD_GUARD,  # type: ignore[arg-type]
         )
 
 

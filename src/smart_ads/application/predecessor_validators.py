@@ -482,7 +482,7 @@ def _walk_decomposition_predecessors(
         _validate_decomposition_manifest_fields(prev_m, manifest_locator=sup_m_loc, update_kind=prev_h["update_kind"])
         if prev_h["head_epoch"] + 1 != cur_h["head_epoch"] or prev_h["scope_digest"] != cur_h["scope_digest"] or canonicalize_jcs(prev_m["source_inventory"]["inventory_scope"]) != expected_scope_jcs:
             raise ClosedValidationError("decomposition_manifest_head: epoch gap or scope drift across predecessor chain")
-        if _ts_us(cur_m["generated_at"], field_name="manifest.generated_at") < _ts_us(prev_m["generated_at"], field_name="prev.generated_at") or _ts_us(cur_h["updated_at_utc"], field_name="head.updated_at_utc") < _ts_us(prev_h["updated_at_utc"], field_name="prev.updated_at_utc"):
+        if _ts_us(cur_m["generated_at"], field_name="manifest.generated_at") <= _ts_us(prev_m["generated_at"], field_name="prev.generated_at") or _ts_us(cur_h["updated_at_utc"], field_name="head.updated_at_utc") < _ts_us(prev_h["updated_at_utc"], field_name="prev.updated_at_utc"):
             raise ClosedValidationError("decomposition_manifest: non-monotonic generated_at or updated_at_utc")
         cur_h_loc, cur_h, cur_m_loc, cur_m = prev_h_loc, prev_h, sup_m_loc, prev_m
     raise ClosedValidationError("decomposition_manifest_head: predecessor chain exceeds 256 steps without genesis")
