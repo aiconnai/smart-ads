@@ -1,0 +1,188 @@
+name: Local MacBook pytest worker
+run-name: MacBook pytest for CI ${{ inputs.ci_run_id }} (attempt ${{ inputs.ci_attempt }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      ci_run_id:
+        description: Parent pytest CI run ID
+        required: true
+        type: string
+      ci_attempt:
+        description: Parent pytest CI run attempt
+        required: true
+        type: string
+      source_sha:
+        description: Exact source revision to test
+        required: true
+        type: string
+      pr_number:
+        description: Associated PR number, or zero for a branch push
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: local-pytest-${{ inputs.ci_run_id }}-${{ inputs.ci_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Validate CI source
+    if: github.repository == 'aiconnai/smart-ads' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: read
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      CI_ATTEMPT: ${{ inputs.ci_attempt }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+    steps:
+      - name: Verify the run, attempt, and exact trusted source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CI_RUN_ID" =~ ^[1-9][0-9]*$ && "$CI_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$PR_NUMBER" =~ ^(0|[1-9][0-9]*)$ ]]
+          validate_ci_source() {
+            local ci_run head_sha
+            validation_error="Could not read the parent pytest run"
+            ci_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID") || return 1
+            validation_error="The parent run is not an active same-repository pytest attempt"
+            jq -e --arg repo "$GITHUB_REPOSITORY" --argjson attempt "$CI_ATTEMPT" '
+              .path == ".github/workflows/pytest.yml" and .run_attempt == $attempt
+              and (.status == "in_progress" or .status == "queued")
+              and .head_repository.full_name == $repo
+            ' <<< "$ci_run" >/dev/null || return 1
+            if [[ "$(jq -r .status <<< "$ci_run")" == "queued" ]]; then
+              validation_error="The queued pytest attempt has no active MacBook coordinator"
+              gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CI_RUN_ID/attempts/$CI_ATTEMPT/jobs?per_page=100" |
+                jq -e 'any(.jobs[]?; .name == "Try local MacBook pytest"
+                  and .status == "in_progress" and .conclusion == null)' >/dev/null || return 1
+            fi
+            if [[ "$PR_NUMBER" != 0 ]]; then
+              validation_error="The parent run is not associated with a pull request head"
+              head_sha=$(jq -er 'select(.event == "pull_request") | .head_sha // empty' <<< "$ci_run") || return 1
+              validation_error="The active CI revision did not match the open same-repo PR and test merge commit"
+              gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" |
+                jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$head_sha" --arg merge "$SOURCE_SHA" '
+                  .state == "open" and .draft == false and .head.repo.full_name == $repo
+                  and .head.sha == $head and .merge_commit_sha == $merge
+                  and .base.ref == "main"
+                ' >/dev/null
+              return $?
+            fi
+            validation_error="The active CI revision did not match a main push"
+            jq -e --arg sha "$SOURCE_SHA" '
+              .event == "push" and .head_branch == "main" and .head_sha == $sha
+            ' <<< "$ci_run" >/dev/null
+          }
+          for read_attempt in 1 2 3 4 5 6 7; do
+            if validate_ci_source; then exit 0; fi
+            if (( read_attempt < 7 )); then sleep 5; fi
+          done
+          echo "::error::$validation_error"
+          exit 1
+
+  pytest-local:
+    name: Run pytest on MacBook
+    needs: authorize
+    runs-on: [self-hosted, Linux, ARM64, macbook-4c-4g]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          # Decomposition AST identity is pinned to the actual CPython 3.12 ABI.
+          python-version: '3.12'
+      - name: Generate hash-pinned Linux requirements from uv.lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          lock = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))
+          windows_markers = {"os_name == 'nt'", "sys_platform == 'win32'"}
+
+          assert pyproject["project"]["dependencies"] == []
+          build_requires = set(pyproject["build-system"]["requires"])
+          dev_group = set(pyproject["dependency-groups"]["dev"])
+          assert build_requires and build_requires.issubset(dev_group)
+
+          packages = {pkg["name"]: pkg for pkg in lock["package"]}
+          assert len(packages) == len(lock["package"])
+          root = packages["smart-ads"]
+          assert root.get("source") == {"editable": "."}
+          locked_dev = {
+              f"{d['name']}{d['specifier']}"
+              for d in root["metadata"]["requires-dev"]["dev"]
+          }
+          assert dev_group == locked_dev
+
+          for name, pkg in packages.items():
+              if pkg.get("source") == {"editable": "."}:
+                  continue
+              wheels = pkg.get("wheels", [])
+              assert wheels, f"Missing wheels for {name}"
+              for w in wheels:
+                  assert re.fullmatch(r"sha256:[0-9a-f]{64}", w.get("hash", ""))
+
+          queue = [
+              d["name"]
+              for d in root["dev-dependencies"]["dev"]
+              if d.get("marker") not in windows_markers
+          ]
+          selected: set[str] = set()
+          while queue:
+              curr = queue.pop()
+              if curr in selected:
+                  continue
+              pkg = packages[curr]
+              if pkg.get("source") == {"editable": "."}:
+                  continue
+              selected.add(curr)
+              for dep in pkg.get("dependencies", []):
+                  if dep.get("marker") not in windows_markers:
+                      queue.append(dep["name"])
+
+          lines = []
+          for name in sorted(selected):
+              pkg = packages[name]
+              hashes = sorted({w["hash"] for w in pkg["wheels"]})
+              lines.append(f"{name}=={pkg['version']} " + " ".join(f"--hash={h}" for h in hashes))
+
+          out_path = Path(os.environ["RUNNER_TEMP"]) / "ci-locked-dev.txt"
+          out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+      - name: Install hash-pinned test and build dependencies in isolated venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ci-venv"
+          "$RUNNER_TEMP/ci-venv/bin/python" -m pip install --no-deps --require-hashes -r "$RUNNER_TEMP/ci-locked-dev.txt"
+      - name: Run tests
+        id: pytest
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ci-venv/bin/python" -m pytest -q -W error -p no:cacheprovider
+      - name: Record test failure
+        if: steps.pytest.outcome == 'failure'
+        shell: bash
+        run: exit 1
