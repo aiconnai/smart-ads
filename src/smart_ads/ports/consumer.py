@@ -9,10 +9,18 @@ from typing import Any, Protocol, runtime_checkable
 
 from smart_ads.analytics.intelligence import AnalysisEvidence, EvaluationContext, Finding
 from smart_ads.contracts.consumer import ConsumerFeatureFlagContract
-from smart_ads.contracts.jcs import canonicalize_jcs
+from smart_ads.contracts.jcs import canonicalize_jcs, loads_strict_json
 from smart_ads.contracts.operational_evidence import AlgorithmProvenanceIdentity
 from smart_ads.contracts.scalars import ClosedValidationError
 from smart_ads.ports.storage import CellObjectStorePort
+
+
+def _freeze_jcs_value(val: Any) -> Any:
+    if isinstance(val, Mapping):
+        return MappingProxyType({k: _freeze_jcs_value(v) for k, v in val.items()})
+    if isinstance(val, (list, tuple)):
+        return tuple(_freeze_jcs_value(item) for item in val)
+    return val
 
 
 def _require_strict_non_empty_str(value: object, *, field_name: str) -> str:
@@ -210,11 +218,17 @@ class SeamDualProjectionCase:
             raise ClosedValidationError(
                 "seam_dual_projection_case.legacy_input_payload: expected Mapping"
             )
-        canonicalize_jcs(self.legacy_input_payload)
+        normalized = loads_strict_json(
+            canonicalize_jcs(self.legacy_input_payload).decode("utf-8")
+        )
+        if not isinstance(normalized, Mapping):
+            raise ClosedValidationError(
+                "seam_dual_projection_case.legacy_input_payload: expected JSON object"
+            )
         object.__setattr__(
             self,
             "legacy_input_payload",
-            MappingProxyType(dict(self.legacy_input_payload)),
+            _freeze_jcs_value(normalized),
         )
 
 

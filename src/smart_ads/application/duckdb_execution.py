@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from smart_ads.analytics.cells import AnalysisResultSchema, ResultProjection, verify_result_projection
 from smart_ads.analytics.certification import AnalyticalCertificationRecord, AttestedCertificationInput, build_certification_record
+from smart_ads.analytics.formulas import FormulaBundle
 from smart_ads.analytics.intelligence import AnalysisEvidence, EvaluationContext, Finding, evaluate_findings
 from smart_ads.analytics.policy import AnalysisPolicy
 from smart_ads.analytics.replay_bundle import AnalysisReplayInputBundle
@@ -19,6 +20,7 @@ from smart_ads.application.curation_pipeline import (
 from smart_ads.contracts.effects import EffectProof, _strict_id, _typed_locator, sort_artifact_locators
 from smart_ads.contracts.git_provenance import GitArtifactProvenance
 from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs, p1_content_digest
+from smart_ads.contracts.numerics import BaseMetricDefinition
 from smart_ads.contracts.operational_evidence import AlgorithmProvenanceIdentity, OperationalReadEvidence
 from smart_ads.contracts.scalars import ClosedValidationError, require_mapping, validate_envelope_timestamp_utc
 from smart_ads.contracts.schemas import AnalyticsLandingRow
@@ -88,6 +90,10 @@ def _verify_build_input_locators(
             raise ClosedValidationError(f"build_input_locators[{idx}]: canonical digest mismatch")
         if bi_loc.artifact_type == GitArtifactProvenance.SCHEMA:
             GitArtifactProvenance.from_dict(mapping, require_signed=require_signed)
+        elif bi_loc.artifact_type == FormulaBundle.SCHEMA:
+            FormulaBundle.from_dict(mapping, require_signed=require_signed)
+        elif bi_loc.artifact_type == BaseMetricDefinition.SCHEMA:
+            BaseMetricDefinition.from_dict(mapping, require_signed=require_signed)
         elif require_signed or "integrity" in mapping:
             if "integrity" not in mapping:
                 raise ClosedValidationError(f"build_input_locators[{idx}]: unsigned P1 build input")
@@ -133,17 +139,31 @@ def _load_verified_raw_binary(
     return raw
 
 
-def _resolve_duckdb_and_parquet_blobs(
-    bundle: AnalysisReplayInputBundle, snapshot: DatasetSnapshot, *, store: CellObjectStorePort, require_signed: bool
-) -> tuple[bytes, dict[str, bytes], tuple[tuple[ParquetObjectLocator, bytes], ...]]:
+def _verify_replay_bundle_inputs_and_binaries(
+    bundle: AnalysisReplayInputBundle, *, store: CellObjectStorePort, require_signed: bool
+) -> tuple[bytes, dict[str, bytes]]:
+    _verify_build_input_locators(bundle, store=store, require_signed=require_signed)
     db_loc = bundle.duckdb_binary_locator
-    duckdb_bytes = _load_verified_raw_binary(store, object_ref=db_loc.object_ref, expected_size=db_loc.size_bytes, expected_sha256=db_loc.binary_sha256, label="duckdb_binary_locator")
+    duckdb_bytes = _load_verified_raw_binary(
+        store, object_ref=db_loc.object_ref, expected_size=db_loc.size_bytes,
+        expected_sha256=db_loc.binary_sha256, label="duckdb_binary_locator",
+    )
     ext_blobs: dict[str, bytes] = {}
     for ext in bundle.extensions:
         if ext.load_mode == "explicit_local_binary":
             if ext.binary_locator is None:
                 raise ClosedValidationError(f"extension {ext.extension_name!r}: missing binary_locator")
-            ext_blobs[ext.extension_name] = _load_verified_raw_binary(store, object_ref=ext.binary_locator.object_ref, expected_size=ext.binary_locator.size_bytes, expected_sha256=ext.binary_locator.binary_sha256, label=f"extension[{ext.extension_name!r}]")
+            ext_blobs[ext.extension_name] = _load_verified_raw_binary(
+                store, object_ref=ext.binary_locator.object_ref, expected_size=ext.binary_locator.size_bytes,
+                expected_sha256=ext.binary_locator.binary_sha256, label=f"extension[{ext.extension_name!r}]",
+            )
+    return duckdb_bytes, ext_blobs
+
+
+def _resolve_duckdb_and_parquet_blobs(
+    bundle: AnalysisReplayInputBundle, snapshot: DatasetSnapshot, *, store: CellObjectStorePort, require_signed: bool
+) -> tuple[bytes, dict[str, bytes], tuple[tuple[ParquetObjectLocator, bytes], ...]]:
+    duckdb_bytes, ext_blobs = _verify_replay_bundle_inputs_and_binaries(bundle, store=store, require_signed=require_signed)
     pq_pairs: list[tuple[ParquetObjectLocator, bytes]] = []
     for head in snapshot.partition_heads:
         gm = _load_p1(store, head.generation_manifest_locator, GenerationManifest, field_name="snapshot.partition_heads[].generation_manifest_locator", require_signed=require_signed)

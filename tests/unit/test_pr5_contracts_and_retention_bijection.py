@@ -376,6 +376,11 @@ def test_project_delegation_envelope_to_mcp_context_and_gateway_flow() -> None:
         project_delegation_envelope_to_mcp_context(signed_ctx, locator=_loc(IbviAdsDelegationContext.SCHEMA, "0"))
     with pytest.raises(ClosedValidationError):
         project_delegation_envelope_to_mcp_context("not-an-envelope")  # type: ignore[arg-type]
+    with pytest.raises(ClosedValidationError):
+        project_delegation_envelope_to_mcp_context(deleg_ctx)
+    with pytest.raises(ClosedValidationError):
+        project_delegation_envelope_to_mcp_context(replace(deleg_ctx, integrity=None))
+    assert project_delegation_envelope_to_mcp_context(deleg_ctx, require_signed=False).locator == deleg_ctx.locator()
 
 
 def _populate_pr5_seam_store() -> tuple[InMemoryCellObjectStore, ArtifactLocator, ArtifactLocator, dict[str, Any]]:
@@ -396,14 +401,21 @@ def _populate_pr5_seam_store() -> tuple[InMemoryCellObjectStore, ArtifactLocator
     dm_loc = store.put_json_artifact("smart_ads/decomposition_manifest/v1", {"$schema": "smart_ads/decomposition_manifest/v1", "v": 1})
     dmh_loc = store.put_json_artifact("smart_ads/decomposition_manifest_head/v1", {"$schema": "smart_ads/decomposition_manifest_head/v1", "v": 1})
     pme_loc = store.put_json_artifact("smart_ads/protected_merge_evidence/v1", {"$schema": "smart_ads/protected_merge_evidence/v1", "v": 1})
+    base_ref = store.put_bytes(b"commit 12\x00baseline-raw")
+    e1_ref = store.put_bytes(b"commit 10\x00edge-one-1")
+    e2_ref = store.put_bytes(b"commit 10\x00edge-two-2")
     contract, release, parity = _build_seam_stack()
     s_con = _sign_model(replace(contract, migration_run_context_locator=run_loc, decomposition_manifest_locator=dm_loc, decomposition_manifest_digest=dm_loc.content_digest, seam_git_provenance_locator=prov_loc), key_reg_loc)
     c_loc = store.put_json_artifact(s_con.SCHEMA, s_con.to_dict())
-    s_rel = _sign_model(replace(release, migration_run_context_locator=run_loc, decomposition_manifest_head_locator=dmh_loc, decomposition_manifest_locator=dm_loc, decomposition_manifest_digest=dm_loc.content_digest, protected_merge_evidence_locator=pme_loc, seam_git_artifact=replace(release.seam_git_artifact, git_provenance_locator=prov_loc), seam_contract_locator=c_loc, seam_contract_digest=c_loc.content_digest), key_reg_loc)
+    real_edges = (
+        GitParentEdge(release.parent_edge_chain[0].child_sha, release.parent_edge_chain[0].parent_sha, e1_ref),
+        GitParentEdge(release.parent_edge_chain[1].child_sha, release.parent_edge_chain[1].parent_sha, e2_ref),
+    )
+    s_rel = _sign_model(replace(release, migration_run_context_locator=run_loc, baseline_commit_object_ref=base_ref, parent_edge_chain=real_edges, parent_edge_chain_digest="", decomposition_manifest_head_locator=dmh_loc, decomposition_manifest_locator=dm_loc, decomposition_manifest_digest=dm_loc.content_digest, protected_merge_evidence_locator=pme_loc, seam_git_artifact=replace(release.seam_git_artifact, git_provenance_locator=prov_loc), seam_contract_locator=c_loc, seam_contract_digest=c_loc.content_digest), key_reg_loc)
     r_loc = store.put_json_artifact(s_rel.SCHEMA, s_rel.to_dict())
     s_par = _sign_model(replace(parity, migration_run_context_locator=run_loc, legacy_seam_release_locator=r_loc, legacy_seam_release_digest=r_loc.content_digest, seam_contract_locator=c_loc, seam_contract_digest=c_loc.content_digest, decomposition_manifest_head_locator=dmh_loc, decomposition_manifest_locator=dm_loc, wheel_build_provenance_locator=whl_prov_loc, wheel_digest=whl_obj.wheel_digest, seam_adapter_algorithm_identity=_make_alg_id(SeamParityRecord.SCHEMA, prov_loc)), key_reg_loc)
     p_loc = store.put_json_artifact(s_par.SCHEMA, s_par.to_dict())
-    return store, run_loc, key_reg_loc, {"c_loc": c_loc, "r_loc": r_loc, "p_loc": p_loc, "whl_ref": whl_ref, "s_con": s_con}
+    return store, run_loc, key_reg_loc, {"c_loc": c_loc, "r_loc": r_loc, "p_loc": p_loc, "whl_ref": whl_ref, "s_con": s_con, "base_ref": base_ref, "e1_ref": e1_ref, "e2_ref": e2_ref}
 
 
 def test_retention_schema_bijection_and_pr5_reachability_closure() -> None:
@@ -424,7 +436,10 @@ def test_retention_schema_bijection_and_pr5_reachability_closure() -> None:
     )
     root_signed = _sign_model(root_unsigned, key_reg_loc)
     closure = verify_retention_root(root_signed, store=store, require_signed=True)
-    assert {info["c_loc"].object_ref, info["r_loc"].object_ref, info["p_loc"].object_ref, info["whl_ref"]}.issubset(set(closure.reachable_object_refs))
+    assert {
+        info["c_loc"].object_ref, info["r_loc"].object_ref, info["p_loc"].object_ref,
+        info["whl_ref"], info["base_ref"], info["e1_ref"], info["e2_ref"],
+    }.issubset(set(closure.reachable_object_refs))
 
     store._blobs[info["c_loc"].object_ref] = canonicalize_jcs({**info["s_con"].to_dict(), "extra_field": 1})
     with pytest.raises(ClosedValidationError):

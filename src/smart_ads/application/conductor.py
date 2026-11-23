@@ -9,7 +9,9 @@ from typing import Any, ClassVar, Final
 from smart_ads.analytics import FINDING_INCONCLUSIVE, METRIC_WINDOW_COLUMNS, AnalyticalCertificationRecord, AnalysisEvidence, AnalysisExecution, AnalysisPolicy, AnalysisReplayInputBundle, AnalysisResult, AnalysisResultSchema, AttestedCertificationInput, CanonicalResultEntry, DerivedCertificationStatus, EvaluationContext, EvaluationScope, Finding, RestatementRule, SaturationRule, StalledDeliveryRule, WasteRule, combine_derived_certification, derive_snapshot_restatement_history, require_policy_applicable, verify_analysis_execution
 from smart_ads.analytics.reporting import _validate_attested_inputs
 from smart_ads.application.curation_pipeline import _load_p1
-from smart_ads.application.duckdb_execution import _resolve_query_schemas, _validate_optional_p1_integrity
+from smart_ads.application.duckdb_execution import (
+    _resolve_query_schemas, _validate_optional_p1_integrity, _verify_replay_bundle_inputs_and_binaries,
+)
 from smart_ads.application.mcp_read_handler import _SignatureVerifyingStoreProxy, _load_snapshot_lineage_generations, _prepare_read_ports, load_verified_snapshot_rows
 from smart_ads.application.predecessor_validators import _invoke_sig_verifier, _verify_algorithm_with_sig, verify_stored_migration_run_context
 from smart_ads.contracts import AlgorithmProvenanceIdentity, AnalyticsLandingRow, ArtifactLocator, ClosedValidationError, P1Integrity, canonicalize_jcs, jcs_sha256, parse_iso_date, require_exact_keys, self_digest_jcs_sha256, sort_artifact_locators, sort_utf8_strings, validate_iso_date, validate_sha256_prefixed, validate_timestamp_utc6
@@ -187,6 +189,7 @@ def _verify_execution_and_results(exec_loc: ArtifactLocator, results_in: tuple[A
     bundle = _load_p1(proxy_store, raw_exec.analysis_replay_input_bundle_locator, AnalysisReplayInputBundle, field_name=f"{label}.bundle", require_signed=require_signed)
     if (bundle.migration_run_context_locator, bundle.dataset_snapshot_locator, bundle.analysis_policy_locator) != (fresh_in.migration_run_context_locator, fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator):
         raise ClosedValidationError(f"{label}: bundle run, snapshot, or policy locator mismatch")
+    _verify_replay_bundle_inputs_and_binaries(bundle, store=proxy_store, require_signed=require_signed)
     _, schemas = _resolve_query_schemas(bundle, store=proxy_store, require_signed=require_signed)
     sorted_schemas = tuple(sorted(schemas, key=lambda s: canonicalize_jcs(s.locator().to_dict())))
     if schemas_in is not None:
@@ -231,12 +234,18 @@ def _canonicalize_evidence_set(fresh_in: ConductorRunInput, inv: ExpectedResourc
         raise ClosedValidationError("analysis_evidence: primary analysis_execution_locator absent")
     return tuple(ev for _, ev in sorted(keyed, key=lambda pair: pair[0]))
 
+def _safe_shift_date(day: datetime.date, back_days: int, *, label: str) -> str:
+    try:
+        return (day - datetime.timedelta(days=back_days)).isoformat()
+    except (OverflowError, ValueError) as exc:
+        raise ClosedValidationError(f"{label}: date window underflow ({back_days} days before {day.isoformat()})") from exc
+
 def _check_policy_rule_windows(ctx: EvaluationContext) -> None:
     end_d, anchor_d = parse_iso_date(ctx.window_end_date, field_name="window_end_date"), parse_iso_date(ctx.curation_anchor_date, field_name="curation_anchor_date")
-    cur_start, cur_end = (anchor_d - datetime.timedelta(days=ctx.curation_restatement_lookback_days - 1)).isoformat(), anchor_d.isoformat()
+    cur_start, cur_end = _safe_shift_date(anchor_d, ctx.curation_restatement_lookback_days - 1, label="curation_window"), anchor_d.isoformat()
     for rule in ctx.policy.rules:
         span = (rule.window_days * 2) if isinstance(rule, SaturationRule) else (rule.window_days if isinstance(rule, WasteRule) else (rule.min_consecutive_days if isinstance(rule, StalledDeliveryRule) else rule.lookback_days))
-        w_start, w_stop = (end_d - datetime.timedelta(days=span - 1)).isoformat(), end_d.isoformat()
+        w_start, w_stop = _safe_shift_date(end_d, span - 1, label=f"policy.rule[{rule.rule_id!r}]"), end_d.isoformat()
         if w_start < ctx.inventory.date_range.start_date or w_stop > ctx.inventory.date_range.end_date:
             raise ClosedValidationError(f"policy rule {rule.rule_id!r}: window outside ExpectedResourceInventory")
         if isinstance(rule, RestatementRule) and (w_start < cur_start or w_stop > cur_end):
@@ -250,7 +259,12 @@ def _reduce_snapshot_and_build_context(fresh_in: ConductorRunInput, snapshot: Da
     head_by_pk = {h.partition_key: h.generation_manifest_locator for h in snapshot.partition_heads}
     gm_loc = head_by_pk.get(partition_key_for_metric_date(fresh_in.window_end_date), cut_rec.cas_request_projection.generation_manifest_locator)
     cur_exec = _load_p1(proxy_store, gen_by_key[canonicalize_jcs(gm_loc.to_dict())].curation_execution_locator, CurationExecution, field_name="curation_execution_locator", require_signed=require_signed)
-    reduced_rows, _ = compute_logical_rows_digest([r for r in snapshot_rows if (r.fact_key.binding_ref, r.fact_key.account_ref) == (inv.binding_ref, inv.account_ref) and r.fact_key.metric_date <= fresh_in.window_end_date])
+    allowed_units = {(u.binding_ref, u.account_ref, u.resource_ref, u.resource_level, u.metric_date) for u in inv.expected_resources}
+    reduced_rows, _ = compute_logical_rows_digest([
+        r for r in snapshot_rows
+        if (r.fact_key.binding_ref, r.fact_key.account_ref, r.fact_key.resource_ref, r.fact_key.resource_level, r.fact_key.metric_date) in allowed_units
+        and inv.date_range.start_date <= r.fact_key.metric_date <= fresh_in.window_end_date
+    ])
     lineage_rows = (r for k in sorted(gen_by_key) for r in decoded_by_ref[gen_by_key[k].locator().object_ref] if r.fact_key.metric_date <= fresh_in.window_end_date)
     m_keys = [e.result_key for e in analysis_exec.canonical_result_set.results if e.result_projection.result_kind == "relation" and tuple((c.name, c.cell_type, c.nullable) for c in e.result_projection.columns) == METRIC_WINDOW_COLUMNS]
     metrics_key = "result:metrics" if "result:metrics" in m_keys else (m_keys[0] if m_keys else analysis_exec.canonical_result_set.results[0].result_key)

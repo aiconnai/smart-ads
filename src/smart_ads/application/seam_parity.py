@@ -6,7 +6,7 @@ import hashlib
 from itertools import pairwise
 from typing import Any, Final
 
-from smart_ads.application.mcp_read_handler import VerifiedStoreMcpReadHandler
+from smart_ads.application.mcp_read_handler import VerifiedStoreMcpReadHandler, _SignatureVerifyingStoreProxy
 from smart_ads.application.predecessor_validators import (
     _check_store_and_verifier,
     _invoke_sig_verifier,
@@ -18,6 +18,7 @@ from smart_ads.application.predecessor_validators import (
     verify_stored_legacy_merge_evidence,
     verify_stored_migration_run_context,
 )
+from smart_ads.contracts.consumer import IbviAdsDelegationContext
 from smart_ads.contracts.effects import _strict_str, _typed_locator
 from smart_ads.contracts.git_provenance import GitArtifactProvenance, verify_git_provenance_against_bytes
 from smart_ads.contracts.jcs import (
@@ -36,13 +37,19 @@ from smart_ads.contracts.seam import (
     SeamParityRecord,
     SurfaceParityComparison,
 )
+from smart_ads.domain.catalog import DatasetSnapshot
+from smart_ads.domain.registry import PrivateRegistrySnapshot
 from smart_ads.ports.consumer import (
     P1SignatureVerifierPort,
     SeamDualProjectionCase,
     SeamLegacyProjectorPort,
 )
 from smart_ads.ports.storage import CellObjectStorePort
-from smart_ads.transports.mcp.delegation import McpRuntimeContext
+from smart_ads.transports.mcp.delegation import (
+    McpDelegationContext,
+    McpRuntimeContext,
+    project_delegation_envelope_to_mcp_context,
+)
 from smart_ads.transports.mcp.gateway import handle_mcp_request_bytes
 from smart_ads.transports.mcp.schemas import ALLOWED_MCP_METHODS
 
@@ -145,16 +152,37 @@ def verify_legacy_seam_release(
     return release
 
 
-def _serialize_case_descriptor(case: SeamDualProjectionCase) -> dict[str, Any]:
+def _serialize_delegation_context(dc: McpDelegationContext) -> dict[str, Any]:
+    dc.validate()
+    return {
+        "$schema": dc.schema, "route": dc.route, "host_conductor_ref": dc.host_conductor_ref,
+        "front_ref": dc.front_ref, "profile_ref": dc.profile_ref, "tenant_ref": dc.tenant_ref,
+        "binding_ref": dc.binding_ref, "resource_scope_ref": dc.resource_scope_ref,
+        "allowed_method": dc.allowed_method, "policy_digest": dc.policy_digest,
+        "issued_at_utc": dc.issued_at_utc, "valid_until_utc": dc.valid_until_utc,
+        "nonce": dc.nonce, "locator": dc.locator.to_dict(),
+    }
+
+
+def _serialize_case_descriptor(
+    case: SeamDualProjectionCase, *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool
+) -> dict[str, Any]:
     rt = case.mcp_runtime_context
     if rt is None:
         rt_repr = None
     elif type(rt) is McpRuntimeContext:
-        rt_repr = {
-            "clock_lower_utc": rt.clock_lower_utc,
-            "clock_upper_utc": rt.clock_upper_utc,
-            "delegation_locator": None if rt.delegation_context is None else rt.delegation_context.locator.to_dict(),
-        }
+        rt.validate_clock_bounds()
+        dc = rt.delegation_context
+        if dc is None:
+            del_repr = None
+        else:
+            if type(dc) is not McpDelegationContext:
+                raise ClosedValidationError("case.mcp_runtime_context.delegation_context: expected McpDelegationContext")
+            del_repr = _serialize_delegation_context(dc)
+            stored_del = IbviAdsDelegationContext.from_dict(proxy_store.get_json_artifact(dc.locator), require_signed=require_signed)
+            if project_delegation_envelope_to_mcp_context(stored_del, locator=dc.locator, require_signed=require_signed) != dc:
+                raise ClosedValidationError(f"case[{case.case_id!r}]: stored IbviAdsDelegationContext mismatch against McpDelegationContext")
+        rt_repr = {"clock_lower_utc": rt.clock_lower_utc, "clock_upper_utc": rt.clock_upper_utc, "delegation_context": del_repr}
     else:
         raise ClosedValidationError("case.mcp_runtime_context: expected McpRuntimeContext or None")
     return {
@@ -162,16 +190,12 @@ def _serialize_case_descriptor(case: SeamDualProjectionCase) -> dict[str, Any]:
         "surface_id": case.surface_id,
         "mcp_wire_request_sha256": "sha256:" + hashlib.sha256(case.mcp_wire_request_bytes).hexdigest(),
         "mcp_runtime_context": rt_repr,
-        "legacy_input_payload": dict(case.legacy_input_payload),
+        "legacy_input_payload": loads_strict_json(canonicalize_jcs(case.legacy_input_payload).decode("utf-8")),
     }
 
 
 def _validate_admitted_surface_wire_outcome(
-    surface_id: str,
-    case_id: str,
-    admitted_request: object,
-    canonical_wire: object,
-    legacy_wire: object,
+    surface_id: str, case_id: str, admitted_request: object, canonical_wire: object, legacy_wire: object
 ) -> None:
     admitted_method = getattr(admitted_request, "method", None) if admitted_request is not None else None
     if admitted_request is None or admitted_method != surface_id:
@@ -199,6 +223,8 @@ def _evaluate_single_surface_parity(
     *,
     canonical_handler: VerifiedStoreMcpReadHandler,
     legacy_projector: SeamLegacyProjectorPort,
+    proxy_store: _SignatureVerifyingStoreProxy,
+    require_signed: bool,
 ) -> SurfaceParityComparison:
     if isinstance(cases, (str, bytes)) or not isinstance(cases, Sequence) or len(cases) == 0:
         raise ClosedValidationError(f"cases_by_surface[{surface.surface_id!r}]: expected non-empty Sequence")
@@ -215,7 +241,7 @@ def _evaluate_single_surface_parity(
     legacy_projections: list[dict[str, Any]] = []
     canonical_projections: list[dict[str, Any]] = []
     for case in checked_cases:
-        case_descriptors.append(_serialize_case_descriptor(case))
+        case_descriptors.append(_serialize_case_descriptor(case, proxy_store=proxy_store, require_signed=require_signed))
         outcome = handle_mcp_request_bytes(case.mcp_wire_request_bytes, case.mcp_runtime_context, handler=canonical_handler)
         canonical_wire = loads_strict_json(outcome.wire_bytes)
         raw_legacy = legacy_projector.project_legacy_surface(surface_id=surface.surface_id, mapping_contract_ref=surface.mapping_contract_ref, case=case)
@@ -230,6 +256,21 @@ def _evaluate_single_surface_parity(
     return SurfaceParityComparison(surface.surface_id, surface.mapping_contract_ref, jcs_sha256(case_descriptors), len(checked_cases), leg_digest, can_digest, True)
 
 
+def _verify_handler_index_in_store(
+    canonical_handler: VerifiedStoreMcpReadHandler, expected_run_loc: ArtifactLocator, *,
+    proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool,
+) -> None:
+    idx = canonical_handler.index
+    if require_signed and not idx.require_signed:
+        raise ClosedValidationError("canonical_handler.index: built with require_signed=False when require_signed=True")
+    if idx.run_context_locators != frozenset({expected_run_loc}):
+        raise ClosedValidationError("canonical_handler.index: migration_run_context_locator mismatch against LegacySeamRelease")
+    stored_reg = PrivateRegistrySnapshot.from_dict(proxy_store.get_json_artifact(idx.registry_snapshot_locator), require_signed=require_signed)
+    stored_snap = DatasetSnapshot.from_dict(proxy_store.get_json_artifact(idx.active_dataset_snapshot_locator), require_signed=require_signed)
+    if stored_reg != idx.registry_snapshot or stored_snap != idx.active_snapshot:
+        raise ClosedValidationError("canonical_handler.index: registry or dataset snapshot diverged from store")
+
+
 def _evaluate_seam_dual_projections(
     *, legacy_seam_release_locator: ArtifactLocator, expected_active_decomposition_head_locator: ArtifactLocator,
     wheel_build_provenance_locator: ArtifactLocator, wheel_digest: str,
@@ -238,6 +279,7 @@ def _evaluate_seam_dual_projections(
     canonical_handler: VerifiedStoreMcpReadHandler, legacy_projector: SeamLegacyProjectorPort,
     store: CellObjectStorePort, signature_verifier: P1SignatureVerifierPort | None, require_signed: bool,
 ) -> tuple[LegacySeamRelease, LegacySeamContract, AlgorithmProvenanceIdentity, tuple[SurfaceParityComparison, ...]]:
+    checked_store, checked_ver, checked_req = _check_store_and_verifier(store, signature_verifier, require_signed)
     if type(canonical_handler) is not VerifiedStoreMcpReadHandler:
         raise ClosedValidationError("canonical_handler: expected VerifiedStoreMcpReadHandler")
     if not isinstance(legacy_projector, SeamLegacyProjectorPort) or not callable(getattr(legacy_projector, "project_legacy_surface", None)):
@@ -246,22 +288,59 @@ def _evaluate_seam_dual_projections(
         raise ClosedValidationError("cases_by_surface: expected Mapping")
     checked_rel_loc = _typed_locator(legacy_seam_release_locator, field_name="legacy_seam_release_locator", expected_type=LegacySeamRelease.SCHEMA)
     checked_wdig = validate_sha256_prefixed(_strict_str(wheel_digest, field_name="wheel_digest"), field_name="wheel_digest")
-    release = verify_legacy_seam_release(checked_rel_loc, expected_active_decomposition_head_locator=expected_active_decomposition_head_locator, seam_raw_bytes=seam_raw_bytes, store=store, signature_verifier=signature_verifier, require_signed=require_signed)
-    contract = verify_legacy_seam_contract(release.seam_contract_locator, seam_raw_bytes=seam_raw_bytes, active_decomposition_head_locator=expected_active_decomposition_head_locator, store=store, signature_verifier=signature_verifier, require_signed=require_signed)
-    checked_alg = _verify_algorithm_with_sig(seam_adapter_algorithm_identity, expected_schema_id=SeamParityRecord.SCHEMA, store=store, signature_verifier=signature_verifier, require_signed=require_signed, label="seam_adapter_algorithm_identity")
+    release = verify_legacy_seam_release(checked_rel_loc, expected_active_decomposition_head_locator=expected_active_decomposition_head_locator, seam_raw_bytes=seam_raw_bytes, store=checked_store, signature_verifier=checked_ver, require_signed=checked_req)
+    contract = verify_legacy_seam_contract(release.seam_contract_locator, seam_raw_bytes=seam_raw_bytes, active_decomposition_head_locator=expected_active_decomposition_head_locator, store=checked_store, signature_verifier=checked_ver, require_signed=checked_req)
+    checked_alg = _verify_algorithm_with_sig(seam_adapter_algorithm_identity, expected_schema_id=SeamParityRecord.SCHEMA, store=checked_store, signature_verifier=checked_ver, require_signed=checked_req, label="seam_adapter_algorithm_identity")
     _verify_stored_wheel_build_provenance(
-        store, _typed_locator(wheel_build_provenance_locator, field_name="wheel_build_provenance_locator", expected_type="smart_ads/wheel_build_provenance/v1"),
+        checked_store, _typed_locator(wheel_build_provenance_locator, field_name="wheel_build_provenance_locator", expected_type="smart_ads/wheel_build_provenance/v1"),
         expected_run_locator=release.migration_run_context_locator, expected_wheel_digest=checked_wdig,
-        signature_verifier=signature_verifier, require_signed=require_signed,
+        signature_verifier=checked_ver, require_signed=checked_req,
     )
+    proxy_store = _SignatureVerifyingStoreProxy(checked_store, signature_verifier=checked_ver, require_signed=checked_req)
+    _verify_handler_index_in_store(canonical_handler, release.migration_run_context_locator, proxy_store=proxy_store, require_signed=checked_req)
     expected_surfaces = {s.surface_id for s in contract.compatibility_surfaces}
     if any(type(k) is not str for k in cases_by_surface) or set(cases_by_surface.keys()) != expected_surfaces:
         raise ClosedValidationError("cases_by_surface: keys must match contract.compatibility_surfaces")
     comparisons = tuple(
-        _evaluate_single_surface_parity(surf, cases_by_surface[surf.surface_id], canonical_handler=canonical_handler, legacy_projector=legacy_projector)
+        _evaluate_single_surface_parity(
+            surf, cases_by_surface[surf.surface_id], canonical_handler=canonical_handler,
+            legacy_projector=legacy_projector, proxy_store=proxy_store, require_signed=checked_req,
+        )
         for surf in contract.compatibility_surfaces
     )
     return release, contract, checked_alg, comparisons
+
+
+def _finalize_and_verify_seam_record(
+    record: SeamParityRecord,
+    *,
+    envelope_signer: Callable[[Mapping[str, Any], str], Mapping[str, Any]] | None,
+    checked_store: CellObjectStorePort,
+    checked_ver: P1SignatureVerifierPort | None,
+    checked_req: bool,
+) -> tuple[SeamParityRecord, ArtifactLocator]:
+    if envelope_signer is not None:
+        if not callable(envelope_signer):
+            raise ClosedValidationError("envelope_signer: expected callable")
+        expected_core = {k: v for k, v in record.to_dict().items() if k != "integrity"}
+        try:
+            signed_raw = envelope_signer(record.to_dict(), SeamParityRecord.P1_DOMAIN_PREFIX)
+        except ClosedValidationError:
+            raise
+        except Exception as exc:
+            raise ClosedValidationError(f"envelope_signer failed: {exc}") from exc
+        record = SeamParityRecord.from_dict(signed_raw, require_signed=True)
+        actual_core = {k: v for k, v in record.to_dict().items() if k != "integrity"}
+        if canonicalize_jcs(actual_core) != canonicalize_jcs(expected_core):
+            raise ClosedValidationError("envelope_signer: mutated non-integrity SeamParityRecord fields")
+    if checked_req and (record.integrity is None or not record.integrity.is_signed):
+        raise ClosedValidationError("seam_parity_record: signed 4-field P1Integrity required when require_signed=True")
+    if checked_ver is not None and record.integrity is not None and (checked_req or record.integrity.is_signed):
+        _invoke_sig_verifier(
+            checked_ver, envelope=record.to_dict(), domain_prefix=SeamParityRecord.P1_DOMAIN_PREFIX, store=checked_store
+        )
+    locator = checked_store.put_json_artifact(SeamParityRecord.SCHEMA, record.to_dict())
+    return record, locator
 
 
 def build_seam_parity_record(
@@ -299,17 +378,10 @@ def build_seam_parity_record(
         release.decomposition_manifest_head_locator, release.decomposition_manifest_locator,
         wheel_build_provenance_locator, wheel_digest, checked_alg, evaluated_at_utc, comparisons, "PASS", integrity,
     )
-    if envelope_signer is not None:
-        if not callable(envelope_signer):
-            raise ClosedValidationError("envelope_signer: expected callable")
-        signed_raw = envelope_signer(record.to_dict(), SeamParityRecord.P1_DOMAIN_PREFIX)
-        record = SeamParityRecord.from_dict(signed_raw, require_signed=True)
-    if record.integrity is not None and record.integrity.is_signed and checked_ver is not None:
-        _invoke_sig_verifier(
-            checked_ver, envelope=record.to_dict(), domain_prefix=SeamParityRecord.P1_DOMAIN_PREFIX, store=checked_store
-        )
-    locator = checked_store.put_json_artifact(SeamParityRecord.SCHEMA, record.to_dict())
-    return record, locator
+    return _finalize_and_verify_seam_record(
+        record, envelope_signer=envelope_signer, checked_store=checked_store,
+        checked_ver=checked_ver, checked_req=checked_req,
+    )
 
 
 def verify_seam_parity_record(

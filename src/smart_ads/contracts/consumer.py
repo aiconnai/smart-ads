@@ -70,18 +70,27 @@ _FLAG_KEY_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z0-9_.-]{1,128}\Z")
 
 
 def _validate_flag_routing_fields(
-    *, flag_key: object, default_enabled: object, disabled_route: object, enabled_route: object, label: str
+    *,
+    flag_key: object,
+    default_enabled: object,
+    disabled_route: object,
+    enabled_route: object,
+    label: str,
+    flag_key_field: str = "flag_key",
+    default_enabled_field: str = "default_enabled",
+    disabled_route_field: str = "disabled_legacy_route",
+    enabled_route_field: str = "enabled_smart_ads_route",
 ) -> None:
-    fk = _strict_str(flag_key, field_name=f"{label}.flag_key")
+    fk = _strict_str(flag_key, field_name=f"{label}.{flag_key_field}")
     if _FLAG_KEY_RE.fullmatch(fk) is None:
-        raise ClosedValidationError(f"{label}.flag_key: invalid flag_key {fk!r}")
+        raise ClosedValidationError(f"{label}.{flag_key_field}: invalid {flag_key_field} {fk!r}")
     if type(default_enabled) is not bool or default_enabled is not False:
-        raise ClosedValidationError(f"{label}.default_enabled: must be literal bool False")
-    dis = _strict_id(disabled_route, field_name=f"{label}.disabled_legacy_route")
+        raise ClosedValidationError(f"{label}.{default_enabled_field}: must be literal bool False")
+    dis = _strict_id(disabled_route, field_name=f"{label}.{disabled_route_field}")
     if dis == _IBVI_ADS_ROUTE or dis.startswith("smart_ads"):
-        raise ClosedValidationError(f"{label}.disabled_legacy_route: forbidden target {dis!r}")
-    if _strict_str(enabled_route, field_name=f"{label}.enabled_smart_ads_route") != _IBVI_ADS_ROUTE:
-        raise ClosedValidationError(f"{label}.enabled_smart_ads_route: must equal {_IBVI_ADS_ROUTE!r}")
+        raise ClosedValidationError(f"{label}.{disabled_route_field}: forbidden target {dis!r}")
+    if _strict_str(enabled_route, field_name=f"{label}.{enabled_route_field}") != _IBVI_ADS_ROUTE:
+        raise ClosedValidationError(f"{label}.{enabled_route_field}: must equal {_IBVI_ADS_ROUTE!r}")
 
 
 def _validate_distinct_git_artifacts(
@@ -374,7 +383,12 @@ def compute_capture_replay_digest(
         raise ClosedValidationError(f"{label}.live_adapter_object_ref: must match live_adapter_artifact.file_content_sha256")
     if validate_cell_object_ref(live_feature_flag_object_ref, field_name=f"{label}.live_feature_flag_object_ref") != f"cell-object:{f_art.file_content_sha256}":
         raise ClosedValidationError(f"{label}.live_feature_flag_object_ref: must match live_feature_flag_artifact.file_content_sha256")
-    _validate_flag_routing_fields(flag_key=live_flag_key, default_enabled=live_default_enabled, disabled_route=live_disabled_legacy_route, enabled_route=live_enabled_smart_ads_route, label=label)
+    _validate_flag_routing_fields(
+        flag_key=live_flag_key, default_enabled=live_default_enabled,
+        disabled_route=live_disabled_legacy_route, enabled_route=live_enabled_smart_ads_route, label=label,
+        flag_key_field="live_flag_key", default_enabled_field="live_default_enabled",
+        disabled_route_field="live_disabled_legacy_route", enabled_route_field="live_enabled_smart_ads_route",
+    )
     return jcs_sha256({
         "consumer_repository": consumer_repository, "consumer_commit_sha": consumer_commit_sha,
         "deployed_release_id": deployed_release_id, "runtime_binary_sha256": runtime_binary_sha256,

@@ -293,29 +293,23 @@ def project_delegation_envelope_to_mcp_context(
     envelope: IbviAdsDelegationContext,
     *,
     locator: ArtifactLocator | None = None,
+    require_signed: bool = True,
 ) -> McpDelegationContext:
     """Project a validated `IbviAdsDelegationContext` P1 envelope to runtime `McpDelegationContext`."""
+    if type(require_signed) is not bool:
+        raise ClosedValidationError("require_signed: expected bool")
     if type(envelope) is not IbviAdsDelegationContext:
-        raise ClosedValidationError(
-            "project_delegation_envelope_to_mcp_context: expected IbviAdsDelegationContext"
-        )
+        raise ClosedValidationError("project_delegation_envelope_to_mcp_context: expected IbviAdsDelegationContext")
     if envelope.integrity is not None and type(envelope.integrity) is not P1Integrity:
         raise ClosedValidationError("envelope.integrity: expected P1Integrity or None")
-    fresh = IbviAdsDelegationContext.from_dict(
-        envelope.to_dict(),
-        require_signed=envelope.integrity is not None and envelope.integrity.is_signed,
-    )
+    fresh = IbviAdsDelegationContext.from_dict(envelope.to_dict(), require_signed=require_signed)
     if fresh != envelope:
-        raise ClosedValidationError(
-            "project_delegation_envelope_to_mcp_context: corrupted IbviAdsDelegationContext"
-        )
+        raise ClosedValidationError("project_delegation_envelope_to_mcp_context: corrupted IbviAdsDelegationContext")
     expected_loc = fresh.locator()
     if locator is not None:
         if type(locator) is not ArtifactLocator:
             raise ClosedValidationError("locator: expected ArtifactLocator")
-        checked_loc = ArtifactLocator.from_dict(
-            locator.to_dict(), expected_type=IbviAdsDelegationContext.SCHEMA
-        )
+        checked_loc = ArtifactLocator.from_dict(locator.to_dict(), expected_type=IbviAdsDelegationContext.SCHEMA)
         if checked_loc != expected_loc:
             raise ClosedValidationError("locator: does not match envelope.locator()")
     ctx = McpDelegationContext(

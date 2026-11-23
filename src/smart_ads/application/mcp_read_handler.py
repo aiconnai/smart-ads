@@ -8,29 +8,36 @@ from types import MappingProxyType
 from typing import Any, Final, TypeAlias
 
 from smart_ads.analytics.cells import AnalysisResultSchema
-from smart_ads.analytics.certification import AnalyticalCertificationRecord
-from smart_ads.analytics.formulas import DerivedCertificationStatus
-from smart_ads.analytics.intelligence import FINDING_INCONCLUSIVE, EvaluationContext, Finding
+from smart_ads.analytics.certification import AnalyticalCertificationRecord, verify_certification_record
+from smart_ads.analytics.intelligence import AnalysisEvidence, EvaluationContext, Finding
 from smart_ads.analytics.policy import AnalysisPolicy, EvaluationScope
 from smart_ads.analytics.replay_bundle import AnalysisReplayInputBundle
 from smart_ads.analytics.reporting import (
-    CanonicalReportResult, ReportExecution, derive_snapshot_restatement_history, verify_report_execution,
+    CanonicalReportInput, CanonicalReportResult, ReportExecution,
+    derive_snapshot_restatement_history, verify_report_execution,
 )
 from smart_ads.analytics.results import AnalysisExecution, AnalysisResult
 from smart_ads.application.curation_pipeline import (
     _load_p1, _require_parquet_codec, _require_store_and_bool,
     verify_curation_execution, verify_dataset_snapshot, verify_operational_read_evidence,
 )
-from smart_ads.application.duckdb_execution import _resolve_verified_execution_and_results
+from smart_ads.application.duckdb_execution import (
+    _resolve_verified_execution_and_results, _verify_replay_bundle_inputs_and_binaries,
+)
+from smart_ads.application.predecessor_validators import (
+    PREDECESSOR_P1_DOMAIN_PREFIXES, verify_stored_migration_run_context,
+)
 from smart_ads.contracts.effects import _typed_locator, sort_artifact_locators
 from smart_ads.contracts.git_provenance import GitArtifactProvenance
-from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, canonicalize_jcs
+from smart_ads.contracts.jcs import ADR_P1_DOMAIN_PREFIXES, ArtifactLocator, P1Integrity, canonicalize_jcs
 from smart_ads.contracts.operational_evidence import OperationalReadEvidence
 from smart_ads.contracts.scalars import (
     ClosedValidationError, parse_iso_date, parse_timestamp_utc_micros, validate_iso_date, validate_opaque_ref,
 )
 from smart_ads.contracts.schemas import AnalyticsLandingRow
-from smart_ads.domain.catalog import DatasetSnapshot, GenerationManifest, compute_logical_rows_digest
+from smart_ads.domain.catalog import (
+    DatasetCatalogCutReceipt, DatasetSnapshot, GenerationManifest, compute_logical_rows_digest,
+)
 from smart_ads.domain.curation import CurationExecution, partition_key_for_metric_date
 from smart_ads.domain.registry import (
     AuthorizedScopeRelation, ExpectedResourceInventory, PrivateRegistrySnapshot, RegistryBinding,
@@ -44,9 +51,11 @@ from smart_ads.transports.mcp.schemas import (
 
 _ScopeKey: TypeAlias = tuple[str, str, str]
 _FindingsInputTuple: TypeAlias = tuple[
-    ArtifactLocator, str, str, str, ArtifactLocator, ArtifactLocator, Sequence[ArtifactLocator], ArtifactLocator
+    ArtifactLocator, str, str, str, ArtifactLocator, ArtifactLocator,
+    Sequence[ArtifactLocator], CanonicalReportInput | ArtifactLocator,
 ]
 _SummaryInputTuple: TypeAlias = tuple[ArtifactLocator, str, str, str, str, str, str, ArtifactLocator]
+_SnapMemoEntry: TypeAlias = tuple[DatasetSnapshot, ArtifactLocator, dict[str, Any]]
 
 _INDEX_BUILD_GUARD: Final[object] = object()
 _DEFERRED_PERF_METHODS: Final[frozenset[str]] = frozenset(
@@ -61,9 +70,12 @@ _ALLOWED_CADENCES: Final[frozenset[str]] = frozenset({"daily", "weekly"})
 class _SignatureVerifyingStoreProxy(CellObjectStorePort):
     """Read-only `CellObjectStorePort` proxy enforcing Layer-3 JCS and P1 signature checks."""
 
-    def __init__(self, store: CellObjectStorePort, *, signature_verifier: P1SignatureVerifierPort | None) -> None:
+    def __init__(
+        self, store: CellObjectStorePort, *, signature_verifier: P1SignatureVerifierPort | None, require_signed: bool = True
+    ) -> None:
         self._store = store
         self._signature_verifier = signature_verifier
+        self._require_signed = require_signed
         self._verified_p1: set[tuple[str, str]] = set()
 
     def put_bytes(self, raw: bytes) -> str:
@@ -85,12 +97,14 @@ class _SignatureVerifyingStoreProxy(CellObjectStorePort):
         raw_dict = self._store.get_json_artifact(checked_loc)
         if ArtifactLocator.for_canonical_bytes(checked_loc.artifact_type, canonicalize_jcs(raw_dict)) != checked_loc:
             raise ClosedValidationError("store.get_json_artifact: Layer-3 canonical digest mismatch")
-        if self._signature_verifier is not None and checked_loc.artifact_type in ADR_P1_DOMAIN_PREFIXES:
+        domain_prefix = ADR_P1_DOMAIN_PREFIXES.get(checked_loc.artifact_type) or PREDECESSOR_P1_DOMAIN_PREFIXES.get(checked_loc.artifact_type)
+        if self._signature_verifier is not None and domain_prefix is not None:
+            should_verify = self._require_signed or ("integrity" in raw_dict and P1Integrity.from_dict(raw_dict["integrity"]).is_signed)
             memo_key = (checked_loc.artifact_type, checked_loc.content_digest)
-            if memo_key not in self._verified_p1:
+            if should_verify and memo_key not in self._verified_p1:
                 try:
                     self._signature_verifier.verify_p1_envelope_signature(
-                        envelope=raw_dict, domain_prefix=ADR_P1_DOMAIN_PREFIXES[checked_loc.artifact_type], store=self._store
+                        envelope=raw_dict, domain_prefix=domain_prefix, store=self._store
                     )
                 except ClosedValidationError:
                     raise
@@ -113,7 +127,7 @@ def _prepare_read_ports(
         or not callable(getattr(signature_verifier, "verify_p1_envelope_signature", None))
     ):
         raise ClosedValidationError("signature_verifier: expected P1SignatureVerifierPort")
-    return _SignatureVerifyingStoreProxy(checked_store, signature_verifier=signature_verifier), checked_codec, checked_req
+    return _SignatureVerifyingStoreProxy(checked_store, signature_verifier=signature_verifier, require_signed=checked_req), checked_codec, checked_req
 
 
 def _decode_manifest_rows(
@@ -136,13 +150,28 @@ def _decode_manifest_rows(
     return ordered_rows
 
 
+def _verify_snapshot_run_context(
+    snapshot: DatasetSnapshot, *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool
+) -> tuple[ArtifactLocator, dict[str, Any]]:
+    cut = _load_p1(
+        proxy_store, snapshot.catalog_cut_receipt_locator, DatasetCatalogCutReceipt,
+        field_name="snapshot.catalog_cut_receipt_locator", require_signed=require_signed,
+    )
+    run_loc = cut.migration_run_context_locator
+    run_ctx = verify_stored_migration_run_context(
+        proxy_store._store, run_loc, signature_verifier=proxy_store._signature_verifier, require_signed=require_signed
+    )
+    return run_loc, run_ctx
+
+
 def _load_snapshot_rows_from_proxy(
     snapshot_locator: ArtifactLocator, *, proxy_store: _SignatureVerifyingStoreProxy,
     parquet_codec: ParquetLandingCodecPort, require_signed: bool,
-) -> tuple[ArtifactLocator, DatasetSnapshot, tuple[AnalyticsLandingRow, ...]]:
+) -> tuple[ArtifactLocator, DatasetSnapshot, tuple[AnalyticsLandingRow, ...], ArtifactLocator, dict[str, Any]]:
     checked_loc = _typed_locator(snapshot_locator, field_name="snapshot_locator", expected_type=DatasetSnapshot.SCHEMA)
     snap = _load_p1(proxy_store, checked_loc, DatasetSnapshot, field_name="snapshot_locator", require_signed=require_signed)
     verified_snap = verify_dataset_snapshot(snap, store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed)
+    run_loc, run_ctx = _verify_snapshot_run_context(verified_snap, proxy_store=proxy_store, require_signed=require_signed)
     all_rows: list[AnalyticsLandingRow] = []
     for head in verified_snap.partition_heads:
         gm = _load_p1(
@@ -153,7 +182,7 @@ def _load_snapshot_rows_from_proxy(
             raise ClosedValidationError("dataset_snapshot: head partition_key mismatch")
         all_rows.extend(_decode_manifest_rows(gm, store=proxy_store, parquet_codec=parquet_codec))
     sorted_rows, _ = compute_logical_rows_digest(all_rows)
-    return checked_loc, verified_snap, sorted_rows
+    return checked_loc, verified_snap, sorted_rows, run_loc, run_ctx
 
 
 def load_verified_snapshot_rows(
@@ -164,11 +193,11 @@ def load_verified_snapshot_rows(
     signature_verifier: P1SignatureVerifierPort | None = None,
     require_signed: bool = True,
 ) -> tuple[DatasetSnapshot, tuple[AnalyticsLandingRow, ...]]:
-    """Verify `DatasetSnapshot`, active `GenerationManifest`s, and Parquet v1 rows."""
+    """Verify `DatasetSnapshot`, `migration_run_context/v1`, active `GenerationManifest`s, and Parquet v1 rows."""
     proxy_store, checked_codec, checked_req = _prepare_read_ports(
         store=store, parquet_codec=parquet_codec, signature_verifier=signature_verifier, require_signed=require_signed
     )
-    _, verified_snap, sorted_rows = _load_snapshot_rows_from_proxy(
+    _, verified_snap, sorted_rows, _, _ = _load_snapshot_rows_from_proxy(
         snapshot_locator, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req
     )
     return verified_snap, sorted_rows
@@ -216,30 +245,36 @@ def _load_verified_inventory(
 
 
 def _get_or_verify_snapshot(
-    snap_locator: ArtifactLocator, *, proxy_store: _SignatureVerifyingStoreProxy,
-    parquet_codec: ParquetLandingCodecPort, require_signed: bool, snap_memo: dict[bytes, DatasetSnapshot], label: str,
-) -> tuple[ArtifactLocator, DatasetSnapshot]:
+    snap_locator: ArtifactLocator, *, expected_tenant_ref: str, proxy_store: _SignatureVerifyingStoreProxy,
+    parquet_codec: ParquetLandingCodecPort, require_signed: bool, snap_memo: dict[bytes, _SnapMemoEntry], label: str,
+) -> tuple[ArtifactLocator, DatasetSnapshot, ArtifactLocator]:
     checked_loc = _typed_locator(snap_locator, field_name=label, expected_type=DatasetSnapshot.SCHEMA)
     memo_key = canonicalize_jcs(checked_loc.to_dict())
     cached = snap_memo.get(memo_key)
     if cached is not None:
-        return checked_loc, cached
+        if cached[2]["tenant_ref"] != expected_tenant_ref:
+            raise ClosedValidationError(f"{label}: migration_run_context.tenant_ref mismatch")
+        return checked_loc, cached[0], cached[1]
     raw_snap = _load_p1(proxy_store, checked_loc, DatasetSnapshot, field_name=label, require_signed=require_signed)
     verified = verify_dataset_snapshot(raw_snap, store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed)
-    snap_memo[memo_key] = verified
-    return checked_loc, verified
+    run_loc, run_ctx = _verify_snapshot_run_context(verified, proxy_store=proxy_store, require_signed=require_signed)
+    if run_ctx["tenant_ref"] != expected_tenant_ref:
+        raise ClosedValidationError(f"{label}: migration_run_context.tenant_ref != registry.tenant_ref")
+    snap_memo[memo_key] = (verified, run_loc, run_ctx)
+    return checked_loc, verified, run_loc
 
 
 def _load_execution_bundle_and_policy(
-    exec_locator: ArtifactLocator, expected_snap_loc: ArtifactLocator, *,
+    exec_locator: ArtifactLocator, expected_snap_loc: ArtifactLocator, expected_run_loc: ArtifactLocator, *,
     proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool,
 ) -> tuple[ArtifactLocator, AnalysisExecution, AnalysisReplayInputBundle, tuple[AnalysisResult, ...], tuple[AnalysisResultSchema, ...], AnalysisPolicy]:
     checked_exec_loc = _typed_locator(exec_locator, field_name="analysis_execution_locator", expected_type=AnalysisExecution.SCHEMA)
     raw_exec = _load_p1(proxy_store, checked_exec_loc, AnalysisExecution, field_name="analysis_execution_locator", require_signed=require_signed)
     bundle_loc = raw_exec.analysis_replay_input_bundle_locator
     bundle = _load_p1(proxy_store, bundle_loc, AnalysisReplayInputBundle, field_name="analysis_replay_input_bundle_locator", require_signed=require_signed)
-    if bundle.dataset_snapshot_locator != expected_snap_loc:
-        raise ClosedValidationError("analysis_replay_input_bundle: dataset_snapshot_locator mismatch")
+    if (bundle.dataset_snapshot_locator, bundle.migration_run_context_locator) != (expected_snap_loc, expected_run_loc):
+        raise ClosedValidationError("analysis_replay_input_bundle: snapshot or migration_run_context_locator mismatch")
+    _verify_replay_bundle_inputs_and_binaries(bundle, store=proxy_store, require_signed=require_signed)
     v_exec, results, schemas = _resolve_verified_execution_and_results(
         bundle, bundle_loc, checked_exec_loc, store=proxy_store, require_signed=require_signed
     )
@@ -247,38 +282,85 @@ def _load_execution_bundle_and_policy(
     return checked_exec_loc, v_exec, bundle, results, schemas, policy
 
 
-def _verify_findings_and_cert_record(
-    *, finding_locators: Sequence[ArtifactLocator], cert_locator: ArtifactLocator, exec_loc: ArtifactLocator,
-    execution: AnalysisExecution, policy_loc: ArtifactLocator, snap_loc: ArtifactLocator,
-    inventory: ExpectedResourceInventory, results: tuple[AnalysisResult, ...],
+def _resolve_findings_eval_input(
+    eval_spec: object, *, checked_snap_loc: ArtifactLocator, snap_run_loc: ArtifactLocator,
+    checked_exec_loc: ArtifactLocator, cert_loc: ArtifactLocator,
+    proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool, label: str,
+) -> CanonicalReportInput:
+    if type(eval_spec) is CanonicalReportInput:
+        fresh = CanonicalReportInput.from_dict(eval_spec.to_dict())
+        if fresh != eval_spec:
+            raise ClosedValidationError(f"{label}: corrupted CanonicalReportInput")
+        return fresh
+    if type(eval_spec) is ArtifactLocator:
+        rep_loc = _typed_locator(eval_spec, field_name=label, expected_type=ReportExecution.SCHEMA)
+        rep = _load_p1(proxy_store, rep_loc, ReportExecution, field_name=label, require_signed=require_signed)
+        if (rep.dataset_snapshot_locator, rep.migration_run_context_locator, rep.analysis_execution_locator) != (
+            checked_snap_loc, snap_run_loc, checked_exec_loc
+        ) or cert_loc not in rep.certification_record_locators:
+            raise ClosedValidationError(f"{label}: ReportExecution snapshot/run/execution/cert binding mismatch")
+        return rep.canonical_report_input
+    raise ClosedValidationError(f"{label}: expected CanonicalReportInput or ReportExecution ArtifactLocator")
+
+
+def _build_verified_eval_context(
+    rep_in: CanonicalReportInput, snapshot: DatasetSnapshot, snap_run_loc: ArtifactLocator, *,
+    registry_locator: ArtifactLocator, scope_key: _ScopeKey, binding: RegistryBinding, policy: AnalysisPolicy,
+    proxy_store: _SignatureVerifyingStoreProxy, parquet_codec: ParquetLandingCodecPort, require_signed: bool,
+) -> tuple[ExpectedResourceInventory, CurationExecution, dict[bytes, GenerationManifest], dict[str, tuple[AnalyticsLandingRow, ...]], EvaluationContext]:
+    if rep_in.dataset_snapshot_digest != snapshot.snapshot_digest:
+        raise ClosedValidationError("canonical_report_input: dataset_snapshot_digest mismatch")
+    inv = _load_verified_inventory(
+        proxy_store, rep_in.expected_resource_inventory_locator, registry_locator=registry_locator,
+        scope_key=scope_key, expected_account_ref=binding.account_ref, require_signed=require_signed, label="eval.inventory",
+    )
+    cur_exec = _load_p1(proxy_store, rep_in.curation_execution_locator, CurationExecution, field_name="eval.curation", require_signed=require_signed)
+    verify_curation_execution(cur_exec, store=proxy_store, require_signed=require_signed)
+    gen_by_key, active_keys, decoded_by_ref = _load_snapshot_lineage_generations(
+        snapshot, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed
+    )
+    if cur_exec.migration_run_context_locator != snap_run_loc or any(gm.migration_run_context_locator != snap_run_loc for gm in gen_by_key.values()):
+        raise ClosedValidationError("eval_context: cross-run CurationExecution or GenerationManifest forbidden")
+    if canonicalize_jcs(rep_in.curation_execution_locator.to_dict()) not in {canonicalize_jcs(gen_by_key[k].curation_execution_locator.to_dict()) for k in active_keys}:
+        raise ClosedValidationError("eval_context: curation_execution_locator absent from active snapshot generations")
+    hist_keys = {canonicalize_jcs(loc.to_dict()) for loc in rep_in.restatement_history_generation_locators}
+    if not hist_keys.issubset(gen_by_key):
+        raise ClosedValidationError("eval_context: restatement_history_generation_locators outside lineage")
+    start_ym, end_ym = cur_exec.curation_window.start_date[:7], cur_exec.curation_window.end_date[:7]
+    if any(start_ym <= f"{gen_by_key[ak].partition_key[5:9]}-{gen_by_key[ak].partition_key[16:18]}" <= end_ym and ak not in hist_keys for ak in set(gen_by_key) - active_keys):
+        raise ClosedValidationError("eval_context: overlapping ancestor generation omitted from restatement_history_generation_locators")
+    pool_rows = (r for k in sorted(active_keys | hist_keys) for r in decoded_by_ref[gen_by_key[k].locator().object_ref])
+    eval_ctx = EvaluationContext(
+        policy, EvaluationScope(scope_key[0], scope_key[2], "campaign", binding.ad_platform_ref, binding.currency),
+        rep_in.evaluation_instant_utc, rep_in.window_end_date, cur_exec.restatement_lookback_days,
+        cur_exec.curation_anchor_date, inv, rep_in.metrics_result_key, derive_snapshot_restatement_history(inv, pool_rows),
+    )
+    return inv, cur_exec, gen_by_key, decoded_by_ref, eval_ctx
+
+
+def _load_and_replay_certified_findings(
+    *, finding_locators: Sequence[ArtifactLocator], cert_locator: ArtifactLocator,
+    rep_in: CanonicalReportInput, eval_ctx: EvaluationContext, evidence: AnalysisEvidence,
     proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool,
 ) -> tuple[AnalyticalCertificationRecord, tuple[Finding, ...]]:
     if isinstance(finding_locators, (str, bytes)) or not isinstance(finding_locators, Sequence):
         raise ClosedValidationError("finding_locators: expected Sequence of ArtifactLocator")
-    inv_res = {u.resource_ref for u in inventory.expected_resources}
-    for res in results:
-        names = [c.name for c in res.result_projection.columns]
-        if "resource_ref" in names and any(r[names.index("resource_ref")].value not in inv_res for r in res.result_projection.rows if r[names.index("resource_ref")].value is not None):
-            raise ClosedValidationError("analysis_result: resource_ref outside ExpectedResourceInventory")
     raw_locs = tuple(_typed_locator(loc, field_name="finding_locators[]", expected_type=Finding.SCHEMA) for loc in finding_locators)
     sorted_locs = sort_artifact_locators(raw_locs, expected_type=Finding.SCHEMA, allow_empty=True, field_name="finding_locators")
     findings = [_load_p1(proxy_store, loc, Finding, field_name="finding_locators[]", require_signed=require_signed) for loc in raw_locs]
-    seen_fkeys: set[str] = set()
-    for f_obj in findings:
-        if f_obj.finding_key in seen_fkeys or (f_obj.analysis_execution_locator, f_obj.analysis_policy_locator) != (exec_loc, policy_loc):
-            raise ClosedValidationError("finding: duplicate finding_key or execution/policy locator mismatch")
-        if execution.canonical_result_set.entry(f_obj.result_key).result_locator != f_obj.result_locator or not set(f_obj.evidence_locators).issubset({f_obj.result_locator, snap_loc}):
-            raise ClosedValidationError("finding: result_locator or evidence_locators mismatch")
-        seen_fkeys.add(f_obj.finding_key)
+    if len({f.finding_key for f in findings}) != len(findings):
+        raise ClosedValidationError("finding_locators: duplicate finding_key")
     ordered = tuple(sorted(findings, key=lambda f: f.finding_key.encode("utf-8")))
     cert_rec = _load_p1(proxy_store, cert_locator, AnalyticalCertificationRecord, field_name="certification_record_locator", require_signed=require_signed)
+    verify_certification_record(cert_rec, eval_ctx, evidence, ordered, rep_in.attested_certification_inputs)
+    exp_fdigs = tuple(sorted((f.finding_digest for f in ordered), key=lambda s: s.encode("utf-8")))
     if (
         cert_rec.finding_locators != sorted_locs
-        or cert_rec.output_digest != execution.canonical_result_set.canonical_result_digest
-        or cert_rec.mutation_recommendations_blocked != any(f.mutation_recommendation_blocked for f in ordered)
-        or (any(f.finding_status == FINDING_INCONCLUSIVE for f in ordered) and cert_rec.derived_certification_status > DerivedCertificationStatus.UNAVAILABLE)
+        or rep_in.canonical_result_digest != evidence.execution.canonical_result_set.canonical_result_digest
+        or (rep_in.derived_certification_status, rep_in.mutation_recommendations_blocked, rep_in.finding_digests)
+        != (cert_rec.derived_certification_status, cert_rec.mutation_recommendations_blocked, exp_fdigs)
     ):
-        raise ClosedValidationError("certification_record: finding_locators, output_digest, or status mismatch")
+        raise ClosedValidationError("findings_entries: CanonicalReportInput or finding_locators mismatch against certified replay")
     return cert_rec, ordered
 
 
@@ -312,7 +394,7 @@ def _index_scope_inventories(
 def _index_findings_entries(
     findings_entries: Sequence[Any], *, registry: PrivateRegistrySnapshot, registry_locator: ArtifactLocator,
     proxy_store: _SignatureVerifyingStoreProxy, parquet_codec: ParquetLandingCodecPort,
-    require_signed: bool, snap_memo: dict[bytes, DatasetSnapshot],
+    require_signed: bool, snap_memo: dict[bytes, _SnapMemoEntry],
 ) -> Mapping[tuple[str, str, str, str], _VerifiedFindingsEntry]:
     if isinstance(findings_entries, (str, bytes)) or not isinstance(findings_entries, Sequence):
         raise ClosedValidationError("findings_entries: expected Sequence")
@@ -320,30 +402,31 @@ def _index_findings_entries(
     for idx, entry in enumerate(findings_entries):
         if type(entry) is not tuple or len(entry) != 8:
             raise ClosedValidationError(f"findings_entries[{idx}]: expected 8-tuple")
-        snap_loc, t_ref, b_ref, s_ref, exec_loc, cert_loc, f_locs, inv_loc = entry
+        snap_loc, t_ref, b_ref, s_ref, exec_loc, cert_loc, f_locs, eval_spec = entry
         scope_key, binding = _validate_scope_against_registry(t_ref, b_ref, s_ref, registry=registry, label=f"findings_entries[{idx}]")
-        checked_snap_loc, _ = _get_or_verify_snapshot(
-            snap_loc, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed,
-            snap_memo=snap_memo, label=f"findings_entries[{idx}].snapshot",
+        checked_snap_loc, snapshot, snap_run_loc = _get_or_verify_snapshot(
+            snap_loc, expected_tenant_ref=registry.tenant_ref, proxy_store=proxy_store, parquet_codec=parquet_codec,
+            require_signed=require_signed, snap_memo=snap_memo, label=f"findings_entries[{idx}].snapshot",
         )
         idx_key = (checked_snap_loc.content_digest, *scope_key)
         if idx_key in out:
             raise ClosedValidationError(f"findings_entries[{idx}]: duplicate index key")
-        inv = _load_verified_inventory(
-            proxy_store, inv_loc, registry_locator=registry_locator, scope_key=scope_key,
-            expected_account_ref=binding.account_ref, require_signed=require_signed, label=f"findings_entries[{idx}].inventory",
+        checked_exec_loc, v_exec, bundle, results, schemas, policy = _load_execution_bundle_and_policy(
+            exec_loc, checked_snap_loc, snap_run_loc, proxy_store=proxy_store, require_signed=require_signed
         )
-        checked_exec_loc, v_exec, bundle, results, _, policy = _load_execution_bundle_and_policy(
-            exec_loc, checked_snap_loc, proxy_store=proxy_store, require_signed=require_signed
+        checked_cert_loc = _typed_locator(cert_loc, field_name="certification_record_locator", expected_type=AnalyticalCertificationRecord.SCHEMA)
+        rep_in = _resolve_findings_eval_input(
+            eval_spec, checked_snap_loc=checked_snap_loc, snap_run_loc=snap_run_loc, checked_exec_loc=checked_exec_loc,
+            cert_loc=checked_cert_loc, proxy_store=proxy_store, require_signed=require_signed, label=f"findings_entries[{idx}].eval_spec",
         )
-        if (policy.tenant_ref, policy.applicability_scope.resource_scope_ref, policy.applicability_scope.currency) != (
-            scope_key[0], scope_key[2], binding.currency
-        ):
-            raise ClosedValidationError(f"findings_entries[{idx}]: policy scope mismatch")
-        cert_rec, ordered = _verify_findings_and_cert_record(
-            finding_locators=f_locs, cert_locator=cert_loc, exec_loc=checked_exec_loc, execution=v_exec,
-            policy_loc=bundle.analysis_policy_locator, snap_loc=checked_snap_loc, inventory=inv,
-            results=results, proxy_store=proxy_store, require_signed=require_signed,
+        _, _, _, _, eval_ctx = _build_verified_eval_context(
+            rep_in, snapshot, snap_run_loc, registry_locator=registry_locator, scope_key=scope_key,
+            binding=binding, policy=policy, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed,
+        )
+        evidence = AnalysisEvidence(v_exec, results, schemas, checked_snap_loc, bundle.analysis_policy_locator, require_signed, bundle.migration_run_context_locator)
+        cert_rec, ordered = _load_and_replay_certified_findings(
+            finding_locators=f_locs, cert_locator=checked_cert_loc, rep_in=rep_in, eval_ctx=eval_ctx,
+            evidence=evidence, proxy_store=proxy_store, require_signed=require_signed,
         )
         out[idx_key] = _VerifiedFindingsEntry(checked_snap_loc, cert_rec, ordered)
     return MappingProxyType(out)
@@ -397,54 +480,43 @@ def _load_snapshot_lineage_generations(
 
 
 def _verify_report_transitive_graph(
-    report: ReportExecution, snapshot: DatasetSnapshot, snap_loc: ArtifactLocator, *,
+    report: ReportExecution, snapshot: DatasetSnapshot, snap_loc: ArtifactLocator, snap_run_loc: ArtifactLocator, *,
     registry_locator: ArtifactLocator, scope_key: _ScopeKey, binding: RegistryBinding,
     proxy_store: _SignatureVerifyingStoreProxy, parquet_codec: ParquetLandingCodecPort, require_signed: bool,
-) -> None:
-    rep_in = report.canonical_report_input
-    inv = _load_verified_inventory(
-        proxy_store, rep_in.expected_resource_inventory_locator, registry_locator=registry_locator,
-        scope_key=scope_key, expected_account_ref=binding.account_ref, require_signed=require_signed, label="report.inventory",
+) -> ExpectedResourceInventory:
+    if report.migration_run_context_locator != snap_run_loc:
+        raise ClosedValidationError("report_execution: migration_run_context_locator mismatch against snapshot")
+    _, execution, bundle, results, schemas, policy = _load_execution_bundle_and_policy(
+        report.analysis_execution_locator, snap_loc, snap_run_loc, proxy_store=proxy_store, require_signed=require_signed
     )
-    cur_exec = _load_p1(proxy_store, rep_in.curation_execution_locator, CurationExecution, field_name="report.curation", require_signed=require_signed)
-    verify_curation_execution(cur_exec, store=proxy_store, require_signed=require_signed)
-    gen_by_key, active_keys, decoded_by_ref = _load_snapshot_lineage_generations(
-        snapshot, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed
+    inv, cur_exec, gen_by_key, decoded_by_ref, eval_ctx = _build_verified_eval_context(
+        report.canonical_report_input, snapshot, snap_run_loc, registry_locator=registry_locator,
+        scope_key=scope_key, binding=binding, policy=policy, proxy_store=proxy_store,
+        parquet_codec=parquet_codec, require_signed=require_signed,
     )
     op_evs = tuple(_load_p1(proxy_store, loc, OperationalReadEvidence, field_name="report.evidences[]", require_signed=require_signed) for loc in report.operational_read_evidence_locators)
     for ev in op_evs:
         verify_operational_read_evidence(ev, store=proxy_store, require_signed=require_signed)
-    _, execution, bundle, results, schemas, policy = _load_execution_bundle_and_policy(
-        report.analysis_execution_locator, snap_loc, proxy_store=proxy_store, require_signed=require_signed
-    )
     findings = tuple(sorted((_load_p1(proxy_store, loc, Finding, field_name="report.findings[]", require_signed=require_signed) for loc in report.finding_locators), key=lambda f: f.finding_key.encode("utf-8")))
     certs = tuple(_load_p1(proxy_store, loc, AnalyticalCertificationRecord, field_name="report.certs[]", require_signed=require_signed) for loc in report.certification_record_locators)
     tmpl_prov = _load_p1(proxy_store, report.report_template_provenance_locator, GitArtifactProvenance, field_name="report.template", require_signed=require_signed)
     rnd_prov = _load_p1(proxy_store, report.render_algorithm_identity.git_artifact_provenance_locator, GitArtifactProvenance, field_name="report.render", require_signed=require_signed)
-    hist_keys = {canonicalize_jcs(loc.to_dict()) for loc in rep_in.restatement_history_generation_locators}
-    if not hist_keys.issubset(gen_by_key):
-        raise ClosedValidationError("report_execution: restatement_history_generation_locators outside lineage")
-    pool_rows = (r for k in sorted(active_keys | hist_keys) for r in decoded_by_ref[gen_by_key[k].locator().object_ref])
-    eval_ctx = EvaluationContext(
-        policy, EvaluationScope(scope_key[0], scope_key[2], "campaign", binding.ad_platform_ref, binding.currency),
-        rep_in.evaluation_instant_utc, rep_in.window_end_date, cur_exec.restatement_lookback_days,
-        cur_exec.curation_anchor_date, inv, rep_in.metrics_result_key, derive_snapshot_restatement_history(inv, pool_rows),
-    )
     verify_report_execution(
         report, snapshot=snapshot, curation_execution=cur_exec,
         generation_manifests=tuple(gen_by_key[k] for k in sorted(gen_by_key)),
         decoded_generation_rows=decoded_by_ref, operational_evidences=op_evs, replay_bundle=bundle,
         execution=execution, results=results, result_schemas=schemas, policy_obj=policy,
         findings=findings, certifications=certs, evaluation_context=eval_ctx,
-        attested_inputs=rep_in.attested_certification_inputs, template_provenance=tmpl_prov,
+        attested_inputs=report.canonical_report_input.attested_certification_inputs, template_provenance=tmpl_prov,
         render_provenance=rnd_prov, require_signed=require_signed,
     )
+    return inv
 
 
 def _index_summary_report_entries(
     summary_report_entries: Sequence[Any], *, registry: PrivateRegistrySnapshot, registry_locator: ArtifactLocator,
     proxy_store: _SignatureVerifyingStoreProxy, parquet_codec: ParquetLandingCodecPort,
-    require_signed: bool, snap_memo: dict[bytes, DatasetSnapshot],
+    require_signed: bool, snap_memo: dict[bytes, _SnapMemoEntry],
 ) -> Mapping[tuple[str, str, str, str, str, str, str], _VerifiedSummaryReportEntry]:
     if isinstance(summary_report_entries, (str, bytes)) or not isinstance(summary_report_entries, Sequence):
         raise ClosedValidationError("summary_report_entries: expected Sequence")
@@ -455,9 +527,9 @@ def _index_summary_report_entries(
         snap_loc, t_ref, b_ref, s_ref, cadence, p_start, p_end, rep_loc = entry
         scope_key, binding = _validate_scope_against_registry(t_ref, b_ref, s_ref, registry=registry, label=f"summary_report_entries[{idx}]")
         c_cadence, c_start, c_end = _validate_summary_cadence_window(cadence, p_start, p_end, label=f"summary_report_entries[{idx}]")
-        checked_snap_loc, snapshot = _get_or_verify_snapshot(
-            snap_loc, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed,
-            snap_memo=snap_memo, label=f"summary_report_entries[{idx}].snapshot",
+        checked_snap_loc, snapshot, snap_run_loc = _get_or_verify_snapshot(
+            snap_loc, expected_tenant_ref=registry.tenant_ref, proxy_store=proxy_store, parquet_codec=parquet_codec,
+            require_signed=require_signed, snap_memo=snap_memo, label=f"summary_report_entries[{idx}].snapshot",
         )
         idx_key = (checked_snap_loc.content_digest, *scope_key, c_cadence, c_start, c_end)
         if idx_key in out:
@@ -466,10 +538,12 @@ def _index_summary_report_entries(
         report = _load_p1(proxy_store, checked_rep_loc, ReportExecution, field_name="report_execution_locator", require_signed=require_signed)
         if report.dataset_snapshot_locator != checked_snap_loc or report.canonical_report_input.window_end_date != c_end:
             raise ClosedValidationError(f"summary_report_entries[{idx}]: report snapshot or window_end_date mismatch")
-        _verify_report_transitive_graph(
-            report, snapshot, checked_snap_loc, registry_locator=registry_locator, scope_key=scope_key,
+        inv = _verify_report_transitive_graph(
+            report, snapshot, checked_snap_loc, snap_run_loc, registry_locator=registry_locator, scope_key=scope_key,
             binding=binding, proxy_store=proxy_store, parquet_codec=parquet_codec, require_signed=require_signed,
         )
+        if not (inv.date_range.start_date <= c_start and c_end <= inv.date_range.end_date):
+            raise ClosedValidationError(f"summary_report_entries[{idx}]: inventory date_range does not cover [{c_start!r}, {c_end!r}]")
         out[idx_key] = _VerifiedSummaryReportEntry(checked_snap_loc, checked_rep_loc, report.canonical_report_result)
     return MappingProxyType(out)
 
@@ -486,6 +560,8 @@ class McpVerifiedReadIndex:
     scope_inventories: Mapping[_ScopeKey, tuple[ExpectedResourceInventory, ...]]
     findings_index: Mapping[tuple[str, str, str, str], _VerifiedFindingsEntry]
     summary_reports_index: Mapping[tuple[str, str, str, str, str, str, str], _VerifiedSummaryReportEntry]
+    require_signed: bool
+    run_context_locators: frozenset[ArtifactLocator]
     _build_guard: object
 
     def __post_init__(self) -> None:
@@ -516,10 +592,12 @@ class McpVerifiedReadIndex:
         registry = _load_p1(
             proxy_store, checked_reg_loc, PrivateRegistrySnapshot, field_name="registry_snapshot_locator", require_signed=checked_req
         )
-        checked_act_loc, active_snap, active_rows = _load_snapshot_rows_from_proxy(
+        checked_act_loc, active_snap, active_rows, act_run_loc, act_run_ctx = _load_snapshot_rows_from_proxy(
             active_dataset_snapshot_locator, proxy_store=proxy_store, parquet_codec=checked_codec, require_signed=checked_req
         )
-        snap_memo: dict[bytes, DatasetSnapshot] = {canonicalize_jcs(checked_act_loc.to_dict()): active_snap}
+        if act_run_ctx["tenant_ref"] != registry.tenant_ref:
+            raise ClosedValidationError("active_dataset_snapshot: migration_run_context.tenant_ref != registry.tenant_ref")
+        snap_memo: dict[bytes, _SnapMemoEntry] = {canonicalize_jcs(checked_act_loc.to_dict()): (active_snap, act_run_loc, act_run_ctx)}
         scope_invs = _index_scope_inventories(
             scope_inventory_locators, registry=registry, registry_locator=checked_reg_loc,
             proxy_store=proxy_store, require_signed=checked_req,
@@ -532,9 +610,10 @@ class McpVerifiedReadIndex:
             summary_report_entries, registry=registry, registry_locator=checked_reg_loc, proxy_store=proxy_store,
             parquet_codec=checked_codec, require_signed=checked_req, snap_memo=snap_memo,
         )
+        run_locs = frozenset(entry[1] for entry in snap_memo.values())
         return cls(
             checked_reg_loc, registry, checked_act_loc, active_snap, active_rows,
-            scope_invs, findings_idx, reports_idx, _INDEX_BUILD_GUARD,
+            scope_invs, findings_idx, reports_idx, checked_req, run_locs, _INDEX_BUILD_GUARD,
         )
 
 

@@ -325,6 +325,28 @@ def _verify_visited_retention_root(
     if outer_loc.object_ref in sub_refs or root.pinned_object_refs != ordered or root.pinned_object_set_digest != compute_object_ref_set_digest(ordered, allow_empty=False):
         raise ClosedValidationError("retention_root: pinned_object_refs or digest mismatch against transitive closure")
 
+def _verify_bare_binary_refs(parsed: Any, *, store: CellObjectStorePort, raw_bins: list[str]) -> None:
+    if isinstance(parsed, LegacySeamRelease):
+        pairs: tuple[tuple[str, str | None], ...] = (
+            (parsed.baseline_commit_object_ref, None),
+            *((e.child_commit_object_ref, None) for e in parsed.parent_edge_chain),
+        )
+    elif isinstance(parsed, ConsumerDeploymentReadback):
+        pairs = (
+            (parsed.live_adapter_object_ref, parsed.live_adapter_artifact.file_content_sha256),
+            (parsed.live_feature_flag_object_ref, parsed.live_feature_flag_artifact.file_content_sha256),
+        )
+    else:
+        return
+    for ref, exp_sha in pairs:
+        exp_digest = ref.removeprefix("cell-object:")
+        if exp_sha is not None and exp_digest != exp_sha:
+            raise ClosedValidationError(f"retention_reachability_graph: object_ref {ref!r} != {exp_sha!r}")
+        raw = store.get_bytes(ref)
+        if len(raw) < 1 or "sha256:" + hashlib.sha256(raw).hexdigest() != exp_digest:
+            raise ClosedValidationError(f"retention_reachability_graph: missing, empty, or SHA-256-mismatched blob {ref!r}")
+        raw_bins.append(ref)
+
 def _visit_locator(
     loc: ArtifactLocator, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None, require_signed: bool,
     visiting: set[bytes], visiting_refs: set[str], visited: dict[bytes, ArtifactLocator],
@@ -342,6 +364,7 @@ def _visit_locator(
     raw_children: list[ArtifactLocator] = []
     raw_bins: list[str] = []
     _scan_json_tree_references(raw_doc, is_root=True, depth=0, store=store, parquet_codec=parquet_codec, child_locs=raw_children, binary_refs=raw_bins)
+    _verify_bare_binary_refs(parsed, store=store, raw_bins=raw_bins)
     sorted_children = _dedup_sorted_locators(raw_children, field_name="child_locators")
     sorted_bins = sort_cell_object_refs(set(raw_bins), allow_empty=True, field_name="binary_refs")
     for child_loc in sorted_children:

@@ -16,98 +16,47 @@ from smart_ads.adapters.consumer.routing_analyzer import Cpython312AstConsumerRo
 from smart_ads.adapters.storage import InMemoryCellObjectStore
 import smart_ads.application as application_pkg
 from smart_ads.application import (
-    VerifiedStoreMcpReadHandler,
-    build_seam_parity_record,
-    verify_consumer_deployment_readback,
-    verify_consumer_feature_flag_contract,
-    verify_git_commit_parent_chain,
-    verify_ibvi_ads_delegation_contract,
-    verify_legacy_seam_contract,
-    verify_legacy_seam_release,
-    verify_seam_parity_record,
-    verify_stored_canonical_build_chain,
-    verify_stored_decomposition_tip,
-    verify_stored_deployment_config_result,
-    verify_stored_legacy_merge_evidence,
-    verify_stored_migration_run_context,
-    verify_tripartite_target,
+    PREDECESSOR_P1_DOMAIN_PREFIXES, VerifiedStoreMcpReadHandler, build_seam_parity_record,
+    verify_consumer_deployment_readback, verify_consumer_feature_flag_contract, verify_git_commit_parent_chain,
+    verify_ibvi_ads_delegation_contract, verify_legacy_seam_contract, verify_legacy_seam_release,
+    verify_seam_parity_record, verify_stored_canonical_build_chain, verify_stored_decomposition_tip,
+    verify_stored_deployment_config_result, verify_stored_legacy_merge_evidence,
+    verify_stored_migration_run_context, verify_tripartite_target,
 )
 import smart_ads.application.consumer_verification as consumer_verification_mod
 import smart_ads.application.predecessor_validators as predecessor_validators_mod
 import smart_ads.application.seam_parity as seam_parity_mod
 from smart_ads.contracts import (
-    ADR_P1_DOMAIN_PREFIXES,
-    AlgorithmProvenanceIdentity,
-    ArtifactLocator,
-    ClosedValidationError,
-    CompatibilitySurfaceSpec,
-    ConsumerDeploymentReadback,
-    ConsumerFeatureFlagContract,
-    GitArtifactProvenance,
-    GitParentEdge,
-    GitReleaseIdentity,
-    IbviAdsDelegationContext,
-    IbviAdsDelegationContract,
-    LegacyBaselineIdentity,
-    LegacySeamContract,
-    LegacySeamRelease,
-    P1Integrity,
-    ReadEntrypointSelector,
-    SeamGitArtifactRef,
-    SeamParityRecord,
-    SurfaceParityComparison,
-    TripartiteCanonicalSide,
-    TripartiteConsumerSide,
-    TripartiteGitArtifactRef,
-    TripartiteLegacySide,
-    TripartiteTarget,
-    WheelObjectLocator,
-    canonicalize_jcs,
-    compute_consumer_contract_digest,
-    compute_git_blob_oid,
-    compute_tripartite_digest,
-    jcs_sha256,
-    loads_strict_json,
-    p1_content_digest,
-    p1_signing_message,
+    ADR_P1_DOMAIN_PREFIXES, AlgorithmProvenanceIdentity, ArtifactLocator, ClosedValidationError,
+    CompatibilitySurfaceSpec, ConsumerDeploymentReadback, ConsumerFeatureFlagContract, GitArtifactProvenance,
+    GitParentEdge, GitReleaseIdentity, IbviAdsDelegationContext, IbviAdsDelegationContract,
+    LegacyBaselineIdentity, LegacySeamContract, LegacySeamRelease, P1Integrity, ReadEntrypointSelector,
+    SeamGitArtifactRef, SeamParityRecord, SurfaceParityComparison, TripartiteCanonicalSide,
+    TripartiteConsumerSide, TripartiteGitArtifactRef, TripartiteLegacySide, TripartiteTarget,
+    WheelObjectLocator, canonicalize_jcs, compute_consumer_contract_digest, compute_git_blob_oid,
+    compute_tripartite_digest, jcs_sha256, loads_strict_json, p1_content_digest, p1_signing_message,
 )
 from smart_ads.ports import (
-    CellObjectStorePort,
-    ConsumerRoutingAnalysis,
-    ConsumerRoutingAnalyzerPort,
-    EntrypointRouteFacts,
-    P1SignatureVerifierPort,
-    SeamDualProjectionCase,
-    SeamLegacyProjectorPort,
+    CellObjectStorePort, ConsumerRoutingAnalysis, ConsumerRoutingAnalyzerPort, EntrypointRouteFacts,
+    P1SignatureVerifierPort, SeamDualProjectionCase, SeamLegacyProjectorPort,
 )
 from smart_ads.ports.cell_runtime import ClockAttestation
+from smart_ads.reconciliation.certification_7a import _extract_verified_wheel_members
 from smart_ads.transports.mcp import (
-    ALLOWED_MCP_METHODS,
-    McpRuntimeContext,
-    handle_mcp_request_bytes,
-    project_delegation_envelope_to_mcp_context,
+    ALLOWED_MCP_METHODS, McpRuntimeContext, handle_mcp_request_bytes, project_delegation_envelope_to_mcp_context,
 )
 from tests.contract.test_packaging_boundary import PURE_LAYER_ALLOWED_TOP_IMPORTS, scan_pure_layer_ast_violations
 from tests.unit.test_certification_7a_record import build_valid_7a_world
 from tests.unit.test_mcp_read_handler import McpHandlerWorld
-from tools.governance import artifacts as gov_artifacts
-from tools.governance import decomposition as gov_decomp
-from tools.governance import decomposition_scope as gov_scope
+from tools.governance import artifacts as gov_artifacts, decomposition as gov_decomp, decomposition_scope as gov_scope
 from tools.governance import gov1_convergence, gov1_wheel, p1 as gov_p1
 
 _KEY_ID = "key:ed25519:" + ("9" * 64)
 _MAC_SECRET = b"smart-ads-task4-domain-separated-p1-secret"
-_PREDECESSOR_DOMAINS: dict[str, str] = {
-    "smart_ads/migration_run_context/v1": "SMART-ADS:RUN-CONTEXT:V1\n",
-    "smart_ads/protected_merge_evidence/v1": "SMART-ADS:PROTECTED-MERGE:V1\n",
-    "smart_ads/decomposition_manifest/v1": "SMART-ADS:DECOMPOSITION:V1\n",
-    "smart_ads/decomposition_manifest_head/v1": "SMART-ADS:DECOMPOSITION-HEAD:V1\n",
-    "smart_ads/deployment_config_execution_result/v1": "SMART-ADS:DEPLOYMENT-RESULT:V1\n",
-}
 _ALL_DOMAINS: dict[str, str] = {
     **{f"smart_ads/{k}": v for k, v in gov_p1.DOMAIN_PREFIXES.items()},
     **ADR_P1_DOMAIN_PREFIXES,
-    **_PREDECESSOR_DOMAINS,
+    **PREDECESSOR_P1_DOMAIN_PREFIXES,
 }
 _ADR_IDENTITY: dict[str, str] = {
     "repository": "aiconnai/smart-ads",
@@ -213,38 +162,44 @@ def _put_git_prov(
     return _put_signed_model(store, prov, key_reg_loc)
 
 
+def _populate_decomp_entry(entry: dict[str, Any], item: Mapping[str, Any]) -> None:
+    path, grp = str(item["source_path"]), gov_decomp.path_routing_group(str(item["source_path"]))
+    entry["system_owner"] = "principal:ronaldo"
+    if grp in ("pinna-write-plane", "google-canary", "funnel"):
+        entry.update({"decision_status": "deferred", "migration_mode": gov_decomp.GROUP_MODES[grp], "target_repository": gov_scope.REPOSITORY, "deferral_authority_ref": {"repository": _ADR_IDENTITY["repository"], "commit_sha": _ADR_IDENTITY["commit_sha"], "path": _ADR_IDENTITY["path"], "file_content_sha256": _ADR_IDENTITY["file_content_sha256"], "section": "9.2"}})
+    elif grp in ("ledger-controller", "disablement-governance"):
+        entry.update({"decision_status": "approved", "migration_mode": "legacy_governance_only", "target_repository": gov_scope.REPOSITORY, "target_layer": "legacy_governance", "target_path": path, "target_selector": {"selector_kind": "retained_source", "inventory_id": item["inventory_id"], "source_commit": gov_scope.BASELINE, "source_selector_digest": item["source_selector_digest"]}, "preserved_invariants": ["inv:legacy"], "required_tests": ["tests/unit/test_seam_and_tripartite_verification.py"]})
+    elif grp == "codex-tooling":
+        entry.update({"decision_status": "approved", "migration_mode": "repository_tooling", "target_repository": "aiconnai/smart-ads", "target_layer": "repository_tooling", "target_path": f"tooling/governance/{Path(path).name}", "preserved_invariants": ["inv:tooling"], "required_tests": ["tests/unit/test_seam_and_tripartite_verification.py"]})
+    elif grp == "operator-conductor":
+        entry.update({"decision_status": "approved", "migration_mode": "reimplement_clean", "target_repository": "aiconnai/smart-ads", "target_layer": "core_engine", "target_path": "src/smart_ads/application/seam_parity.py", "preserved_invariants": ["inv:seam"], "required_tests": ["tests/unit/test_seam_and_tripartite_verification.py"]})
+    else:
+        entry.update({"decision_status": "approved", "migration_mode": "reference_only", "target_repository": "aiconnai/smart-ads", "target_layer": "core_engine"})
+
+
 def _build_real_decomposition_artifacts(
     store: InMemoryCellObjectStore, key_reg_loc: ArtifactLocator
 ) -> tuple[ArtifactLocator, ArtifactLocator, dict[str, Any], dict[str, Any]]:
-    snap = gov_scope.SourceSnapshot(
-        {"scripts/operator/conductor.py": b"def run_conductor():\n    return 1\n"},
-        {"scripts/operator/conductor.py": "100644"},
-    )
+    paths: list[str] = loads_strict_json((Path(__file__).resolve().parents[1] / "governance" / "fixtures" / "decomposition_scope_paths.json").read_bytes())
+    files = {p: (b"import pytest\ndef test_boundary():\n    return 1\n" if p == gov_decomp.SECURITY_PATH else (b"def run_conductor():\n    return 1\n" if p == "scripts/operator/conductor.py" else f"# {p}\n".encode("utf-8"))) for p in paths}
+    snap = gov_scope.SourceSnapshot(files, {p: "100644" for p in paths})
     inv = gov_decomp.resolve_inventory(snap)
     tmpl = gov_decomp.decision_template(inv)
-    tmpl[0].update({
-        "system_owner": "principal:ronaldo", "target_repository": "aiconnai/smart-ads",
-        "target_layer": "core_engine", "target_path": "src/smart_ads/application/seam_parity.py",
-        "migration_mode": "reimplement_clean", "decision_status": "approved",
-        "preserved_invariants": ["inv:seam"], "required_tests": ["tests/unit/test_seam_and_tripartite_verification.py"],
-    })
+    items_by_id = {i["inventory_id"]: i for i in inv["items"]}
+    for entry in tmpl:
+        _populate_decomp_entry(entry, items_by_id[entry["inventory_id"]])
     cand = gov_decomp.build_candidate(snap, inv, tmpl, "2026-09-07T00:00:00Z")
     manifest_unsigned = {"$schema": "smart_ads/decomposition_manifest/v1", **cand["payload"]}
     manifest_unsigned["manifest_digest"] = gov_decomp.manifest_digest(manifest_unsigned)
     manifest_signed, manifest_loc = _put_signed_dict(store, manifest_unsigned, key_reg_loc)
     head_unsigned = {
-        "$schema": "smart_ads/decomposition_manifest_head/v1",
-        "repository": "mbras-tech/mbras-campaigns",
+        "$schema": "smart_ads/decomposition_manifest_head/v1", "repository": "mbras-tech/mbras-campaigns",
         "commit_sha": "d26c73d8508c7c3d43161fe36a80c44a46bf0f2d",
         "source_tree_oid": "68ff6d6dbd6d7ecaafa3bca7d5de85a54d705798",
-        "scope_digest": jcs_sha256(inv["inventory_scope"]),
-        "head_epoch": 1,
-        "active_manifest_locator": manifest_loc.to_dict(),
-        "active_manifest_digest": manifest_loc.content_digest,
-        "previous_head_locator": None,
-        "previous_head_digest": None,
-        "update_kind": "genesis",
-        "updated_at_utc": "2026-09-07T00:05:00Z",
+        "scope_digest": jcs_sha256(inv["inventory_scope"]), "head_epoch": 1,
+        "active_manifest_locator": manifest_loc.to_dict(), "active_manifest_digest": manifest_loc.content_digest,
+        "previous_head_locator": None, "previous_head_digest": None,
+        "update_kind": "genesis", "updated_at_utc": "2026-09-07T00:05:00Z",
     }
     head_signed, head_loc = _put_signed_dict(store, head_unsigned, key_reg_loc)
     return head_loc, manifest_loc, head_signed, manifest_signed
@@ -330,18 +285,21 @@ class MirrorLegacyProjector(SeamLegacyProjectorPort):
         return dict(case.legacy_input_payload["expected_wire"])
 
 
-def _build_mcp_cases_and_handler() -> tuple[VerifiedStoreMcpReadHandler, dict[str, tuple[SeamDualProjectionCase, ...]]]:
-    mcp_world = McpHandlerWorld()
+def _build_mcp_cases_and_handler(
+    store: InMemoryCellObjectStore, key_reg_loc: ArtifactLocator, run_loc: ArtifactLocator, verifier: P1SignatureVerifierPort
+) -> tuple[VerifiedStoreMcpReadHandler, dict[str, tuple[SeamDualProjectionCase, ...]]]:
+    mcp_world = McpHandlerWorld(store=store, run_loc=run_loc, key_reg_loc=key_reg_loc, verifier=verifier, secret=_MAC_SECRET)
     handler = mcp_world.default_handler
     snap_loc = mcp_world.default_index.active_dataset_snapshot_locator
     cases: dict[str, tuple[SeamDualProjectionCase, ...]] = {}
     for idx, method in enumerate(ALLOWED_MCP_METHODS):
-        del_env = IbviAdsDelegationContext(
+        del_u = IbviAdsDelegationContext(
             "/ibvi-ads", "conductor:hermes", "front:pinna", "profile:pinna-ops",
             "tenant:ibvi", "binding:meta-primary", "scope:campaigns-active", method,
             "sha256:" + ("8" * 64), "2026-11-11T02:55:00Z", "2026-11-11T04:00:00Z", f"nonce-s-{idx}",
         )
-        mcp_ctx = project_delegation_envelope_to_mcp_context(del_env)
+        del_s, del_loc = _put_signed_model(store, del_u, key_reg_loc)
+        mcp_ctx = project_delegation_envelope_to_mcp_context(del_s, locator=del_loc)
         rt = McpRuntimeContext("2026-11-11T03:00:00Z", "2026-11-11T03:00:02Z", mcp_ctx)
         if "performance" in method:
             params: dict[str, Any] = {
@@ -369,24 +327,29 @@ def _build_mcp_cases_and_handler() -> tuple[VerifiedStoreMcpReadHandler, dict[st
 def _build_canonical_chain_in_store(
     store: InMemoryCellObjectStore, key_reg_loc: ArtifactLocator, run_loc: ArtifactLocator
 ) -> dict[str, Any]:
-    w7a = build_valid_7a_world()
+    w7a = build_valid_7a_world(certified_at_utc="2026-09-07T10:00:25Z")
     whl_bytes, commit_sha = w7a.wheel_bytes, w7a.record.source_commit_sha
     store.put_bytes(whl_bytes)
     whl_obj = WheelObjectLocator.for_wheel_bytes(whl_bytes)
+    sbx_u = {**{k: v for k, v in w7a.store[w7a.record.sealed_sandbox_profile_locator].items() if k != "integrity"}, "migration_run_context_locator": run_loc.to_dict()}
+    _, sbx_loc = _put_signed_dict(store, sbx_u, key_reg_loc)
     pyp_b, uvl_b = b"[project]\nname = 'smart-ads'\n", b"version = 1\n"
     s_files = {"pyproject.toml": pyp_b, "uv.lock": uvl_b, "src/smart_ads/__init__.py": b""}
-    s_modes = {k: "100644" for k in s_files}
-    snap = gov1_wheel.GitBuildSnapshot(commit_sha, "a" * 40, s_files, s_modes, "sha256:" + hashlib.sha256(pyp_b).hexdigest(), "sha256:" + hashlib.sha256(uvl_b).hexdigest(), "hatchling.build", "1.33.0", w7a.record.build_backend_digest)
+    snap = gov1_wheel.GitBuildSnapshot(commit_sha, "a" * 40, s_files, {k: "100644" for k in s_files}, "sha256:" + hashlib.sha256(pyp_b).hexdigest(), "sha256:" + hashlib.sha256(uvl_b).hexdigest(), "hatchling.build", "1.33.0", w7a.record.build_backend_digest)
     prov_u = gov1_wheel.build_wheel_build_provenance_envelope(migration_run_context_locator=run_loc.to_dict(), build_run_id=w7a.record.build_run_id, built_at_utc="2026-09-07T10:00:05Z", snapshot=snap, source_date_epoch=1_700_000_000, schema_bundle_digest=w7a.record.schema_bundle_digest, wheel_bytes=whl_bytes, registry_locator=key_reg_loc.to_dict(), signer_key_id=_KEY_ID)
     _, prov_loc = _put_signed_dict(store, prov_u, key_reg_loc)
-    entries = [{"path": "smart_ads-0.1.0.dist-info/RECORD", "record_hash": "", "record_size": None}]
-    bound_u = {"$schema": "smart_ads/wheel_boundary_report/v1", "migration_run_context_locator": run_loc.to_dict(), "build_run_id": w7a.record.build_run_id, "verified_at_utc": "2026-09-07T10:00:10Z", "repository": "aiconnai/smart-ads", "source_commit_sha": commit_sha, "wheel_digest": whl_obj.wheel_digest, "build_backend_digest": w7a.record.build_backend_digest, "schema_bundle_digest": w7a.record.schema_bundle_digest, "sorted_record_entries": entries, "sorted_record_digest": jcs_sha256(entries), "archive_allowlist_passed": True, "ast_boundary_scan_passed": True, "isolated_venv_import_passed": True, "packaged_modules": ["smart_ads"], "wheel_build_provenance_locator": prov_loc.to_dict()}
+    _, rec_entries, rec_digest, mods = _extract_verified_wheel_members(whl_bytes)
+    bound_u = {"$schema": "smart_ads/wheel_boundary_report/v1", "migration_run_context_locator": run_loc.to_dict(), "build_run_id": w7a.record.build_run_id, "verified_at_utc": "2026-09-07T10:00:10Z", "repository": "aiconnai/smart-ads", "source_commit_sha": commit_sha, "wheel_digest": whl_obj.wheel_digest, "build_backend_digest": w7a.record.build_backend_digest, "schema_bundle_digest": w7a.record.schema_bundle_digest, "sorted_record_entries": rec_entries, "sorted_record_digest": rec_digest, "archive_allowlist_passed": True, "ast_boundary_scan_passed": True, "isolated_venv_import_passed": True, "packaged_modules": mods, "wheel_build_provenance_locator": prov_loc.to_dict()}
     _, bound_loc = _put_signed_dict(store, bound_u, key_reg_loc)
-    rec7a_s, cert7a_loc = _put_signed_model(store, replace(w7a.record, migration_run_context_locator=run_loc, wheel_build_provenance_locator=prov_loc, wheel_boundary_report_locator=bound_loc, wheel_digest=whl_obj.wheel_digest, integrity=None), key_reg_loc)
-    mcp_rep_loc = ArtifactLocator.from_digest("smart_ads/mcp_rejection_matrix_report/v1", "sha256:" + ("8" * 64))
-    conv_u = {"$schema": gov1_convergence.GOV1_CONVERGENCE_SCHEMA, "migration_run_context_locator": run_loc.to_dict(), "wheel_boundary_report_locator": bound_loc.to_dict(), "sealed_sandbox_profile_locator": rec7a_s.sealed_sandbox_profile_locator.to_dict(), "negative_security_test_report_locator": rec7a_s.negative_security_test_report_locator.to_dict(), "mcp_rejection_matrix_report_locator": mcp_rep_loc.to_dict(), "certification_7a_record_locator": cert7a_loc.to_dict(), "build_run_id": rec7a_s.build_run_id, "converged_at_utc": "2026-09-07T10:01:00Z", "source_commit_sha": commit_sha, "wheel_digest": whl_obj.wheel_digest, "build_backend_digest": rec7a_s.build_backend_digest, "schema_bundle_digest": rec7a_s.schema_bundle_digest, "convergence_status": "PASS"}
+    _, neg_loc = _put_signed_model(store, replace(w7a.negative_report, migration_run_context_locator=run_loc, sealed_sandbox_profile_locator=sbx_loc, wheel_build_provenance_locator=prov_loc, integrity=None), key_reg_loc)
+    zero_io = dict.fromkeys(predecessor_validators_mod._MCP_IO_KEYS, 0)
+    mcp_cases = [{"case_id": cid, "expected_code": code, "observed_code": code, "expected_message": msg, "observed_message": msg, "expected_id_policy": pol, "observed_id_matches_policy": True, "response_shape_valid": True, "io_counters": dict(zero_io)} for cid, code, msg, pol in predecessor_validators_mod._NORMATIVE_MCP_MATRIX_ROWS]
+    mcp_u = {"$schema": "smart_ads/mcp_rejection_matrix_report/v1", "migration_run_context_locator": run_loc.to_dict(), "sealed_sandbox_profile_locator": sbx_loc.to_dict(), "build_run_id": w7a.record.build_run_id, "executed_at_utc": "2026-09-07T10:00:12Z", "source_commit_sha": commit_sha, "build_backend_digest": w7a.record.build_backend_digest, "wheel_digest": whl_obj.wheel_digest, "schema_bundle_digest": w7a.record.schema_bundle_digest, "allowed_methods": list(ALLOWED_MCP_METHODS), "body_64k_boundary_verified": True, "cases": mcp_cases}
+    _, mcp_rep_loc = _put_signed_dict(store, mcp_u, key_reg_loc)
+    rec7a_s, cert7a_loc = _put_signed_model(store, replace(w7a.record, migration_run_context_locator=run_loc, sealed_sandbox_profile_locator=sbx_loc, negative_security_test_report_locator=neg_loc, wheel_build_provenance_locator=prov_loc, wheel_boundary_report_locator=bound_loc, wheel_digest=whl_obj.wheel_digest, integrity=None), key_reg_loc)
+    conv_u = {"$schema": gov1_convergence.GOV1_CONVERGENCE_SCHEMA, "migration_run_context_locator": run_loc.to_dict(), "wheel_boundary_report_locator": bound_loc.to_dict(), "sealed_sandbox_profile_locator": sbx_loc.to_dict(), "negative_security_test_report_locator": neg_loc.to_dict(), "mcp_rejection_matrix_report_locator": mcp_rep_loc.to_dict(), "certification_7a_record_locator": cert7a_loc.to_dict(), "build_run_id": rec7a_s.build_run_id, "converged_at_utc": "2026-09-07T10:01:00Z", "source_commit_sha": commit_sha, "wheel_digest": whl_obj.wheel_digest, "build_backend_digest": rec7a_s.build_backend_digest, "schema_bundle_digest": rec7a_s.schema_bundle_digest, "convergence_status": "PASS"}
     _, conv_loc = _put_signed_dict(store, conv_u, key_reg_loc)
-    return {"whl_obj": whl_obj, "whl_bytes": whl_bytes, "commit_sha": commit_sha, "prov_loc": prov_loc, "bound_loc": bound_loc, "bound_u": bound_u, "cert7a_loc": cert7a_loc, "conv_loc": conv_loc, "conv_u": conv_u}
+    return {"whl_obj": whl_obj, "whl_bytes": whl_bytes, "commit_sha": commit_sha, "prov_u": prov_u, "prov_loc": prov_loc, "bound_loc": bound_loc, "bound_u": bound_u, "sbx_u": sbx_u, "sbx_loc": sbx_loc, "neg_loc": neg_loc, "mcp_u": mcp_u, "mcp_rep_loc": mcp_rep_loc, "rec7a_s": rec7a_s, "cert7a_loc": cert7a_loc, "conv_loc": conv_loc, "conv_u": conv_u}
 
 
 def _build_consumer_artifacts(
@@ -550,16 +513,16 @@ def test_seam_contract_release_and_dual_projection_parity() -> None:
     assert verify_legacy_seam_contract(con_loc, seam_raw_bytes=seam_bytes, active_decomposition_head_locator=head_loc, store=store, signature_verifier=verifier) == con_s
     assert verify_legacy_seam_release(rel_loc, expected_active_decomposition_head_locator=head_loc, seam_raw_bytes=seam_bytes, store=store, signature_verifier=verifier) == rel_s
 
-    handler, cases = _build_mcp_cases_and_handler()
-    unsigned_rec, _ = build_seam_parity_record(
+    handler, cases = _build_mcp_cases_and_handler(store, key_reg_loc, run_loc, verifier)
+    signer = lambda d, _p: _sign_dict(d, key_reg_loc)
+    signed_rec, signed_loc = build_seam_parity_record(
         legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc,
         wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest,
         seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z",
         seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler,
         legacy_projector=MirrorLegacyProjector(), store=store,
-        integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier,
+        integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=signer, signature_verifier=verifier,
     )
-    signed_rec, signed_loc = _put_signed_model(store, unsigned_rec, key_reg_loc)
     verified = verify_seam_parity_record(
         signed_loc, expected_active_decomposition_head_locator=head_loc, seam_raw_bytes=seam_bytes,
         cases_by_surface=cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(),
@@ -574,7 +537,8 @@ def test_seam_contract_release_and_dual_projection_parity() -> None:
             wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest,
             seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z",
             seam_raw_bytes=seam_bytes, cases_by_surface=cases, canonical_handler=handler,
-            legacy_projector=bad_proj, store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier,
+            legacy_projector=bad_proj, store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc),
+            envelope_signer=signer, signature_verifier=verifier,
         )
 
 
@@ -641,10 +605,10 @@ def test_negative_matrix_across_decomposition_parity_readback_and_tripartite() -
 
     # Valid epoch-2 correction decomposition head superseding epoch-1 genesis:
     corr_u = {k: v for k, v in manifest_s.items() if k not in {"manifest_digest", "integrity"}}
-    corr_u.update({"generated_at": "2026-09-08T00:00:00Z", "supersedes_manifest_locator": manifest_loc.to_dict(), "supersedes_digest": manifest_s["manifest_digest"], "correction_reason": "reason:refine"})
+    corr_u.update({"generated_at": "2026-09-08T00:00:00Z", "supersedes_manifest_locator": manifest_loc.to_dict(), "supersedes_digest": manifest_loc.content_digest, "correction_reason": "reason:refine"})
     corr_u["manifest_digest"] = gov_decomp.manifest_digest(corr_u)
     _, corr_loc = _put_signed_dict(store, corr_u, key_reg_loc)
-    _, h2_loc = _put_signed_dict(store, {**head_s, "head_epoch": 2, "active_manifest_locator": corr_loc.to_dict(), "active_manifest_digest": corr_loc.content_digest, "previous_head_locator": head_loc.to_dict(), "previous_head_digest": head_loc.content_digest, "update_kind": "correction"}, key_reg_loc)
+    _, h2_loc = _put_signed_dict(store, {**head_s, "head_epoch": 2, "active_manifest_locator": corr_loc.to_dict(), "active_manifest_digest": corr_loc.content_digest, "previous_head_locator": head_loc.to_dict(), "previous_head_digest": head_loc.content_digest, "update_kind": "correction", "updated_at_utc": "2026-09-08T00:05:00Z"}, key_reg_loc)
     h2_out, _ = verify_stored_decomposition_tip(store, head_locator=h2_loc, expected_active_head_locator=h2_loc, manifest_locator=corr_loc, expected_manifest_digest=corr_loc.content_digest, signature_verifier=verifier)
     assert h2_out["head_epoch"] == 2
 
@@ -679,7 +643,8 @@ def test_seam_parity_rejects_pre_admission_and_active_surface_error_outcomes() -
     can = _build_canonical_chain_in_store(store, key_reg_loc, run_loc)
     alg_p, alg_loc = _put_git_prov(store, key_reg_loc, "aiconnai/smart-ads", can["commit_sha"], "src/smart_ads/application/seam_parity.py", b"# seam")
     seam_alg = AlgorithmProvenanceIdentity("algorithm:seam-parity-v1", "1.0.0", alg_loc, alg_p.repository, alg_p.commit_sha, alg_p.path, alg_p.git_blob_oid, alg_p.file_content_sha256, "cpython-3.12", SeamParityRecord.SCHEMA)
-    handler, cases = _build_mcp_cases_and_handler()
+    handler, cases = _build_mcp_cases_and_handler(store, key_reg_loc, run_loc, verifier)
+    signer = lambda d, _p: _sign_dict(d, key_reg_loc)
     active_surf = "smart_ads.queries.get_campaign_performance_v1"
     orig_case = cases[active_surf][0]
 
@@ -691,7 +656,7 @@ def test_seam_parity_rejects_pre_admission_and_active_surface_error_outcomes() -
         SeamDualProjectionCase("case-wrong-method", active_surf, findings_case.mcp_wire_request_bytes, findings_case.mcp_runtime_context, findings_case.legacy_input_payload),
     ):
         with pytest.raises(ClosedValidationError):
-            build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface={**cases, active_surf: (bad_case,)}, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier)
+            build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface={**cases, active_surf: (bad_case,)}, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=signer, signature_verifier=verifier)
 
     # (b) Post-admission -32603 error on active surface fails closed even when legacy_projector returns matching -32603:
     uncov_wire = canonicalize_jcs({"jsonrpc": "2.0", "id": "req-uncov", "method": active_surf, "params": {"tenant_ref": "tenant:ibvi", "binding_ref": "binding:meta-primary", "resource_scope_ref": "scope:campaigns-active", "date_range": {"start_date": "2026-01-01", "end_date": "2026-01-02"}}})
@@ -699,7 +664,7 @@ def test_seam_parity_rejects_pre_admission_and_active_surface_error_outcomes() -
     assert active_out.admitted_request is not None and loads_strict_json(active_out.wire_bytes)["error"]["code"] == -32603
     err_cases = {**cases, active_surf: (SeamDualProjectionCase("case-err-32603", active_surf, uncov_wire, orig_case.mcp_runtime_context, {"expected_wire": loads_strict_json(active_out.wire_bytes)}),)}
     with pytest.raises(ClosedValidationError):
-        build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface=err_cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), signature_verifier=verifier)
+        build_seam_parity_record(legacy_seam_release_locator=rel_loc, expected_active_decomposition_head_locator=head_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_digest=can["whl_obj"].wheel_digest, seam_adapter_algorithm_identity=seam_alg, evaluated_at_utc="2026-11-11T03:10:00Z", seam_raw_bytes=seam_bytes, cases_by_surface=err_cases, canonical_handler=handler, legacy_projector=MirrorLegacyProjector(), store=store, integrity=P1Integrity(_KEY_ID, key_reg_loc), envelope_signer=signer, signature_verifier=verifier)
 
 
 def test_fix_round1_scope_digest_pre_seam_merge_and_sorted_record_digest() -> None:
@@ -723,8 +688,7 @@ def test_fix_round1_scope_digest_pre_seam_merge_and_sorted_record_digest() -> No
 
     # 3. Tampered wheel_boundary_report["sorted_record_digest"] must fail closed:
     _, bad_bound_loc = _put_signed_dict(store, {**can["bound_u"], "sorted_record_digest": "sha256:" + ("f" * 64)}, key_reg_loc)
-    w7a = build_valid_7a_world()
-    rec7a_bad, cert7a_bad = _put_signed_model(store, replace(w7a.record, migration_run_context_locator=run_loc, wheel_build_provenance_locator=can["prov_loc"], wheel_boundary_report_locator=bad_bound_loc, wheel_digest=can["whl_obj"].wheel_digest, integrity=None), key_reg_loc)
+    _, cert7a_bad = _put_signed_model(store, replace(can["rec7a_s"], wheel_boundary_report_locator=bad_bound_loc, integrity=None), key_reg_loc)
     _, conv_bad = _put_signed_dict(store, {**can["conv_u"], "wheel_boundary_report_locator": bad_bound_loc.to_dict(), "certification_7a_record_locator": cert7a_bad.to_dict()}, key_reg_loc)
     with pytest.raises(ClosedValidationError):
         verify_stored_canonical_build_chain(store, wheel_locator=can["whl_obj"], wheel_digest=can["whl_obj"].wheel_digest, build_provenance_locator=can["prov_loc"], wheel_boundary_report_locator=bad_bound_loc, certification_7a_locator=cert7a_bad, gov1_convergence_locator=conv_bad, expected_run_locator=run_loc, expected_commit_sha=can["commit_sha"], signature_verifier=verifier)

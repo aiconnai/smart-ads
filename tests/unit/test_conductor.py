@@ -401,7 +401,10 @@ class ConductorTestWorld:
         self.metrics_schema, self.metrics_schema_loc = _put_signed_obj(self.store, AnalysisResultSchema("relation", m_cols, _METRIC_UKEY), self.key_reg_loc)
         s_cols = (ResultColumn("row_count", "int64", False),)
         self.scalar_schema, self.scalar_schema_loc = _put_signed_obj(self.store, AnalysisResultSchema("scalar", s_cols, None), self.key_reg_loc)
-        inv_keys = tuple(ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", c, "campaign", "2026-11-10") for c in (_CAMP_A, _CAMP_B))
+        inv_keys = tuple(
+            ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", c, "campaign", d)
+            for d in ("2026-10-31", "2026-11-10") for c in (_CAMP_A, _CAMP_B)
+        )
         self.inventory, self.inv_loc = _put_signed_obj(self.store, ExpectedResourceInventory("inventory:eval-001", self.reg_loc, self.reg_loc.content_digest, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", DateRange("2026-10-31", "2026-11-10", True), inv_keys), self.key_reg_loc)
         q_m = DuckDbQueryDefinition("result:metrics", "query:metrics", "SELECT 1", self.metrics_schema_loc, "relation", m_cols, _METRIC_UKEY, _METRIC_ORDER)
         q_s = DuckDbQueryDefinition("result:row_count", "query:row_count", "SELECT 1", self.scalar_schema_loc, "scalar", s_cols, None, ())
@@ -549,7 +552,7 @@ def test_unsigned_mode_and_window_end_reduction_filtering(world: ConductorTestWo
     )
     assert out_nov.reduced_row_count == 12
 
-    inv_dec_keys = tuple(ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", c, "campaign", d) for c in (_CAMP_A, _CAMP_B) for d in ("2026-11-10", "2026-12-01"))
+    inv_dec_keys = tuple(ExpectedResourceKey("binding:meta-primary", "account:ibvi-01", c, "campaign", d) for c in (_CAMP_A, _CAMP_B) for d in ("2026-10-31", "2026-11-10", "2026-12-01"))
     _, inv_dec_loc = _put_signed_obj(world.store, ExpectedResourceInventory("inventory:dec-001", world.reg_loc, world.reg_loc.content_digest, "tenant:ibvi", "binding:meta-primary", "account:ibvi-01", "scope:campaigns-active", DateRange("2026-10-31", "2026-12-01", True), inv_dec_keys), world.key_reg_loc)
     empty_intel = CustomCallbackIntelligence(world.intel_alg_1, lambda _ctx, _ev: ())
     out_dec = conduct_offline_run(

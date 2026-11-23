@@ -265,15 +265,23 @@ def _analyze_feature_flag_py(raw_bytes: bytes, text: str, contract: ConsumerFeat
         raise ClosedValidationError("feature_flag_py: missing unambiguous flag_key/False binding")
 
 
-def _analyze_feature_flag_bytes(feature_flag_bytes: bytes, contract: ConsumerFeatureFlagContract) -> None:
+def _analyze_feature_flag_bytes(
+    feature_flag_bytes: bytes, contract: ConsumerFeatureFlagContract, *, source_path: str
+) -> None:
     text = _decode_verified_source_bytes(feature_flag_bytes, label="feature_flag_bytes")
     stripped = text.lstrip()
     if not stripped:
         raise ClosedValidationError("feature_flag_bytes: empty or whitespace-only content")
-    if stripped.startswith("{"):
+    if source_path.endswith(".json"):
+        if not stripped.startswith("{"):
+            raise ClosedValidationError("feature_flag_bytes: expected JSON object for .json source_path")
         _validate_flag_json(text, contract)
-    else:
+    elif source_path.endswith(".py"):
         _analyze_feature_flag_py(feature_flag_bytes, text, contract)
+    else:
+        raise ClosedValidationError(
+            f"feature_flag_git_artifact.source_path: unsupported extension in {source_path!r}"
+        )
 
 
 def _validate_adapter_import(stmt: ast.stmt, reserved_names: set[str]) -> None:
@@ -321,13 +329,13 @@ def _extract_fn_params(
     if fn.returns is not None and not _is_closed_type_annotation(fn.returns):
         raise ClosedValidationError(f"adapter_bytes: invalid return annotation on {fn.name!r}")
     pos_args = list(args.args)
+    for a_node in [*pos_args, *args.kwonlyargs]:
+        if a_node.annotation is not None and not _is_closed_type_annotation(a_node.annotation):
+            raise ClosedValidationError(f"adapter_bytes: invalid parameter annotation on {fn.name!r}")
     if is_method:
         if not pos_args or pos_args[0].arg != "self" or len(args.defaults) >= len(pos_args):
             raise ClosedValidationError(f"adapter_bytes: method {fn.name!r} must start with non-defaulted self")
         pos_args = pos_args[1:]
-    for a_node in [*pos_args, *args.kwonlyargs]:
-        if a_node.annotation is not None and not _is_closed_type_annotation(a_node.annotation):
-            raise ClosedValidationError(f"adapter_bytes: invalid parameter annotation on {fn.name!r}")
     defaulted: set[str] = set()
     for a_node, d_val in zip(pos_args[len(pos_args) - len(args.defaults) :], args.defaults, strict=True):
         _check_safe_default(d_val, fn.name)
@@ -549,7 +557,7 @@ def _verify_entrypoint_fn(
     reserved_names: frozenset[str],
     role_usage: dict[str, set[str]],
     literal_usage: dict[int, str],
-) -> EntrypointRouteFacts:
+) -> tuple[EntrypointRouteFacts, tuple[str, str, str]]:
     params, defaulted = _extract_fn_params(
         ep.fn, is_method=ep.is_method, forbidden_names=reserved_names | ep.forbidden_self_attrs
     )
@@ -562,6 +570,8 @@ def _verify_entrypoint_fn(
     is_async = isinstance(ep.fn, ast.AsyncFunctionDef)
     t_collab, t_args = _unwrap_branch_call(t_expr, scope, is_async=is_async, flags_collab=flags_collab)
     f_collab, f_args = _unwrap_branch_call(f_expr, scope, is_async=is_async, flags_collab=flags_collab)
+    if len({flags_collab, t_collab, f_collab}) != 3:
+        raise ClosedValidationError(f"adapter_bytes: aliased collaborator roles in {ep.symbol_name!r}")
     if len(t_args) != 3 or len(f_args) != 2:
         raise ClosedValidationError(f"adapter_bytes: invalid dispatch arity in {ep.symbol_name!r}")
     t_route = _resolve_str_expr(t_args[0], scope, "true_route")
@@ -572,7 +582,7 @@ def _verify_entrypoint_fn(
     val_params = all_params - {c.removeprefix("param:") for c in (flags_collab, t_collab, f_collab) if c.startswith("param:")}
     _validate_payload_expr(t_args[2], value_params=val_params, scope=scope)
     _validate_payload_expr(f_args[1], value_params=val_params, scope=scope)
-    return EntrypointRouteFacts(ep.symbol_name, contract.flag_key, t_route, t_method, f_route)
+    return EntrypointRouteFacts(ep.symbol_name, contract.flag_key, t_route, t_method, f_route), (flags_collab, t_collab, f_collab)
 
 
 def _collect_class_entrypoints(cls_node: ast.ClassDef, out: list[_ParsedEntrypoint]) -> None:
@@ -599,6 +609,8 @@ def _collect_class_entrypoints(cls_node: ast.ClassDef, out: list[_ParsedEntrypoi
             _validate_private_helper(member, is_method=True)
         else:
             method_nodes.append(member)
+    if init_attrs & method_names:
+        raise ClosedValidationError(f"adapter_bytes: __init__ attribute shadows method in {cls_node.name!r}")
     forbidden = frozenset(method_names)
     for m_node in method_nodes:
         out.append(_ParsedEntrypoint(f"{cls_node.name}.{m_node.name}", m_node, True, init_attrs, forbidden))
@@ -660,6 +672,38 @@ def _verify_global_string_literals(
                 raise ClosedValidationError(f"adapter_bytes: unverified smart_ads literal {val!r}")
 
 
+def _verify_entrypoints_and_class_roles(
+    entrypoints: list[_ParsedEntrypoint],
+    *,
+    expected_map: Mapping[str, str],
+    contract: ConsumerFeatureFlagContract,
+    constants: Mapping[str, tuple[str, int]],
+    reserved_names: frozenset[str],
+    role_usage: dict[str, set[str]],
+    literal_usage: dict[int, str],
+) -> tuple[EntrypointRouteFacts, ...]:
+    facts: list[EntrypointRouteFacts] = []
+    class_roles: dict[str, tuple[set[str], set[str], set[str]]] = {}
+    for ep in sorted(entrypoints, key=lambda e: e.symbol_name.encode("utf-8")):
+        fact, (flags_c, true_c, false_c) = _verify_entrypoint_fn(
+            ep, expected_mcp_method=expected_map[ep.symbol_name], contract=contract,
+            constants=constants, reserved_names=reserved_names, role_usage=role_usage, literal_usage=literal_usage,
+        )
+        facts.append(fact)
+        if ep.is_method:
+            cls_name = ep.symbol_name.split(".", 1)[0]
+            f_set, t_set, l_set = class_roles.setdefault(cls_name, (set(), set(), set()))
+            if flags_c.startswith("self:"):
+                f_set.add(flags_c)
+            if true_c.startswith("self:"):
+                t_set.add(true_c)
+            if false_c.startswith("self:"):
+                l_set.add(false_c)
+            if (f_set & t_set) or (f_set & l_set) or (t_set & l_set):
+                raise ClosedValidationError(f"adapter_bytes: inconsistent collaborator roles across {cls_name!r}")
+    return tuple(facts)
+
+
 @dataclass(frozen=True, slots=True)
 class Cpython312AstConsumerRoutingAnalyzer(ConsumerRoutingAnalyzerPort):
     """Deterministic zero-execution CPython 3.12 AST consumer routing verifier."""
@@ -676,7 +720,11 @@ class Cpython312AstConsumerRoutingAnalyzer(ConsumerRoutingAnalyzerPort):
         if type(contract) is not ConsumerFeatureFlagContract:
             raise ClosedValidationError("contract: expected ConsumerFeatureFlagContract")
         verified = ConsumerFeatureFlagContract.from_dict(contract.to_dict())
-        _analyze_feature_flag_bytes(feature_flag_bytes, verified)
+        if not verified.adapter_git_artifact.source_path.endswith(".py"):
+            raise ClosedValidationError("adapter_git_artifact.source_path: must end with '.py'")
+        _analyze_feature_flag_bytes(
+            feature_flag_bytes, verified, source_path=verified.feature_flag_git_artifact.source_path
+        )
         adapter_text = _decode_verified_source_bytes(adapter_bytes, label="adapter_bytes")
         tree = _parse_bounded_python_ast(adapter_bytes, adapter_text, label="adapter_bytes")
         constants, reserved, entrypoints = _collect_adapter_module(tree, verified)
@@ -686,12 +734,9 @@ class Cpython312AstConsumerRoutingAnalyzer(ConsumerRoutingAnalyzerPort):
             raise ClosedValidationError("adapter_bytes: public entrypoint set mismatch against contract")
         role_usage: dict[str, set[str]] = {}
         literal_usage: dict[int, str] = {}
-        facts = tuple(
-            _verify_entrypoint_fn(
-                ep, expected_mcp_method=expected_map[ep.symbol_name], contract=verified,
-                constants=constants, reserved_names=reserved, role_usage=role_usage, literal_usage=literal_usage,
-            )
-            for ep in sorted(entrypoints, key=lambda e: e.symbol_name.encode("utf-8"))
+        facts = _verify_entrypoints_and_class_roles(
+            entrypoints, expected_map=expected_map, contract=verified, constants=constants,
+            reserved_names=reserved, role_usage=role_usage, literal_usage=literal_usage,
         )
         _verify_global_string_literals(
             tree, contract=verified, constants=constants, role_usage=role_usage, literal_usage=literal_usage

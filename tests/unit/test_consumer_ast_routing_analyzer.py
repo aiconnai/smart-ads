@@ -79,6 +79,8 @@ def _make_contract(
     *,
     flag_key: str = _FLAG_KEY,
     disabled_legacy_route: str = _LEGACY_ROUTE,
+    adapter_source_path: str = "src/ibvi_ads/adapter.py",
+    ff_source_path: str = "src/ibvi_ads/flags.json",
 ) -> ConsumerFeatureFlagContract:
     prov_a = ArtifactLocator.from_digest("smart_ads/git_artifact_provenance/v1", "sha256:" + ("4" * 64))
     prov_f = ArtifactLocator.from_digest("smart_ads/git_artifact_provenance/v1", "sha256:" + ("5" * 64))
@@ -87,8 +89,8 @@ def _make_contract(
         _RUN_LOC, "limaronaldo/hermes-ronaldo", "3" * 40, prov_h, "conductor:hermes-main",
         "front:pinna", "/ibvi-ads", "sha256:" + ("7" * 64), ALLOWED_MCP_METHODS, True, _UNSIGNED,
     )
-    adp_art = TripartiteGitArtifactRef("src/ibvi_ads/adapter.py", "4" * 40, "sha256:" + ("8" * 64), prov_a)
-    ff_art = TripartiteGitArtifactRef("src/ibvi_ads/flags.json", "5" * 40, "sha256:" + ("9" * 64), prov_f)
+    adp_art = TripartiteGitArtifactRef(adapter_source_path, "4" * 40, "sha256:" + ("8" * 64), prov_a)
+    ff_art = TripartiteGitArtifactRef(ff_source_path, "5" * 40, "sha256:" + ("9" * 64), prov_f)
     eps = tuple(ReadEntrypointSelector(sym, m) for sym, m in selectors)
     return ConsumerFeatureFlagContract(
         _RUN_LOC, "limaronaldo/hermes-ronaldo", "3" * 40, adp_art, ff_art, flag_key,
@@ -251,12 +253,18 @@ def test_consumer_port_dataclasses_closed_validation() -> None:
 
 
 @pytest.mark.parametrize(
-    "flag_bytes",
-    [_VALID_JSON_FLAGS, _VALID_PY_FLAGS_SCALAR, _VALID_PY_FLAGS_DICT],
+    ("flag_bytes", "ff_path"),
+    [
+        (_VALID_JSON_FLAGS, "src/ibvi_ads/flags.json"),
+        (_VALID_PY_FLAGS_SCALAR, "src/ibvi_ads/flags.py"),
+        (_VALID_PY_FLAGS_DICT, "src/ibvi_ads/flags.py"),
+    ],
 )
-def test_routing_analyzer_accepts_valid_json_and_python_flag_artifacts(flag_bytes: bytes) -> None:
+def test_routing_analyzer_accepts_valid_json_and_python_flag_artifacts(
+    flag_bytes: bytes, ff_path: str
+) -> None:
     analyzer = Cpython312AstConsumerRoutingAnalyzer()
-    contract = _make_contract()
+    contract = _make_contract(ff_source_path=ff_path)
     result = analyzer.analyze_consumer_routing(
         adapter_bytes=_VALID_ADAPTER_SOURCE,
         feature_flag_bytes=flag_bytes,
@@ -376,11 +384,12 @@ _BAD_FLAG_ARTIFACTS: tuple[bytes, ...] = (
 @pytest.mark.parametrize("bad_flag_bytes", _BAD_FLAG_ARTIFACTS)
 def test_routing_analyzer_rejects_malicious_or_ambiguous_flag_artifacts(bad_flag_bytes: bytes) -> None:
     analyzer = Cpython312AstConsumerRoutingAnalyzer()
+    ff_path = "src/ibvi_ads/flags.json" if bad_flag_bytes.lstrip().startswith(b"{") else "src/ibvi_ads/flags.py"
     with pytest.raises(ClosedValidationError):
         analyzer.analyze_consumer_routing(
             adapter_bytes=_VALID_ADAPTER_SOURCE,
             feature_flag_bytes=bad_flag_bytes,
-            contract=_make_contract(),
+            contract=_make_contract(ff_source_path=ff_path),
         )
 
 
