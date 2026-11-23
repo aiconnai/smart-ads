@@ -20,6 +20,12 @@ from smart_ads.application.completeness import (
     build_expected_fact_universe,
     recompute_collection_completeness,
 )
+from smart_ads.application.conductor import (
+    CONDUCTOR_RUN_OUTCOME_SCHEMA,
+    ConductorRunInput,
+    ConductorRunOutcome,
+    conduct_offline_run,
+)
 from smart_ads.application.consumer_verification import (
     verify_consumer_deployment_readback,
     verify_consumer_feature_flag_contract,
@@ -79,8 +85,11 @@ from smart_ads.application.seam_parity import (
 __all__ = [
     "AdmissionError",
     "AdmittedCollectionBundle",
+    "CONDUCTOR_RUN_OUTCOME_SCHEMA",
     "CompletenessEvaluation",
     "CompletenessStatus",
+    "ConductorRunInput",
+    "ConductorRunOutcome",
     "FixtureCollectionEvaluation",
     "GlobalDatasetCatalogService",
     "LiveCallExecutionOutcome",
@@ -98,6 +107,7 @@ __all__ = [
     "build_seam_parity_record",
     "collect",
     "compute_retention_reachability_graph",
+    "conduct_offline_run",
     "evaluate_fixture_collection",
     "execute_admitted_call",
     "execute_analysis_replay_bundle",
