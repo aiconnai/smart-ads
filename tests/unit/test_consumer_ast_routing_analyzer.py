@@ -316,6 +316,13 @@ def test_routing_analyzer_rejects_invalid_input_types_and_byte_envelopes() -> No
         (b"\xff\xfe", _VALID_JSON_FLAGS, contract),
         (b"# -*- coding: utf-8 -*-\n" + _VALID_ADAPTER_SOURCE, _VALID_JSON_FLAGS, contract),
         (b"#!/usr/bin/env python3\n# coding=latin-1\n" + _VALID_ADAPTER_SOURCE, _VALID_JSON_FLAGS, contract),
+        (
+            b"\x0c\x0c# coding: unicode_escape\n# safe \\u000aimport os\n" + _VALID_ADAPTER_SOURCE,
+            _VALID_JSON_FLAGS,
+            contract,
+        ),
+        (b"\x0b" + _VALID_ADAPTER_SOURCE, _VALID_JSON_FLAGS, contract),
+        ("\u2028".encode("utf-8") + _VALID_ADAPTER_SOURCE, _VALID_JSON_FLAGS, contract),
     ):
         with pytest.raises(ClosedValidationError):
             analyzer.analyze_consumer_routing(
@@ -360,6 +367,9 @@ _BAD_FLAG_ARTIFACTS: tuple[bytes, ...] = (
     b'FLAG_KEY = "other.flag"\nDEFAULT_ENABLED = False\n',
     b'FLAG_KEY = "ibvi_ads.smart_ads_read_v1"\nDEFAULT_ENABLED = False\nDISABLED_LEGACY_ROUTE = "bad:route"\n',
     b'FEATURE_FLAGS = {"ibvi_ads.smart_ads_read_v1": True}\n',
+    b'FLAG_KEY = "ibvi_ads.smart_ads_read_v1"\nNOT_ENABLED = False\n',
+    b'FLAG_KEY = "ibvi_ads.smart_ads_read_v1"\nLEGACY_FALLBACK_ENABLED = False\n',
+    b'flag_key = "ibvi_ads.smart_ads_read_v1"\ndefault_enabled = False\n',
 )
 
 
@@ -475,6 +485,71 @@ _BAD_ADAPTER_ARTIFACTS: tuple[str, ...] = (
     f'        return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", {{"m": "smart_ads.leak"}})\n'
     "    else:\n"
     f'        return legacy("{_LEGACY_ROUTE}", payload)\n',
+    f'FLAG_KEY = "{_FLAG_KEY}"\nIBVI_ADS_ROUTE = "/ibvi-ads"\n'
+    'def read_one(payload, flags, dispatch, legacy, FLAG_KEY="always_on", IBVI_ADS_ROUTE="/hijack"):\n'
+    "    if flags.is_enabled(FLAG_KEY):\n"
+    f'        return dispatch(IBVI_ADS_ROUTE, "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "    else:\n"
+    f'        return legacy("{_LEGACY_ROUTE}", payload)\n',
+    'def read_one(payload, flags, dispatch, legacy, IBVI_ADS_ROUTE="/hijack"):\n'
+    f'    if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'        return dispatch(IBVI_ADS_ROUTE, "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "    else:\n"
+    f'        return legacy("{_LEGACY_ROUTE}", payload)\n'
+    'IBVI_ADS_ROUTE = "/ibvi-ads"\n',
+    _VALID_SINGLE_ENTRYPOINT + "\ndef __getattr__(name):\n    return name\n",
+)
+
+
+_BAD_CLASS_ADAPTER_ARTIFACTS: tuple[str, ...] = (
+    "class Gw:\n"
+    "    def __new__(self, flags, conductor, legacy):\n"
+    "        return conductor\n"
+    "    def fetch(self, payload, flags, dispatch, legacy):\n"
+    f'        if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return legacy("{_LEGACY_ROUTE}", payload)\n',
+    "class Gw:\n"
+    "    def __getattribute__(self, name):\n"
+    "        return name\n"
+    "    def fetch(self, payload, flags, dispatch, legacy):\n"
+    f'        if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return legacy("{_LEGACY_ROUTE}", payload)\n',
+    "class Gw:\n"
+    "    def fetch(self, payload, flags, dispatch):\n"
+    f'        if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return self.__setattr__("{_LEGACY_ROUTE}", payload)\n',
+    "class Gw:\n"
+    "    def fetch(self, payload):\n"
+    f'        if self._flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return self._conductor("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return self._legacy("{_LEGACY_ROUTE}", payload)\n',
+    "class Gw:\n"
+    "    def __init__(self, shared, legacy):\n"
+    "        self._flags = shared\n"
+    "        self._conductor = shared\n"
+    "        self._legacy = legacy\n"
+    "    def fetch(self, payload):\n"
+    f'        if self._flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return self._conductor("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return self._legacy("{_LEGACY_ROUTE}", payload)\n',
+    "class Gw:\n"
+    "    def __init__(self, flags, conductor, legacy):\n"
+    "        self.__dict__ = flags\n"
+    "        self._conductor = conductor\n"
+    "        self._legacy = legacy\n"
+    "    def fetch(self, payload, f):\n"
+    f'        if f.is_enabled("{_FLAG_KEY}"):\n'
+    f'            return self._conductor("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "        else:\n"
+    f'            return self._legacy("{_LEGACY_ROUTE}", payload)\n',
 )
 
 
@@ -485,6 +560,20 @@ def test_routing_analyzer_rejects_malicious_or_noncompliant_adapters(bad_adapter
     with pytest.raises(ClosedValidationError):
         analyzer.analyze_consumer_routing(
             adapter_bytes=bad_adapter_src.encode("utf-8"),
+            feature_flag_bytes=_VALID_JSON_FLAGS,
+            contract=contract,
+        )
+
+
+@pytest.mark.parametrize("bad_cls_src", _BAD_CLASS_ADAPTER_ARTIFACTS)
+def test_routing_analyzer_rejects_class_dunders_unbound_self_and_init_aliasing(
+    bad_cls_src: str,
+) -> None:
+    analyzer = Cpython312AstConsumerRoutingAnalyzer()
+    contract = _make_contract((("Gw.fetch", _SINGLE_CONTRACT_METHOD),))
+    with pytest.raises(ClosedValidationError):
+        analyzer.analyze_consumer_routing(
+            adapter_bytes=bad_cls_src.encode("utf-8"),
             feature_flag_bytes=_VALID_JSON_FLAGS,
             contract=contract,
         )

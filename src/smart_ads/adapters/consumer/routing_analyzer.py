@@ -25,6 +25,9 @@ _UTF8_BOM: Final[bytes] = b"\xef\xbb\xbf"
 _PEP263_COOKIE_RE: Final[re.Pattern[str]] = re.compile(r"^[ \t\f]*#.*?coding[:=]")
 _UPPER_SNAKE_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Z][A-Z0-9_]*\Z")
 _IDENT_RE: Final[re.Pattern[str]] = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+_FORBIDDEN_LINE_SEPS: Final[frozenset[str]] = frozenset(
+    {"\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"}
+)
 
 _CANONICAL_MCP_METHODS: Final[frozenset[str]] = frozenset({
     "smart_ads.queries.get_ad_performance_v1",
@@ -39,6 +42,20 @@ _FEATURE_FLAG_JSON_KEYS: Final[frozenset[str]] = frozenset(
 _ALLOWED_TYPING_IMPORTS: Final[frozenset[str]] = frozenset(
     {"Any", "Callable", "Final", "Mapping", "Optional", "Protocol", "Sequence", "TypeAlias"}
 )
+_ALLOWED_FLAG_KEY_NAMES: Final[frozenset[str]] = frozenset(
+    {"flag_key", "smart_ads_flag_key", "consumer_flag_key", "ibvi_ads_flag_key"}
+)
+_ALLOWED_DEFAULT_ENABLED_NAMES: Final[frozenset[str]] = frozenset({
+    "default_enabled", "smart_ads_default_enabled", "consumer_default_enabled",
+    "ibvi_ads_default_enabled", "smart_ads_read_enabled", "ibvi_ads_smart_ads_enabled",
+})
+_ALLOWED_DISABLED_ROUTE_NAMES: Final[frozenset[str]] = frozenset({
+    "disabled_legacy_route", "legacy_route",
+    "consumer_disabled_legacy_route", "ibvi_ads_disabled_legacy_route",
+})
+_ALLOWED_ENABLED_ROUTE_NAMES: Final[frozenset[str]] = frozenset(
+    {"enabled_smart_ads_route", "smart_ads_route", "delegated_route", "ibvi_ads_route"}
+)
 _ALLOWED_FLAG_DICT_NAMES: Final[frozenset[str]] = frozenset(
     {"feature_flags", "flags", "flag_defaults", "feature_flag_defaults", "feature_flag_config"}
 )
@@ -49,7 +66,7 @@ class _ParsedEntrypoint:
     symbol_name: str
     fn: ast.FunctionDef | ast.AsyncFunctionDef
     is_method: bool
-    allowed_self_attrs: frozenset[str] | None
+    allowed_self_attrs: frozenset[str]
     forbidden_self_attrs: frozenset[str]
 
 
@@ -63,6 +80,10 @@ class _EpScope:
     role_usage: dict[str, set[str]]
     literal_usage: dict[int, str]
     expected_flag_key: str
+
+
+def _has_dunder_affix(name: str) -> bool:
+    return name.startswith("__") or name.endswith("__")
 
 
 def _verify_cpython_312_runtime() -> None:
@@ -81,17 +102,23 @@ def _decode_verified_source_bytes(buf: object, *, label: str) -> str:
         text = buf.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ClosedValidationError(f"{label}: invalid UTF-8 bytes") from exc
-    for line in text.splitlines()[:2]:
+    if any(ch in _FORBIDDEN_LINE_SEPS for ch in text):
+        raise ClosedValidationError(f"{label}: non-standard line/control separator is forbidden")
+    raw_head = [raw_line.decode("utf-8") for raw_line in buf.splitlines()[:2]]
+    for line in [*raw_head, *text.splitlines()]:
         if _PEP263_COOKIE_RE.match(line) is not None:
             raise ClosedValidationError(f"{label}: PEP 263 encoding cookie is forbidden")
     return text
 
 
-def _parse_bounded_python_ast(text: str, *, label: str) -> ast.Module:
+def _parse_bounded_python_ast(raw_bytes: bytes, text: str, *, label: str) -> ast.Module:
     try:
-        tree = ast.parse(text)
+        tree = ast.parse(raw_bytes)
+        text_tree = ast.parse(text)
     except (SyntaxError, ValueError, RecursionError) as exc:
         raise ClosedValidationError(f"{label}: failed to parse Python AST") from exc
+    if ast.dump(tree) != ast.dump(text_tree):
+        raise ClosedValidationError(f"{label}: bytes vs str AST lexer differential")
     stack: list[tuple[ast.AST, int]] = [(tree, 0)]
     node_count = 0
     while stack:
@@ -165,21 +192,21 @@ def _classify_flag_scalar(
     name: str, val: str | bool, state: dict[str, object], contract: ConsumerFeatureFlagContract
 ) -> None:
     norm = name.lower()
-    if norm in {"flag_key", "smart_ads_flag_key", "consumer_flag_key", "ibvi_ads_flag_key"} or norm.endswith("_flag_key"):
+    if norm in _ALLOWED_FLAG_KEY_NAMES:
         if type(val) is not str or val != contract.flag_key or "scalar_flag_key" in state:
             raise ClosedValidationError("feature_flag_py: invalid or duplicate flag_key constant")
         state["scalar_flag_key"] = True
         _record_unique_flag_role(state, "flag_key", val)
-    elif norm in {"default_enabled", "enabled", "flag_default"} or norm.endswith("_enabled"):
+    elif norm in _ALLOWED_DEFAULT_ENABLED_NAMES:
         if type(val) is not bool or val is not False or "scalar_enabled" in state:
             raise ClosedValidationError("feature_flag_py: default_enabled must be literal bool False")
         state["scalar_enabled"] = True
         _record_unique_flag_role(state, "default_enabled", False)
-    elif norm in {"disabled_legacy_route", "legacy_route"} or norm.endswith(("_legacy_route", "_disabled_route")):
+    elif norm in _ALLOWED_DISABLED_ROUTE_NAMES:
         if type(val) is not str or val != contract.disabled_legacy_route or "scalar_legacy" in state:
             raise ClosedValidationError("feature_flag_py: invalid disabled_legacy_route constant")
         state["scalar_legacy"] = True
-    elif norm in {"enabled_smart_ads_route", "smart_ads_route", "delegated_route", "ibvi_ads_route"} or norm.endswith("_smart_ads_route"):
+    elif norm in _ALLOWED_ENABLED_ROUTE_NAMES:
         if type(val) is not str or val != _IBVI_ADS_ROUTE or "scalar_ibvi" in state:
             raise ClosedValidationError("feature_flag_py: invalid enabled_smart_ads_route constant")
         state["scalar_ibvi"] = True
@@ -212,8 +239,8 @@ def _classify_flag_dict(
         _classify_flag_scalar(key, val, state, contract)
 
 
-def _analyze_feature_flag_py(text: str, contract: ConsumerFeatureFlagContract) -> None:
-    tree = _parse_bounded_python_ast(text, label="feature_flag_bytes")
+def _analyze_feature_flag_py(raw_bytes: bytes, text: str, contract: ConsumerFeatureFlagContract) -> None:
+    tree = _parse_bounded_python_ast(raw_bytes, text, label="feature_flag_bytes")
     assigned: set[str] = set()
     state: dict[str, object] = {}
     for stmt in _strip_leading_docstring(tree.body):
@@ -223,8 +250,8 @@ def _analyze_feature_flag_py(text: str, contract: ConsumerFeatureFlagContract) -
                 continue
             raise ClosedValidationError("feature_flag_py: unallowlisted from-import")
         name, rhs = _extract_simple_name_assign(stmt, label="feature_flag_py")
-        if name in assigned or name in {"Final", "annotations"}:
-            raise ClosedValidationError(f"feature_flag_py: duplicate or shadowed name {name!r}")
+        if _UPPER_SNAKE_RE.fullmatch(name) is None or name in assigned or name in {"Final", "annotations"}:
+            raise ClosedValidationError(f"feature_flag_py: invalid, duplicate, or shadowed name {name!r}")
         assigned.add(name)
         if isinstance(rhs, ast.Constant) and type(rhs.value) in (str, bool):
             if type(rhs.value) is bool and rhs.value is not False:
@@ -246,7 +273,7 @@ def _analyze_feature_flag_bytes(feature_flag_bytes: bytes, contract: ConsumerFea
     if stripped.startswith("{"):
         _validate_flag_json(text, contract)
     else:
-        _analyze_feature_flag_py(text, contract)
+        _analyze_feature_flag_py(feature_flag_bytes, text, contract)
 
 
 def _validate_adapter_import(stmt: ast.stmt, reserved_names: set[str]) -> None:
@@ -286,7 +313,7 @@ def _check_safe_default(node: ast.expr | None, fn_name: str) -> None:
 
 
 def _extract_fn_params(
-    fn: ast.FunctionDef | ast.AsyncFunctionDef, *, is_method: bool
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, *, is_method: bool, forbidden_names: frozenset[str] = frozenset()
 ) -> tuple[tuple[str, ...], frozenset[str]]:
     args = fn.args
     if fn.decorator_list or fn.type_params or args.posonlyargs or args.vararg is not None or args.kwarg is not None:
@@ -310,8 +337,8 @@ def _extract_fn_params(
             _check_safe_default(kw_def, fn.name)
             defaulted.add(kw_node.arg)
     names = tuple(a.arg for a in [*pos_args, *args.kwonlyargs])
-    if len(set(names)) != len(names):
-        raise ClosedValidationError(f"adapter_bytes: duplicate parameter on {fn.name!r}")
+    if len(set(names)) != len(names) or any(n == "self" or _has_dunder_affix(n) or n in forbidden_names for n in names):
+        raise ClosedValidationError(f"adapter_bytes: duplicate, dunder, or shadowing parameter on {fn.name!r}")
     return names, frozenset(defaulted)
 
 
@@ -326,6 +353,7 @@ def _validate_class_init(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozense
         return frozenset()
     param_set = frozenset(params)
     bound_attrs: set[str] = set()
+    used_params: set[str] = set()
     for stmt in stmts:
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
             tgt, val = stmt.targets[0], stmt.value
@@ -335,14 +363,18 @@ def _validate_class_init(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozense
             raise ClosedValidationError("adapter_bytes: non-trivial statement in __init__")
         if (
             not isinstance(tgt, ast.Attribute) or not isinstance(tgt.value, ast.Name) or tgt.value.id != "self"
-            or tgt.attr in bound_attrs or not isinstance(val, ast.Name) or val.id not in param_set
+            or _has_dunder_affix(tgt.attr) or tgt.attr in bound_attrs
+            or not isinstance(val, ast.Name) or val.id not in param_set or val.id in used_params
         ):
-            raise ClosedValidationError("adapter_bytes: __init__ may only bind self.<attr> = <param>")
+            raise ClosedValidationError("adapter_bytes: __init__ must bind distinct non-dunder self.<attr> = <param>")
         bound_attrs.add(tgt.attr)
+        used_params.add(val.id)
     return frozenset(bound_attrs)
 
 
 def _validate_private_helper(fn: ast.FunctionDef | ast.AsyncFunctionDef, *, is_method: bool) -> None:
+    if _has_dunder_affix(fn.name):
+        raise ClosedValidationError(f"adapter_bytes: dunder hook {fn.name!r} is forbidden")
     params, _ = _extract_fn_params(fn, is_method=is_method)
     stmts = _strip_leading_docstring(fn.body)
     if len(stmts) != 1 or not isinstance(stmts[0], ast.Return) or stmts[0].value is None:
@@ -357,11 +389,25 @@ def _validate_private_helper(fn: ast.FunctionDef | ast.AsyncFunctionDef, *, is_m
     raise ClosedValidationError(f"adapter_bytes: forbidden expression in private helper {fn.name!r}")
 
 
+def _verify_no_param_shadowing(tree: ast.Module, reserved_names: frozenset[str]) -> None:
+    for stmt in _strip_leading_docstring(tree.body):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _extract_fn_params(stmt, is_method=False, forbidden_names=reserved_names)
+        elif isinstance(stmt, ast.ClassDef):
+            cls_methods = frozenset(
+                m.name for m in _strip_leading_docstring(stmt.body) if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            )
+            forbidden = reserved_names | cls_methods
+            for m_node in _strip_leading_docstring(stmt.body):
+                if isinstance(m_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    _extract_fn_params(m_node, is_method=True, forbidden_names=forbidden)
+
+
 def _resolve_str_expr(expr: ast.expr, scope: _EpScope, role: str) -> str:
     if isinstance(expr, ast.Constant) and type(expr.value) is str:
         scope.literal_usage[id(expr)] = role
         return expr.value
-    if isinstance(expr, ast.Name) and expr.id in scope.constants:
+    if isinstance(expr, ast.Name) and expr.id not in scope.all_params and expr.id in scope.constants:
         scope.role_usage.setdefault(expr.id, set()).add(role)
         return scope.constants[expr.id][0]
     raise ClosedValidationError(f"adapter_bytes: expected string literal or UPPER_SNAKE constant for {role}")
@@ -373,10 +419,10 @@ def _extract_collaborator_key(expr: ast.expr, scope: _EpScope) -> str:
     if (
         scope.ep.is_method and isinstance(expr, ast.Attribute)
         and isinstance(expr.value, ast.Name) and expr.value.id == "self"
+        and not _has_dunder_affix(expr.attr)
+        and expr.attr in scope.ep.allowed_self_attrs
         and expr.attr not in scope.ep.forbidden_self_attrs
     ):
-        if scope.ep.allowed_self_attrs is not None and expr.attr not in scope.ep.allowed_self_attrs:
-            raise ClosedValidationError(f"adapter_bytes: unbound self.{expr.attr} collaborator")
         return f"self:{expr.attr}"
     raise ClosedValidationError("adapter_bytes: unallowlisted collaborator receiver")
 
@@ -454,7 +500,7 @@ def _unwrap_branch_call(
     collab: str | None = None
     if (
         isinstance(func, ast.Attribute) and _IDENT_RE.fullmatch(func.attr) is not None
-        and not func.attr.startswith("_") and func.attr != "is_enabled"
+        and not func.attr.startswith("_") and not _has_dunder_affix(func.attr) and func.attr != "is_enabled"
     ):
         try:
             collab = _extract_collaborator_key(func.value, scope)
@@ -482,7 +528,7 @@ def _validate_payload_expr(expr: ast.expr, *, value_params: frozenset[str], scop
         seen_keys.add(key_str)
         if isinstance(v_node, ast.Name) and v_node.id in value_params:
             continue
-        if isinstance(v_node, ast.Name) and v_node.id in scope.constants:
+        if isinstance(v_node, ast.Name) and v_node.id not in scope.all_params and v_node.id in scope.constants:
             c_val = scope.constants[v_node.id][0]
             if "smart_ads" in c_val or c_val.startswith(_IBVI_ADS_ROUTE):
                 raise ClosedValidationError("adapter_bytes: forbidden constant in payload dict")
@@ -504,7 +550,9 @@ def _verify_entrypoint_fn(
     role_usage: dict[str, set[str]],
     literal_usage: dict[int, str],
 ) -> EntrypointRouteFacts:
-    params, defaulted = _extract_fn_params(ep.fn, is_method=ep.is_method)
+    params, defaulted = _extract_fn_params(
+        ep.fn, is_method=ep.is_method, forbidden_names=reserved_names | ep.forbidden_self_attrs
+    )
     all_params = frozenset(params)
     scope = _EpScope(
         ep, all_params, all_params - defaulted, constants, reserved_names,
@@ -528,20 +576,25 @@ def _verify_entrypoint_fn(
 
 
 def _collect_class_entrypoints(cls_node: ast.ClassDef, out: list[_ParsedEntrypoint]) -> None:
-    if cls_node.name.startswith("_") or cls_node.bases or cls_node.keywords or cls_node.decorator_list or cls_node.type_params:
+    if (
+        cls_node.name.startswith("_") or _has_dunder_affix(cls_node.name)
+        or cls_node.bases or cls_node.keywords or cls_node.decorator_list or cls_node.type_params
+    ):
         raise ClosedValidationError(f"adapter_bytes: invalid class definition {cls_node.name!r}")
     stmts = _strip_leading_docstring(cls_node.body)
     if not stmts:
         raise ClosedValidationError(f"adapter_bytes: empty class {cls_node.name!r}")
     method_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
     method_names: set[str] = set()
-    init_attrs: frozenset[str] | None = None
+    init_attrs: frozenset[str] = frozenset()
     for member in stmts:
         if not isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) or member.name in method_names:
             raise ClosedValidationError(f"adapter_bytes: invalid or duplicate member in {cls_node.name!r}")
         method_names.add(member.name)
         if member.name == "__init__":
             init_attrs = _validate_class_init(member)
+        elif _has_dunder_affix(member.name):
+            raise ClosedValidationError(f"adapter_bytes: forbidden dunder method {member.name!r}")
         elif member.name.startswith("_"):
             _validate_private_helper(member, is_method=True)
         else:
@@ -563,13 +616,13 @@ def _collect_adapter_module(
         elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
             _extract_module_str_const(stmt, constants, reserved, contract)
         elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if stmt.name in reserved:
-                raise ClosedValidationError(f"adapter_bytes: duplicate top-level symbol {stmt.name!r}")
+            if stmt.name in reserved or _has_dunder_affix(stmt.name):
+                raise ClosedValidationError(f"adapter_bytes: duplicate or dunder top-level symbol {stmt.name!r}")
             reserved.add(stmt.name)
             if stmt.name.startswith("_"):
                 _validate_private_helper(stmt, is_method=False)
             else:
-                entrypoints.append(_ParsedEntrypoint(stmt.name, stmt, False, None, frozenset()))
+                entrypoints.append(_ParsedEntrypoint(stmt.name, stmt, False, frozenset(), frozenset()))
         elif isinstance(stmt, ast.ClassDef):
             if stmt.name in reserved:
                 raise ClosedValidationError(f"adapter_bytes: duplicate top-level class {stmt.name!r}")
@@ -577,7 +630,9 @@ def _collect_adapter_module(
             _collect_class_entrypoints(stmt, entrypoints)
         else:
             raise ClosedValidationError("adapter_bytes: unallowlisted top-level statement")
-    return constants, frozenset(reserved), entrypoints
+    frozen_reserved = frozenset(reserved)
+    _verify_no_param_shadowing(tree, frozen_reserved)
+    return constants, frozen_reserved, entrypoints
 
 
 def _verify_global_string_literals(
@@ -622,9 +677,8 @@ class Cpython312AstConsumerRoutingAnalyzer(ConsumerRoutingAnalyzerPort):
             raise ClosedValidationError("contract: expected ConsumerFeatureFlagContract")
         verified = ConsumerFeatureFlagContract.from_dict(contract.to_dict())
         _analyze_feature_flag_bytes(feature_flag_bytes, verified)
-        tree = _parse_bounded_python_ast(
-            _decode_verified_source_bytes(adapter_bytes, label="adapter_bytes"), label="adapter_bytes"
-        )
+        adapter_text = _decode_verified_source_bytes(adapter_bytes, label="adapter_bytes")
+        tree = _parse_bounded_python_ast(adapter_bytes, adapter_text, label="adapter_bytes")
         constants, reserved, entrypoints = _collect_adapter_module(tree, verified)
         expected_map = {ep.symbol_name: ep.mcp_method for ep in verified.read_entrypoints}
         discovered = tuple(sorted((ep.symbol_name for ep in entrypoints), key=lambda s: s.encode("utf-8")))
