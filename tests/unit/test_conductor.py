@@ -13,120 +13,18 @@ from typing import Any
 import pytest
 
 from smart_ads.adapters.storage import InMemoryCellObjectStore, StdlibParquetLandingCodec
-from smart_ads.analytics import (
-    FINDING_DETECTED,
-    FINDING_INCONCLUSIVE,
-    METRIC_WINDOW_COLUMNS,
-    AnalyticalCertificationRecord,
-    AnalysisEvidence,
-    AnalysisExecution,
-    AnalysisPolicy,
-    AnalysisReplayInputBundle,
-    AnalysisResult,
-    AnalysisResultSchema,
-    AttestedCertificationInput,
-    CanonicalResultEntry,
-    CanonicalResultSet,
-    CertificationInput,
-    DerivedCertificationStatus,
-    DuckDbBinaryObjectLocator,
-    DuckDbExtensionBinaryLocator,
-    DuckDbExtensionSpec,
-    DuckDbQueryDefinition,
-    DuckDbSessionSetting,
-    EvaluationContext,
-    Finding,
-    ResultColumn,
-    ResultProjection,
-    TaggedScalarCell,
-    build_certification_record,
-    evaluate_findings,
-    verify_certification_record,
-)
+from smart_ads.analytics import FINDING_DETECTED, FINDING_INCONCLUSIVE, METRIC_WINDOW_COLUMNS, AnalyticalCertificationRecord, AnalysisEvidence, AnalysisExecution, AnalysisPolicy, AnalysisReplayInputBundle, AnalysisResult, AnalysisResultSchema, AttestedCertificationInput, CanonicalResultEntry, CanonicalResultSet, CertificationInput, DerivedCertificationStatus, DuckDbBinaryObjectLocator, DuckDbExtensionBinaryLocator, DuckDbExtensionSpec, DuckDbQueryDefinition, DuckDbSessionSetting, EvaluationContext, Finding, ResultColumn, ResultProjection, TaggedScalarCell, build_certification_record, evaluate_findings, verify_certification_record
 import smart_ads.application as application_pkg
-from smart_ads.application import (
-    PREDECESSOR_P1_DOMAIN_PREFIXES,
-    ConductorRunInput,
-    ConductorRunOutcome,
-    GlobalDatasetCatalogService,
-    build_sanitized_candidate_fact_set,
-    conduct_offline_run,
-    execute_analysis_replay_bundle,
-    materialize_parquet_generation,
-    publish_dataset_snapshot,
-)
+from smart_ads.application import PREDECESSOR_P1_DOMAIN_PREFIXES, ConductorRunInput, ConductorRunOutcome, GlobalDatasetCatalogService, build_sanitized_candidate_fact_set, conduct_offline_run, execute_analysis_replay_bundle, materialize_parquet_generation, publish_dataset_snapshot
 import smart_ads.application.conductor as conductor_mod
-from smart_ads.contracts import (
-    ADR_P1_DOMAIN_PREFIXES,
-    AdmittedCollection,
-    AlgorithmProvenanceIdentity,
-    ArtifactLocator,
-    CanonicalQueryContract,
-    ClosedValidationError,
-    CollectionResult,
-    DateRange,
-    FactKey,
-    GitArtifactProvenance,
-    IbviAdsDelegationContext,
-    NormalizedCollectionFact,
-    OperationalReadEvidence,
-    P1Integrity,
-    PurposePrerequisiteLocators,
-    RetrievalContext,
-    SanitizedCandidateFactSet,
-    canonicalize_jcs,
-    compute_git_blob_oid,
-    compute_normalized_fact_set_digest,
-    jcs_sha256,
-    p1_content_digest,
-    p1_signing_message,
-    project_collection_fact_to_landing_row,
-)
-from smart_ads.contracts.effects import (
-    AuthorizationConsumptionRecord,
-    AuthorizationReceipt,
-    AuthorizationReservationRecord,
-    EffectProof,
-    ExecutionReceipt,
-    ProviderCallTarget,
-)
-from smart_ads.domain import (
-    FORBIDDEN_PIPEBOARD_ARGUMENTS,
-    PINNED_LEGACY_COMMIT,
-    PINNED_LEGACY_REPO,
-    PINNED_PIPEBOARD_D26_SPECS,
-    PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS,
-    ActivePartitionHead,
-    AuthorizedScopeRelation,
-    CatalogCasRequestProjection,
-    CurationExecution,
-    DatasetCatalog,
-    DatasetCatalogCutReceipt,
-    DatasetCatalogGenesisConsumptionRecord,
-    DatasetCatalogGenesisRecord,
-    DatasetSnapshot,
-    DriverCapabilityEntry,
-    ExpectedResourceInventory,
-    ExpectedResourceKey,
-    GenerationManifest,
-    LegacySourcePacket,
-    PinnedGitArtifactMember,
-    PinnedUpstreamReference,
-    PipeboardPhase1Contract,
-    PipeboardTransportLimits,
-    PrivateRegistrySnapshot,
-    RegistryBinding,
-    compute_curation_window,
-)
+from smart_ads.contracts import ADR_P1_DOMAIN_PREFIXES, AdmittedCollection, AlgorithmProvenanceIdentity, ArtifactLocator, CanonicalQueryContract, ClosedValidationError, CollectionResult, DateRange, FactKey, GitArtifactProvenance, IbviAdsDelegationContext, NormalizedCollectionFact, OperationalReadEvidence, P1Integrity, PurposePrerequisiteLocators, RetrievalContext, SanitizedCandidateFactSet, canonicalize_jcs, compute_git_blob_oid, compute_normalized_fact_set_digest, jcs_sha256, p1_content_digest, p1_signing_message, project_collection_fact_to_landing_row
+from smart_ads.contracts.effects import AuthorizationConsumptionRecord, AuthorizationReceipt, AuthorizationReservationRecord, EffectProof, ExecutionReceipt, ProviderCallTarget
+from smart_ads.domain import FORBIDDEN_PIPEBOARD_ARGUMENTS, PINNED_LEGACY_COMMIT, PINNED_LEGACY_REPO, PINNED_PIPEBOARD_D26_SPECS, PIPEBOARD_PHASE1_METRIC_SOURCE_MAPPINGS, ActivePartitionHead, AuthorizedScopeRelation, CatalogCasRequestProjection, CurationExecution, DatasetCatalog, DatasetCatalogCutReceipt, DatasetCatalogGenesisConsumptionRecord, DatasetCatalogGenesisRecord, DatasetSnapshot, DriverCapabilityEntry, ExpectedResourceInventory, ExpectedResourceKey, GenerationManifest, LegacySourcePacket, PinnedGitArtifactMember, PinnedUpstreamReference, PipeboardPhase1Contract, PipeboardTransportLimits, PrivateRegistrySnapshot, RegistryBinding, compute_curation_window
 from smart_ads.ports import CellObjectStorePort, OfflineIntelligencePort, P1SignatureVerifierPort
 from smart_ads.ports.cell_runtime import ClockAttestation
 from tests.contract.test_packaging_boundary import REPO_ROOT, scan_pure_layer_ast_violations
 from tests.unit.test_curation_and_catalog import _CAMP_A, _METRICS_3, _clean_transport
-from tests.unit.test_duckdb_replay_and_reporting import (
-    DeterministicInMemoryDuckDbEngine,
-    _METRIC_ORDER,
-    _METRIC_UKEY,
-)
+from tests.unit.test_duckdb_replay_and_reporting import DeterministicInMemoryDuckDbEngine, _METRIC_ORDER, _METRIC_UKEY
 
 _CAMP_B = "resource:" + ("b" * 51) + "a"
 _CAMP_OUT = "resource:" + ("d" * 51) + "a"
@@ -172,24 +70,29 @@ class ConductorDomainP1Verifier(P1SignatureVerifierPort):
 
 
 class ReadOnlyGuardStore(CellObjectStorePort):
-    """Wraps a `CellObjectStorePort` and rejects any write during `conduct_offline_run`."""
+    """Wraps a `CellObjectStorePort`, rejects writes, and optionally hides objects."""
 
-    def __init__(self, inner: CellObjectStorePort) -> None:
+    def __init__(self, inner: CellObjectStorePort, *, hidden_refs: frozenset[str] = frozenset()) -> None:
         self._inner = inner
+        self._hidden = hidden_refs
 
     def put_bytes(self, raw: bytes) -> str:
         raise ClosedValidationError("conductor must never invoke put_bytes")
 
     def get_bytes(self, object_ref: str, *, expected_size_bytes: int | None = None) -> bytes:
+        if object_ref in self._hidden:
+            raise ClosedValidationError(f"object hidden: {object_ref}")
         return self._inner.get_bytes(object_ref, expected_size_bytes=expected_size_bytes)
 
     def has_object(self, object_ref: str) -> bool:
-        return self._inner.has_object(object_ref)
+        return False if object_ref in self._hidden else self._inner.has_object(object_ref)
 
     def put_json_artifact(self, schema_id: str, payload: Mapping[str, Any]) -> ArtifactLocator:
         raise ClosedValidationError("conductor must never invoke put_json_artifact")
 
     def get_json_artifact(self, locator: ArtifactLocator) -> dict[str, Any]:
+        if locator.object_ref in self._hidden:
+            raise ClosedValidationError(f"artifact hidden: {locator.object_ref}")
         return self._inner.get_json_artifact(locator)
 
 
@@ -791,3 +694,67 @@ def test_rejects_wrong_finding_locators_and_unpermitted_degraded_certification(w
             run_input=world.make_run_input(attested_certification_inputs=bad_degraded),
             intelligence=PolicyRuleOfflineIntelligence(world.intel_alg_1),
         )
+
+
+def test_rejects_empty_wire_outcome_digest_and_missing_registry_snapshot(world: ConductorTestWorld) -> None:
+    intel = PolicyRuleOfflineIntelligence(world.intel_alg_1)
+    valid_out = conduct_offline_run(run_input=world.make_run_input(), intelligence=intel)
+    with pytest.raises(ClosedValidationError, match="outcome_digest"):
+        ConductorRunOutcome.from_dict({**valid_out.to_dict(), "outcome_digest": ""})
+
+    missing_reg_store = ReadOnlyGuardStore(world.store, hidden_refs=frozenset({world.reg_loc.object_ref}))
+    with pytest.raises(ClosedValidationError):
+        conduct_offline_run(
+            run_input=world.make_run_input(store=missing_reg_store),
+            intelligence=intel,
+        )
+
+
+def test_rejects_forged_unstored_bad_sig_and_undeclared_query_auxiliary_evidence(world: ConductorTestWorld) -> None:
+    intel = PolicyRuleOfflineIntelligence(world.intel_alg_1)
+    ev_main = AnalysisEvidence(world.exec_obj, world.results, (world.metrics_schema, world.scalar_schema), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    s_cols = (ResultColumn("row_count", "int64", False),)
+    forged_proj = ResultProjection("scalar", world.scalar_schema_loc, s_cols, ((TaggedScalarCell("int64", "999"),),), 1)
+    forged_res = AnalysisResult.from_dict(_sign_dict(AnalysisResult(world.run_loc, world.snap3_loc, world.aux_exec.analysis_replay_input_bundle_locator, "result:row_count", forged_proj).to_dict(), world.key_reg_loc), require_signed=True)
+    forged_exec = AnalysisExecution.from_dict(_sign_dict(AnalysisExecution(world.aux_exec.analysis_replay_input_bundle_locator, CanonicalResultSet.build(world.aux_exec.analysis_replay_input_bundle_locator, (CanonicalResultEntry.from_result(forged_res),))).to_dict(), world.key_reg_loc), require_signed=True)
+    unstored_aux_ev = AnalysisEvidence(forged_exec, (forged_res,), (world.scalar_schema,), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    with pytest.raises(ClosedValidationError):
+        conduct_offline_run(run_input=world.make_run_input(analysis_evidence=(ev_main, unstored_aux_ev)), intelligence=intel)
+
+    bad_b64 = base64.b64encode(b"\x01" * 64).decode("ascii")
+    bad_sig_dict = {**world.aux_results[0].to_dict(), "integrity": {**world.aux_results[0].integrity.to_dict(), "signature_base64": bad_b64}}  # type: ignore[union-attr]
+    world.store.put_json_artifact(AnalysisResult.SCHEMA, bad_sig_dict)
+    bad_sig_res = AnalysisResult.from_dict(bad_sig_dict, require_signed=True)
+    bad_sig_exec, _ = _put_signed_obj(world.store, AnalysisExecution(world.aux_exec.analysis_replay_input_bundle_locator, CanonicalResultSet.build(world.aux_exec.analysis_replay_input_bundle_locator, (CanonicalResultEntry.from_result(bad_sig_res),))), world.key_reg_loc)
+    bad_sig_ev = AnalysisEvidence(bad_sig_exec, (bad_sig_res,), (world.scalar_schema,), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    with pytest.raises(ClosedValidationError, match="signature"):
+        conduct_offline_run(run_input=world.make_run_input(analysis_evidence=(ev_main, bad_sig_ev)), intelligence=intel)
+
+    undeclared_res, _ = _put_signed_obj(world.store, AnalysisResult(world.run_loc, world.snap3_loc, world.aux_exec.analysis_replay_input_bundle_locator, "result:undeclared", forged_proj), world.key_reg_loc)
+    undeclared_exec, _ = _put_signed_obj(world.store, AnalysisExecution(world.aux_exec.analysis_replay_input_bundle_locator, CanonicalResultSet.build(world.aux_exec.analysis_replay_input_bundle_locator, (CanonicalResultEntry.from_result(undeclared_res),))), world.key_reg_loc)
+    undeclared_ev = AnalysisEvidence(undeclared_exec, (undeclared_res,), (world.scalar_schema,), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    with pytest.raises(ClosedValidationError):
+        conduct_offline_run(run_input=world.make_run_input(analysis_evidence=(ev_main, undeclared_ev)), intelligence=intel)
+    with pytest.raises(ClosedValidationError):
+        conduct_offline_run(run_input=world.make_run_input(analysis_execution_locator=undeclared_exec.locator(), resolved_analysis_results=(undeclared_res,)), intelligence=intel)
+
+    wrong_schema_ev = AnalysisEvidence(world.aux_exec, world.aux_results, (world.metrics_schema,), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    with pytest.raises(ClosedValidationError, match="resolved_schemas"):
+        conduct_offline_run(run_input=world.make_run_input(analysis_evidence=(ev_main, wrong_schema_ev)), intelligence=intel)
+
+
+def test_rejects_out_of_inventory_resource_in_auxiliary_evidence(world: ConductorTestWorld) -> None:
+    intel = PolicyRuleOfflineIntelligence(world.intel_alg_1)
+    ev_main = AnalysisEvidence(world.exec_obj, world.results, (world.metrics_schema, world.scalar_schema), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    r_cols = (ResultColumn("resource_ref", "opaque_ref", False),)
+    r_schema, r_schema_loc = _put_signed_obj(world.store, AnalysisResultSchema("relation", r_cols, ("resource_ref",)), world.key_reg_loc)
+    q_r = DuckDbQueryDefinition("result:res_check", "query:res_check", "SELECT 1", r_schema_loc, "relation", r_cols, ("resource_ref",), ("resource_ref",))
+    exts = (DuckDbExtensionSpec("parquet", "1.5.5", "explicit_local_binary", DuckDbExtensionBinaryLocator.for_binary_bytes(world.ext_bytes)),)
+    _, b_out_loc = _put_signed_obj(world.store, AnalysisReplayInputBundle("bundle:aux-out", world.run_loc, world.snap3_loc, "1.5.5", DuckDbBinaryObjectLocator.for_binary_bytes(world.duck_bytes), exts, (DuckDbSessionSetting("threads", TaggedScalarCell("int64", "1")),), (), (q_r,), world.policy_loc, (world.tmpl_loc,)), world.key_reg_loc)
+    out_proj = ResultProjection("relation", r_schema_loc, r_cols, ((TaggedScalarCell("opaque_ref", _CAMP_OUT),),), 1)
+    out_res, _ = _put_signed_obj(world.store, AnalysisResult(world.run_loc, world.snap3_loc, b_out_loc, "result:res_check", out_proj), world.key_reg_loc)
+    out_exec, _ = _put_signed_obj(world.store, AnalysisExecution(b_out_loc, CanonicalResultSet.build(b_out_loc, (CanonicalResultEntry.from_result(out_res),))), world.key_reg_loc)
+    out_aux_ev = AnalysisEvidence(out_exec, (out_res,), (r_schema,), world.snap3_loc, world.policy_loc, True, world.run_loc)
+    with pytest.raises(ClosedValidationError, match="resource_ref|inventory"):
+        conduct_offline_run(run_input=world.make_run_input(analysis_evidence=(ev_main, out_aux_ev)), intelligence=intel)
+

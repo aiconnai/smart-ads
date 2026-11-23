@@ -12,11 +12,8 @@ from smart_ads.application.curation_pipeline import _load_p1
 from smart_ads.application.duckdb_execution import _resolve_query_schemas, _validate_optional_p1_integrity
 from smart_ads.application.mcp_read_handler import _SignatureVerifyingStoreProxy, _load_snapshot_lineage_generations, _prepare_read_ports, load_verified_snapshot_rows
 from smart_ads.application.predecessor_validators import _invoke_sig_verifier, _verify_algorithm_with_sig, verify_stored_migration_run_context
-from smart_ads.contracts.effects import _safe_int, _strict_str, _typed_locator, sort_artifact_locators
-from smart_ads.contracts.jcs import ArtifactLocator, P1Integrity, canonicalize_jcs, jcs_sha256, self_digest_jcs_sha256, sort_utf8_strings
-from smart_ads.contracts.operational_evidence import AlgorithmProvenanceIdentity
-from smart_ads.contracts.scalars import ClosedValidationError, parse_iso_date, require_exact_keys, validate_iso_date, validate_sha256_prefixed, validate_timestamp_utc6
-from smart_ads.contracts.schemas import AnalyticsLandingRow
+from smart_ads.contracts import AlgorithmProvenanceIdentity, AnalyticsLandingRow, ArtifactLocator, ClosedValidationError, P1Integrity, canonicalize_jcs, jcs_sha256, parse_iso_date, require_exact_keys, self_digest_jcs_sha256, sort_artifact_locators, sort_utf8_strings, validate_iso_date, validate_sha256_prefixed, validate_timestamp_utc6
+from smart_ads.contracts.effects import _safe_int, _strict_str, _typed_locator
 from smart_ads.domain.catalog import DatasetCatalogCutReceipt, DatasetSnapshot, compute_logical_rows_digest
 from smart_ads.domain.curation import CurationExecution, partition_key_for_metric_date
 from smart_ads.domain.registry import ExpectedResourceInventory, PrivateRegistrySnapshot
@@ -165,8 +162,9 @@ class ConductorRunOutcome:
         m = require_exact_keys(data, cls.KEYS, label="conductor_run_outcome")
         if type(m["$schema"]) is not str or m["$schema"] != cls.SCHEMA or not isinstance(m["findings"], list) or not isinstance(m["finding_digests"], list):
             raise ClosedValidationError("conductor_run_outcome: invalid $schema or JSON list members")
+        od = validate_sha256_prefixed(_strict_str(m["outcome_digest"], field_name="conductor_run_outcome.outcome_digest"), field_name="conductor_run_outcome.outcome_digest")
         locs = {k: ArtifactLocator.from_dict(m[k], expected_type=s) for k, s in _LOCATOR_SPECS}
-        return cls(**locs, dataset_snapshot_digest=m["dataset_snapshot_digest"], intelligence_algorithm_identity=AlgorithmProvenanceIdentity.from_dict(m["intelligence_algorithm_identity"]), reduced_row_count=m["reduced_row_count"], reduced_evidence_digest=m["reduced_evidence_digest"], findings=tuple(Finding.from_dict(f) for f in m["findings"]), finding_digests=tuple(m["finding_digests"]), certification_record=AnalyticalCertificationRecord.from_dict(m["certification_record"]), outcome_digest=_strict_str(m["outcome_digest"], field_name="conductor_run_outcome.outcome_digest"))
+        return cls(**locs, dataset_snapshot_digest=m["dataset_snapshot_digest"], intelligence_algorithm_identity=AlgorithmProvenanceIdentity.from_dict(m["intelligence_algorithm_identity"]), reduced_row_count=m["reduced_row_count"], reduced_evidence_digest=m["reduced_evidence_digest"], findings=tuple(Finding.from_dict(f) for f in m["findings"]), finding_digests=tuple(m["finding_digests"]), certification_record=AnalyticalCertificationRecord.from_dict(m["certification_record"]), outcome_digest=od)
 
 def _load_verified_scope_and_policy(fresh_in: ConductorRunInput, run_ctx: dict[str, Any], *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool) -> tuple[ExpectedResourceInventory, AnalysisPolicy, EvaluationScope]:
     inv = _load_p1(proxy_store, fresh_in.expected_resource_inventory_locator, ExpectedResourceInventory, field_name="expected_resource_inventory_locator", require_signed=require_signed)
@@ -174,53 +172,55 @@ def _load_verified_scope_and_policy(fresh_in: ConductorRunInput, run_ctx: dict[s
     if inv.tenant_ref != run_ctx["tenant_ref"] or len(levels) != 1:
         raise ClosedValidationError("expected_resource_inventory: tenant_ref or resource_level mismatch")
     pol = _load_p1(proxy_store, fresh_in.analysis_policy_locator, AnalysisPolicy, field_name="analysis_policy_locator", require_signed=require_signed)
-    platform, currency = pol.applicability_scope.ad_platform_ref, pol.applicability_scope.currency
-    if proxy_store.has_object(inv.registry_snapshot_locator.object_ref):
-        reg = _load_p1(proxy_store, inv.registry_snapshot_locator, PrivateRegistrySnapshot, field_name="inventory.registry_snapshot_locator", require_signed=require_signed)
-        if reg.tenant_ref != inv.tenant_ref or not any(r.binding_ref == inv.binding_ref and r.resource_scope_ref == inv.resource_scope_ref for r in reg.authorized_scopes):
-            raise ClosedValidationError("expected_resource_inventory: unauthorized scope in PrivateRegistrySnapshot")
-        binding = reg.get_binding(inv.binding_ref)
-        if binding.account_ref != inv.account_ref:
-            raise ClosedValidationError("expected_resource_inventory: account_ref mismatch against RegistryBinding")
-        platform, currency = binding.ad_platform_ref, binding.currency
-    scope = EvaluationScope(inv.tenant_ref, inv.resource_scope_ref, next(iter(levels)), platform, currency)
+    reg = _load_p1(proxy_store, inv.registry_snapshot_locator, PrivateRegistrySnapshot, field_name="inventory.registry_snapshot_locator", require_signed=require_signed)
+    if reg.tenant_ref != inv.tenant_ref or not any(r.binding_ref == inv.binding_ref and r.resource_scope_ref == inv.resource_scope_ref for r in reg.authorized_scopes):
+        raise ClosedValidationError("expected_resource_inventory: unauthorized scope in PrivateRegistrySnapshot")
+    binding = reg.get_binding(inv.binding_ref)
+    if binding.account_ref != inv.account_ref:
+        raise ClosedValidationError("expected_resource_inventory: account_ref mismatch against RegistryBinding")
+    scope = EvaluationScope(inv.tenant_ref, inv.resource_scope_ref, next(iter(levels)), binding.ad_platform_ref, binding.currency)
     require_policy_applicable(pol, scope, fresh_in.evaluation_instant_utc)
     return inv, pol, scope
 
-def _verify_execution_and_results(fresh_in: ConductorRunInput, inv: ExpectedResourceInventory, *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool) -> tuple[AnalysisExecution, tuple[AnalysisResult, ...], tuple[AnalysisResultSchema, ...]]:
-    raw_exec = _load_p1(proxy_store, fresh_in.analysis_execution_locator, AnalysisExecution, field_name="analysis_execution_locator", require_signed=require_signed)
-    bundle = _load_p1(proxy_store, raw_exec.analysis_replay_input_bundle_locator, AnalysisReplayInputBundle, field_name="analysis_replay_input_bundle_locator", require_signed=require_signed)
+def _verify_execution_and_results(exec_loc: ArtifactLocator, results_in: tuple[AnalysisResult, ...], schemas_in: tuple[AnalysisResultSchema, ...] | None, fresh_in: ConductorRunInput, inv: ExpectedResourceInventory, *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool, label: str) -> tuple[AnalysisExecution, tuple[AnalysisResult, ...], tuple[AnalysisResultSchema, ...]]:
+    raw_exec = _load_p1(proxy_store, exec_loc, AnalysisExecution, field_name=f"{label}.execution", require_signed=require_signed)
+    bundle = _load_p1(proxy_store, raw_exec.analysis_replay_input_bundle_locator, AnalysisReplayInputBundle, field_name=f"{label}.bundle", require_signed=require_signed)
     if (bundle.migration_run_context_locator, bundle.dataset_snapshot_locator, bundle.analysis_policy_locator) != (fresh_in.migration_run_context_locator, fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator):
-        raise ClosedValidationError("analysis_replay_input_bundle: run, snapshot, or policy locator mismatch")
+        raise ClosedValidationError(f"{label}: bundle run, snapshot, or policy locator mismatch")
     _, schemas = _resolve_query_schemas(bundle, store=proxy_store, require_signed=require_signed)
     sorted_schemas = tuple(sorted(schemas, key=lambda s: canonicalize_jcs(s.locator().to_dict())))
-    sorted_results = tuple(sorted(fresh_in.resolved_analysis_results, key=lambda r: r.result_key.encode("utf-8")))
+    if schemas_in is not None:
+        parsed_s = [AnalysisResultSchema.from_dict(s.to_dict(), require_signed=require_signed) for s in schemas_in]
+        sup_s = tuple(sorted(parsed_s, key=lambda s: canonicalize_jcs(s.locator().to_dict())))
+        if any(a != b for a, b in zip(parsed_s, schemas_in, strict=True)) or [canonicalize_jcs(s.to_dict()) for s in sup_s] != [canonicalize_jcs(s.to_dict()) for s in sorted_schemas]:
+            raise ClosedValidationError(f"{label}: resolved_schemas mismatch against verified bundle schemas")
+    sorted_results = tuple(sorted(_validate_results_tuple(results_in, label=f"{label}.results"), key=lambda r: r.result_key.encode("utf-8")))
+    if {r.result_key: r.result_projection.analysis_result_schema_locator for r in sorted_results} != {q.result_key: q.analysis_result_schema_locator for q in bundle.queries}:
+        raise ClosedValidationError(f"{label}: result_key or schema locator mismatch against bundle.queries")
     inv_res = {u.resource_ref for u in inv.expected_resources}
     for res in sorted_results:
-        fresh_r = AnalysisResult.from_dict(res.to_dict(), require_signed=require_signed)
+        fresh_r = _load_p1(proxy_store, res.locator(), AnalysisResult, field_name=f"{label}.results[{res.result_key!r}]", require_signed=require_signed)
         if fresh_in.signature_verifier is not None and (require_signed or (fresh_r.integrity is not None and fresh_r.integrity.is_signed)):
             _invoke_sig_verifier(fresh_in.signature_verifier, envelope=fresh_r.to_dict(), domain_prefix="SMART-ADS:ANALYSIS-RESULT:V1\n", store=fresh_in.store)
         if (fresh_r.migration_run_context_locator, fresh_r.dataset_snapshot_locator) != (fresh_in.migration_run_context_locator, fresh_in.dataset_snapshot_locator) or CanonicalResultEntry.from_result(fresh_r) != raw_exec.canonical_result_set.entry(fresh_r.result_key):
-            raise ClosedValidationError(f"resolved_analysis_results[{fresh_r.result_key!r}]: run, snapshot, or canonical_result_set mismatch")
+            raise ClosedValidationError(f"{label}.results[{fresh_r.result_key!r}]: run, snapshot, or canonical_result_set mismatch")
         names = [c.name for c in fresh_r.result_projection.columns]
         if "resource_ref" in names and any(row[names.index("resource_ref")].value not in inv_res for row in fresh_r.result_projection.rows if row[names.index("resource_ref")].value is not None):
-            raise ClosedValidationError(f"resolved_analysis_results[{fresh_r.result_key!r}]: resource_ref outside ExpectedResourceInventory")
+            raise ClosedValidationError(f"{label}.results[{fresh_r.result_key!r}]: resource_ref outside ExpectedResourceInventory")
     verified_exec = verify_analysis_execution(raw_exec, list(sorted_results), list(sorted_schemas), fresh_in.dataset_snapshot_locator, require_signed=require_signed, bundle_migration_run_context_locator=fresh_in.migration_run_context_locator)
     return verified_exec, sorted_results, sorted_schemas
 
-def _canonicalize_evidence_set(fresh_in: ConductorRunInput, primary_exec: AnalysisExecution, sorted_results: tuple[AnalysisResult, ...], sorted_schemas: tuple[AnalysisResultSchema, ...], *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool) -> tuple[AnalysisEvidence, ...]:
+def _canonicalize_evidence_set(fresh_in: ConductorRunInput, inv: ExpectedResourceInventory, primary_exec: AnalysisExecution, sorted_results: tuple[AnalysisResult, ...], sorted_schemas: tuple[AnalysisResultSchema, ...], *, proxy_store: _SignatureVerifyingStoreProxy, require_signed: bool) -> tuple[AnalysisEvidence, ...]:
     if not fresh_in.analysis_evidence:
         return (AnalysisEvidence(primary_exec, sorted_results, sorted_schemas, fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator, require_signed, fresh_in.migration_run_context_locator),)
     keyed, seen_keys = [], set()
     for idx, ev in enumerate(fresh_in.analysis_evidence):
         if (ev.bundle_dataset_snapshot_locator, ev.bundle_analysis_policy_locator, ev.require_signed) != (fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator, require_signed) or ev.bundle_migration_run_context_locator not in (None, fresh_in.migration_run_context_locator):
             raise ClosedValidationError(f"analysis_evidence[{idx}]: snapshot, policy, run, or require_signed mismatch")
-        ev_bundle = _load_p1(proxy_store, ev.execution.analysis_replay_input_bundle_locator, AnalysisReplayInputBundle, field_name=f"analysis_evidence[{idx}].bundle", require_signed=require_signed)
-        if (ev_bundle.migration_run_context_locator, ev_bundle.dataset_snapshot_locator, ev_bundle.analysis_policy_locator) != (fresh_in.migration_run_context_locator, fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator):
-            raise ClosedValidationError(f"analysis_evidence[{idx}]: bundle binding mismatch")
-        ev_res = tuple(sorted(ev.resolved_results, key=lambda r: r.result_key.encode("utf-8")))
-        ev_sch = tuple(sorted(ev.resolved_schemas, key=lambda s: canonicalize_jcs(s.locator().to_dict())))
-        v_exec = verify_analysis_execution(ev.execution, list(ev_res), list(ev_sch), fresh_in.dataset_snapshot_locator, require_signed=require_signed, bundle_migration_run_context_locator=fresh_in.migration_run_context_locator)
+        fresh_ev_exec = AnalysisExecution.from_dict(ev.execution.to_dict(), require_signed=require_signed)
+        if fresh_ev_exec != ev.execution:
+            raise ClosedValidationError(f"analysis_evidence[{idx}]: corrupted AnalysisExecution")
+        v_exec, ev_res, ev_sch = _verify_execution_and_results(fresh_ev_exec.locator(), ev.resolved_results, ev.resolved_schemas, fresh_in, inv, proxy_store=proxy_store, require_signed=require_signed, label=f"analysis_evidence[{idx}]")
         norm_ev = AnalysisEvidence(v_exec, ev_res, ev_sch, fresh_in.dataset_snapshot_locator, fresh_in.analysis_policy_locator, require_signed, fresh_in.migration_run_context_locator)
         jcs_k = canonicalize_jcs(_evidence_to_jcs_dict(norm_ev))
         if jcs_k in seen_keys:
@@ -307,8 +307,8 @@ def conduct_offline_run(*, run_input: ConductorRunInput, intelligence: OfflineIn
     run_ctx = verify_stored_migration_run_context(fresh_in.store, fresh_in.migration_run_context_locator, signature_verifier=fresh_in.signature_verifier, require_signed=checked_req)
     snapshot, snapshot_rows = load_verified_snapshot_rows(fresh_in.dataset_snapshot_locator, store=fresh_in.store, parquet_codec=checked_codec, signature_verifier=fresh_in.signature_verifier, require_signed=checked_req)
     inv, pol, scope = _load_verified_scope_and_policy(fresh_in, run_ctx, proxy_store=proxy_store, require_signed=checked_req)
-    analysis_exec, sorted_results, sorted_schemas = _verify_execution_and_results(fresh_in, inv, proxy_store=proxy_store, require_signed=checked_req)
-    ordered_ev = _canonicalize_evidence_set(fresh_in, analysis_exec, sorted_results, sorted_schemas, proxy_store=proxy_store, require_signed=checked_req)
+    analysis_exec, sorted_results, sorted_schemas = _verify_execution_and_results(fresh_in.analysis_execution_locator, fresh_in.resolved_analysis_results, None, fresh_in, inv, proxy_store=proxy_store, require_signed=checked_req, label="analysis_execution")
+    ordered_ev = _canonicalize_evidence_set(fresh_in, inv, analysis_exec, sorted_results, sorted_schemas, proxy_store=proxy_store, require_signed=checked_req)
     row_count, ev_digest, eval_ctx = _reduce_snapshot_and_build_context(fresh_in, snapshot, snapshot_rows, inv, pol, scope, analysis_exec, ordered_ev, proxy_store=proxy_store, require_signed=checked_req)
     raw_findings = intelligence.evaluate_offline(context=eval_ctx, evidence=ordered_ev)
     sorted_findings, finding_digests, cert_rec = _validate_findings_and_certify(raw_findings, fresh_in, pol, analysis_exec, require_signed=checked_req)
