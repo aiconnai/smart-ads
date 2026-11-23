@@ -38,6 +38,11 @@ from smart_ads.application.duckdb_execution import (
     execute_analysis_replay_bundle,
     execute_certified_report,
 )
+from smart_ads.application.mcp_read_handler import (
+    McpVerifiedReadIndex,
+    VerifiedStoreMcpReadHandler,
+    load_verified_snapshot_rows,
+)
 from smart_ads.application.retention_service import (
     ReachabilityClosure,
     RetentionRootSetService,
@@ -58,9 +63,11 @@ __all__ = [
     "FixtureCollectionEvaluation",
     "GlobalDatasetCatalogService",
     "LiveCallExecutionOutcome",
+    "McpVerifiedReadIndex",
     "PurposeEntrypointMismatchError",
     "ReachabilityClosure",
     "RetentionRootSetService",
+    "VerifiedStoreMcpReadHandler",
     "WheelObjectLocator",
     "admit_collection",
     "build_expected_fact_universe",
@@ -73,6 +80,7 @@ __all__ = [
     "execute_analysis_replay_bundle",
     "execute_certified_report",
     "head_pinned_object_refs",
+    "load_verified_snapshot_rows",
     "materialize_parquet_generation",
     "publish_dataset_snapshot",
     "recompute_collection_completeness",
