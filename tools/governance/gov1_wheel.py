@@ -181,6 +181,8 @@ EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
     {
         "smart_ads",
         "smart_ads.adapters",
+        "smart_ads.adapters.consumer",
+        "smart_ads.adapters.consumer.routing_analyzer",
         "smart_ads.adapters.duckdb",
         "smart_ads.adapters.duckdb.cli_engine",
         "smart_ads.adapters.pipeboard",
@@ -211,6 +213,7 @@ EXPECTED_PACKAGED_MODULES: Final[frozenset[str]] = frozenset(
         "smart_ads.domain.resource_ref",
         "smart_ads.ports",
         "smart_ads.ports.cell_runtime",
+        "smart_ads.ports.consumer",
         "smart_ads.ports.provider",
         "smart_ads.ports.storage",
         "smart_ads.application",
