@@ -185,8 +185,7 @@ def test_workflows_preserve_required_check_and_public_repo_guards() -> None:
         "try-local:",
         "github.event.pull_request.head.repo.full_name == github.repository",
         "github.event.pull_request.draft == false",
-        "persist-credentials: false",
-        "tools/ci/local_pytest_router.py",
+        "contents/tools/ci/local_pytest_router.py?ref=$CI_BASE_SHA",
         "if: ${{ !cancelled() }}",
     ):
         assert token in pytest_wf

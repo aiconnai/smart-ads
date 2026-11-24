@@ -27,25 +27,26 @@ jobs:
       outcome: ${{ steps.route.outputs.outcome }}
       run_url: ${{ steps.route.outputs.run_url }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
-          persist-credentials: false
       - name: Dispatch and monitor bounded local pytest
         id: route
         env:
           GH_TOKEN: ${{ github.token }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
           CI_RUN_ID: ${{ github.run_id }}
           CI_RUN_ATTEMPT: ${{ github.run_attempt }}
           CI_SOURCE_SHA: ${{ github.sha }}
           CI_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if [[ ! -f tools/ci/local_pytest_router.py ]]; then
+          set -euo pipefail
+          router_file="$RUNNER_TEMP/local_pytest_router.py"
+          if ! gh api -H "Accept: application/vnd.github.raw+json" \
+            "repos/$GITHUB_REPOSITORY/contents/tools/ci/local_pytest_router.py?ref=$CI_BASE_SHA" \
+            > "$router_file" 2>/dev/null || [[ ! -s "$router_file" ]]; then
             echo 'Local MacBook pytest router is not on the trusted base yet; using ubuntu-latest fallback'
             printf 'outcome=fallback\nrun_url=\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          exec python3 -I tools/ci/local_pytest_router.py
+          exec python3 -I "$router_file"
 
   pytest:
     name: pytest
