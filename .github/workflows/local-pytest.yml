@@ -177,12 +177,18 @@ jobs:
           "$RUNNER_TEMP/ci-venv/bin/python" -m pip install --no-deps --require-hashes -r "$RUNNER_TEMP/ci-locked-dev.txt"
       - name: Run tests
         id: pytest
-        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/ci-venv/bin/python" -m pytest -q -W error -p no:cacheprovider
+          rc=0
+          "$RUNNER_TEMP/ci-venv/bin/python" -m pytest -q -W error -p no:cacheprovider || rc=$?
+          printf 'exit_code=%s\n' "$rc" >> "$GITHUB_OUTPUT"
+          if [[ "$rc" -eq 0 || "$rc" -eq 1 || "$rc" -eq 2 ]]; then
+            exit 0
+          fi
+          echo "::warning::pytest exited with infrastructure/signal code $rc; falling back to ubuntu-latest"
+          exit "$rc"
       - name: Record test failure
-        if: steps.pytest.outcome == 'failure'
+        if: steps.pytest.outputs.exit_code == '1' || steps.pytest.outputs.exit_code == '2'
         shell: bash
         run: exit 1

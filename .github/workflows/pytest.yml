@@ -26,6 +26,7 @@ jobs:
     outputs:
       outcome: ${{ steps.route.outputs.outcome }}
       run_url: ${{ steps.route.outputs.run_url }}
+      attempt: ${{ github.run_attempt }}
     steps:
       - name: Dispatch and monitor bounded local pytest
         id: route
@@ -55,7 +56,9 @@ jobs:
     if: ${{ !cancelled() }}
     steps:
       - name: Report local MacBook pytest result
-        if: needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'
+        if: >-
+          needs.try-local.outputs.attempt == github.run_attempt
+          && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed')
         env:
           LOCAL_OUTCOME: ${{ needs.try-local.outputs.outcome }}
           LOCAL_RUN_URL: ${{ needs.try-local.outputs.run_url }}
@@ -65,14 +68,20 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@v4
-        if: needs.try-local.outputs.outcome != 'success' && needs.try-local.outputs.outcome != 'test-failed'
+        if: >-
+          !(needs.try-local.outputs.attempt == github.run_attempt
+            && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'))
       - uses: actions/setup-python@v5
-        if: needs.try-local.outputs.outcome != 'success' && needs.try-local.outputs.outcome != 'test-failed'
+        if: >-
+          !(needs.try-local.outputs.attempt == github.run_attempt
+            && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'))
         with:
           # Decomposition AST identity is pinned to the actual CPython 3.12 ABI.
           python-version: '3.12'
       - name: Generate hash-pinned Linux requirements from uv.lock
-        if: needs.try-local.outputs.outcome != 'success' && needs.try-local.outputs.outcome != 'test-failed'
+        if: >-
+          !(needs.try-local.outputs.attempt == github.run_attempt
+            && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'))
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -133,8 +142,12 @@ jobs:
           Path("/tmp/ci-locked-dev.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
           PY
       - name: Install hash-pinned test and build dependencies
-        if: needs.try-local.outputs.outcome != 'success' && needs.try-local.outputs.outcome != 'test-failed'
+        if: >-
+          !(needs.try-local.outputs.attempt == github.run_attempt
+            && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'))
         run: python3 -m pip install --no-deps --require-hashes -r /tmp/ci-locked-dev.txt
       - name: Run tests
-        if: needs.try-local.outputs.outcome != 'success' && needs.try-local.outputs.outcome != 'test-failed'
+        if: >-
+          !(needs.try-local.outputs.attempt == github.run_attempt
+            && (needs.try-local.outputs.outcome == 'success' || needs.try-local.outputs.outcome == 'test-failed'))
         run: python3 -m pytest -q -W error -p no:cacheprovider

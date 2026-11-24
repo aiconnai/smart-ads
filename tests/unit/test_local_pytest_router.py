@@ -186,6 +186,8 @@ def test_workflows_preserve_required_check_and_public_repo_guards() -> None:
         "github.event.pull_request.head.repo.full_name == github.repository",
         "github.event.pull_request.draft == false",
         "contents/tools/ci/local_pytest_router.py?ref=$CI_BASE_SHA",
+        "attempt: ${{ github.run_attempt }}",
+        "needs.try-local.outputs.attempt == github.run_attempt",
         "if: ${{ !cancelled() }}",
     ):
         assert token in pytest_wf
@@ -196,6 +198,7 @@ def test_workflows_preserve_required_check_and_public_repo_guards() -> None:
         "github.repository == 'aiconnai/smart-ads' && github.ref == 'refs/heads/main'",
         "runs-on: [self-hosted, Linux, ARM64, macbook-4c-4g]",
         "persist-credentials: false",
+        "steps.pytest.outputs.exit_code == '1' || steps.pytest.outputs.exit_code == '2'",
         "Record test failure",
     ):
         assert token in local_wf
