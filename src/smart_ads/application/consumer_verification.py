@@ -174,7 +174,8 @@ def verify_consumer_feature_flag_contract(
 
 
 def _verify_readback_clock_and_age(
-    clock_att: ClockAttestation, captured_at_utc: str, *, max_clock_uncertainty_ms: int, max_capture_age_seconds: int
+    clock_att: ClockAttestation, captured_at_utc: str, *, max_clock_uncertainty_ms: int,
+    max_capture_age_seconds: int, eval_clock: ClockAttestation | None = None,
 ) -> None:
     max_unc = _safe_int(max_clock_uncertainty_ms, field_name="max_clock_uncertainty_ms", minimum=0)
     max_age_s = _safe_int(max_capture_age_seconds, field_name="max_capture_age_seconds", minimum=1)
@@ -185,8 +186,15 @@ def _verify_readback_clock_and_age(
     )
     if not (lower_us <= captured_us <= upper_us):
         raise ClosedValidationError("consumer_deployment_readback: captured_at_utc outside [clock_lower, clock_upper]")
-    if (upper_us - issued_us) > max_age_s * _MICROS_PER_SECOND or (upper_us - captured_us) > max_age_s * _MICROS_PER_SECOND:
+    max_age_us = max_age_s * _MICROS_PER_SECOND
+    if (upper_us - issued_us) > max_age_us or (upper_us - captured_us) > max_age_us:
         raise ClosedValidationError("consumer_deployment_readback: capture age exceeds max_capture_age_seconds")
+    if eval_clock is not None:
+        _, eval_upper_us = eval_clock.verify_freshness(configured_max_uncertainty_ms=max_unc)
+        if captured_us > eval_upper_us or lower_us > eval_upper_us or issued_us > eval_upper_us:
+            raise ClosedValidationError("consumer_deployment_readback: future readback or clock relative to evaluation clock")
+        if (eval_upper_us - captured_us) > max_age_us or (eval_upper_us - issued_us) > max_age_us:
+            raise ClosedValidationError("consumer_deployment_readback: stale readback relative to evaluation clock")
 
 
 def _recompute_readback_replay_digest(rb: ConsumerDeploymentReadback) -> str:
@@ -208,10 +216,19 @@ def verify_consumer_deployment_readback(
     readback_or_locator: ConsumerDeploymentReadback | ArtifactLocator, *,
     max_clock_uncertainty_ms: int, max_capture_age_seconds: int, conductor_raw_bytes: bytes,
     routing_analyzer: ConsumerRoutingAnalyzerPort, store: CellObjectStorePort,
+    evaluation_clock_attestation: ClockAttestation | ArtifactLocator | None = None,
     signature_verifier: P1SignatureVerifierPort | None = None, require_signed: bool = True,
 ) -> ConsumerDeploymentReadback:
-    """Verify `ConsumerDeploymentReadback`, authenticated clock, live objects, and replay digest."""
+    """Verify `ConsumerDeploymentReadback`, authenticated clock, live objects, and replay digest.
+
+    Deterministic offline replay omits `evaluation_clock_attestation` (`None`), whereas live
+    Gate 3/4 evaluation supplies the gate's current authenticated `ClockAttestation`.
+    """
     checked_analyzer = _require_routing_analyzer(routing_analyzer)
+    eval_clk = None if evaluation_clock_attestation is None else _load_verified_p1_model(
+        store, evaluation_clock_attestation, ClockAttestation,
+        signature_verifier=signature_verifier, require_signed=require_signed, label="evaluation_clock_attestation",
+    )
     rb = _load_verified_p1_model(store, readback_or_locator, ConsumerDeploymentReadback, signature_verifier=signature_verifier, require_signed=require_signed, label="consumer_deployment_readback")
     verify_stored_migration_run_context(store, rb.migration_run_context_locator, signature_verifier=signature_verifier, require_signed=require_signed)
     verify_stored_deployment_config_result(
@@ -221,7 +238,7 @@ def verify_consumer_deployment_readback(
         signature_verifier=signature_verifier, require_signed=require_signed,
     )
     clock_att = _load_verified_p1_model(store, rb.clock_attestation_locator, ClockAttestation, signature_verifier=signature_verifier, require_signed=require_signed, label="readback.clock_attestation")
-    _verify_readback_clock_and_age(clock_att, rb.captured_at_utc, max_clock_uncertainty_ms=max_clock_uncertainty_ms, max_capture_age_seconds=max_capture_age_seconds)
+    _verify_readback_clock_and_age(clock_att, rb.captured_at_utc, max_clock_uncertainty_ms=max_clock_uncertainty_ms, max_capture_age_seconds=max_capture_age_seconds, eval_clock=eval_clk)
     _verify_algorithm_with_sig(rb.capture_tool_identity, expected_schema_id=ConsumerDeploymentReadback.SCHEMA, store=store, signature_verifier=signature_verifier, require_signed=require_signed, label="capture_tool_identity")
     live_adp_bytes, live_flg_bytes = store.get_bytes(rb.live_adapter_object_ref), store.get_bytes(rb.live_feature_flag_object_ref)
     if "sha256:" + hashlib.sha256(live_adp_bytes).hexdigest() != rb.live_adapter_artifact.file_content_sha256 or "sha256:" + hashlib.sha256(live_flg_bytes).hexdigest() != rb.live_feature_flag_artifact.file_content_sha256:
@@ -255,10 +272,13 @@ def _verify_tripartite_consumer_side(
     checked: TripartiteTarget, *, expected_run_locator: ArtifactLocator, conductor_raw_bytes: bytes,
     adapter_raw_bytes: bytes | None, feature_flag_raw_bytes: bytes | None,
     deployment_readback_locator: ArtifactLocator | None, max_clock_uncertainty_ms: int, max_capture_age_seconds: int,
+    evaluation_clock_attestation: ClockAttestation | ArtifactLocator | None,
     routing_analyzer: ConsumerRoutingAnalyzerPort, store: CellObjectStorePort,
     signature_verifier: P1SignatureVerifierPort | None, require_signed: bool,
 ) -> None:
     cs = checked.consumer_side
+    if evaluation_clock_attestation is not None and deployment_readback_locator is None:
+        _load_verified_p1_model(store, evaluation_clock_attestation, ClockAttestation, signature_verifier=signature_verifier, require_signed=require_signed, label="evaluation_clock_attestation")
     adp_b = _resolve_consumer_side_bytes(cs.adapter_git_artifact, adapter_raw_bytes, store=store, label="adapter_raw_bytes")
     flg_b = _resolve_consumer_side_bytes(cs.feature_flag_git_artifact, feature_flag_raw_bytes, store=store, label="feature_flag_raw_bytes")
     ff = verify_consumer_feature_flag_contract(cs.feature_flag_contract_locator, adapter_raw_bytes=adp_b, feature_flag_raw_bytes=flg_b, conductor_raw_bytes=conductor_raw_bytes, routing_analyzer=routing_analyzer, store=store, signature_verifier=signature_verifier, require_signed=require_signed)
@@ -274,7 +294,7 @@ def _verify_tripartite_consumer_side(
     ):
         raise ClosedValidationError("tripartite_target.consumer_side: contract or digest mismatch")
     if deployment_readback_locator is not None:
-        rb = verify_consumer_deployment_readback(_typed_locator(deployment_readback_locator, field_name="deployment_readback_locator", expected_type=ConsumerDeploymentReadback.SCHEMA), max_clock_uncertainty_ms=max_clock_uncertainty_ms, max_capture_age_seconds=max_capture_age_seconds, conductor_raw_bytes=conductor_raw_bytes, routing_analyzer=routing_analyzer, store=store, signature_verifier=signature_verifier, require_signed=require_signed)
+        rb = verify_consumer_deployment_readback(_typed_locator(deployment_readback_locator, field_name="deployment_readback_locator", expected_type=ConsumerDeploymentReadback.SCHEMA), max_clock_uncertainty_ms=max_clock_uncertainty_ms, max_capture_age_seconds=max_capture_age_seconds, conductor_raw_bytes=conductor_raw_bytes, routing_analyzer=routing_analyzer, store=store, evaluation_clock_attestation=evaluation_clock_attestation, signature_verifier=signature_verifier, require_signed=require_signed)
         if (rb.migration_run_context_locator, rb.consumer_repository, rb.consumer_commit_sha, rb.live_adapter_artifact, rb.live_feature_flag_artifact, rb.feature_flag_contract_locator, rb.ibvi_ads_delegation_contract_locator) != (expected_run_locator, cs.repository, cs.commit_sha, cs.adapter_git_artifact, cs.feature_flag_git_artifact, cs.feature_flag_contract_locator, cs.ibvi_ads_delegation_contract_locator) or store.get_bytes(rb.live_adapter_object_ref) != adp_b or store.get_bytes(rb.live_feature_flag_object_ref) != flg_b:
             raise ClosedValidationError("tripartite_target.consumer_side: deployment readback mismatch")
 
@@ -288,9 +308,14 @@ def verify_tripartite_target(
     adapter_raw_bytes: bytes | None = None, feature_flag_raw_bytes: bytes | None = None,
     deployment_readback_locator: ArtifactLocator | None = None,
     max_clock_uncertainty_ms: int = 1000, max_capture_age_seconds: int = 300,
+    evaluation_clock_attestation: ClockAttestation | ArtifactLocator | None = None,
     signature_verifier: P1SignatureVerifierPort | None = None, require_signed: bool = True,
 ) -> TripartiteTarget:
-    """Verify legacy, canonical, and consumer sides plus role-tagged `tripartite_digest`."""
+    """Verify legacy, canonical, and consumer sides plus role-tagged `tripartite_digest`.
+
+    Deterministic offline replay omits `evaluation_clock_attestation` (`None`), whereas live
+    Gate 3/4 evaluation supplies the gate's current authenticated `ClockAttestation`.
+    """
     if type(target) is not TripartiteTarget:
         raise ClosedValidationError("target: expected TripartiteTarget")
     checked = TripartiteTarget.from_dict(target.to_dict())
@@ -312,8 +337,8 @@ def verify_tripartite_target(
         checked, expected_run_locator=expected_run_locator, conductor_raw_bytes=conductor_raw_bytes,
         adapter_raw_bytes=adapter_raw_bytes, feature_flag_raw_bytes=feature_flag_raw_bytes,
         deployment_readback_locator=deployment_readback_locator, max_clock_uncertainty_ms=max_clock_uncertainty_ms,
-        max_capture_age_seconds=max_capture_age_seconds, routing_analyzer=routing_analyzer, store=store,
-        signature_verifier=signature_verifier, require_signed=require_signed,
+        max_capture_age_seconds=max_capture_age_seconds, evaluation_clock_attestation=evaluation_clock_attestation,
+        routing_analyzer=routing_analyzer, store=store, signature_verifier=signature_verifier, require_signed=require_signed,
     )
     if compute_tripartite_digest(legacy_side=checked.legacy_side, canonical_side=checked.canonical_side, consumer_side=checked.consumer_side) != checked.tripartite_digest:
         raise ClosedValidationError("tripartite_target.tripartite_digest: mismatch")

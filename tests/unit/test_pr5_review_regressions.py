@@ -288,7 +288,7 @@ def test_shallow_001_ast_analyzer_rejects_non_closed_self_annotation() -> None:
             + init_hdr
             + "        self.flags = flags\n        self.s = s\n        self.l = l\n    "
             + method_hdr
-            + "\n        if self.flags.is_enabled(FLAG_KEY):\n            return self.s.call('/ibvi-ads', '"
+            + "\n        if self.flags.is_enabled(FLAG_KEY) is True:\n            return self.s.call('/ibvi-ads', '"
             + m
             + "', payload)\n        return self.l.call('legacy:mbras_direct', payload)\n"
         ).encode("utf-8")
@@ -303,15 +303,15 @@ def test_deep_002_ast_analyzer_enforces_three_distinct_collaborators_and_class_r
     m1 = "smart_ads.queries.get_campaign_performance_v1"
     m2 = "smart_ads.queries.get_intelligence_findings_v1"
 
-    same_collab = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\ndef fetch(flags, client, payload):\n    if flags.is_enabled(FLAG_KEY):\n        return client.call('/ibvi-ads', '{m1}', payload)\n    return client.call('legacy:mbras_direct', payload)\n".encode()
+    same_collab = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\ndef fetch(flags, client, payload):\n    if flags.is_enabled(FLAG_KEY) is True:\n        return client.call('/ibvi-ads', '{m1}', payload)\n    return client.call('legacy:mbras_direct', payload)\n".encode()
     with pytest.raises(ClosedValidationError):
         analyzer.analyze_consumer_routing(adapter_bytes=same_collab, feature_flag_bytes=flag_bytes, contract=_make_contract_for_ast("ibvi_ads/a.py", same_collab, "ibvi_ads/flags.json", flag_bytes, (("fetch", m1),)))
 
-    swapped_roles = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\nclass Gw:\n    def __init__(self, f, a, b):\n        self.f = f\n        self.a = a\n        self.b = b\n    def ep1(self, p):\n        if self.f.is_enabled(FLAG_KEY):\n            return self.a.call('/ibvi-ads', '{m1}', p)\n        return self.b.call('legacy:mbras_direct', p)\n    def ep2(self, p):\n        if self.f.is_enabled(FLAG_KEY):\n            return self.b.call('/ibvi-ads', '{m2}', p)\n        return self.a.call('legacy:mbras_direct', p)\n".encode()
+    swapped_roles = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\nclass Gw:\n    def __init__(self, f, a, b):\n        self.f = f\n        self.a = a\n        self.b = b\n    def ep1(self, p):\n        if self.f.is_enabled(FLAG_KEY) is True:\n            return self.a.call('/ibvi-ads', '{m1}', p)\n        return self.b.call('legacy:mbras_direct', p)\n    def ep2(self, p):\n        if self.f.is_enabled(FLAG_KEY) is True:\n            return self.b.call('/ibvi-ads', '{m2}', p)\n        return self.a.call('legacy:mbras_direct', p)\n".encode()
     with pytest.raises(ClosedValidationError):
         analyzer.analyze_consumer_routing(adapter_bytes=swapped_roles, feature_flag_bytes=flag_bytes, contract=_make_contract_for_ast("ibvi_ads/a.py", swapped_roles, "ibvi_ads/flags.json", flag_bytes, (("Gw.ep1", m1), ("Gw.ep2", m2))))
 
-    shadow_method = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\nclass Gw:\n    def __init__(self, f, a, b):\n        self.f = f\n        self.a = a\n        self.b = b\n    def a(self):\n        return 1\n    def ep1(self, p):\n        if self.f.is_enabled(FLAG_KEY):\n            return self.a.call('/ibvi-ads', '{m1}', p)\n        return self.b.call('legacy:mbras_direct', p)\n".encode()
+    shadow_method = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\nclass Gw:\n    def __init__(self, f, a, b):\n        self.f = f\n        self.a = a\n        self.b = b\n    def a(self):\n        return 1\n    def ep1(self, p):\n        if self.f.is_enabled(FLAG_KEY) is True:\n            return self.a.call('/ibvi-ads', '{m1}', p)\n        return self.b.call('legacy:mbras_direct', p)\n".encode()
     with pytest.raises(ClosedValidationError):
         analyzer.analyze_consumer_routing(adapter_bytes=shadow_method, feature_flag_bytes=flag_bytes, contract=_make_contract_for_ast("ibvi_ads/a.py", shadow_method, "ibvi_ads/flags.json", flag_bytes, (("Gw.ep1", m1),)))
 
@@ -319,7 +319,7 @@ def test_deep_002_ast_analyzer_enforces_three_distinct_collaborators_and_class_r
 def test_deep_003_ast_analyzer_enforces_python_adapter_path_and_flag_extension_dispatch() -> None:
     analyzer = Cpython312AstConsumerRoutingAnalyzer()
     m = "smart_ads.queries.get_campaign_performance_v1"
-    adp = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\ndef fetch(f, s, l, p):\n    if f.is_enabled(FLAG_KEY):\n        return s.call('/ibvi-ads', '{m}', p)\n    return l.call('legacy:mbras_direct', p)\n".encode()
+    adp = f"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\ndef fetch(f, s, l, p):\n    if f.is_enabled(FLAG_KEY) is True:\n        return s.call('/ibvi-ads', '{m}', p)\n    return l.call('legacy:mbras_direct', p)\n".encode()
     flg_json = canonicalize_jcs({"flag_key": "ibvi_ads.smart_ads_read_v1", "default_enabled": False, "disabled_legacy_route": "legacy:mbras_direct", "enabled_smart_ads_route": "/ibvi-ads"})
     flg_py = b"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\nDEFAULT_ENABLED = False\nDISABLED_LEGACY_ROUTE = 'legacy:mbras_direct'\nENABLED_SMART_ADS_ROUTE = '/ibvi-ads'\n"
 

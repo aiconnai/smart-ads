@@ -154,7 +154,7 @@ class CampaignGateway:
 
 
 async def fetch_adsets_async(payload: dict[str, Any], flags: Any, dispatch: Any, legacy: Any) -> Any:
-    if flags.is_enabled(FLAG_KEY):
+    if flags.is_enabled(FLAG_KEY) is True:
         return await dispatch("/ibvi-ads", "smart_ads.queries.get_adset_performance_v1", payload)
     else:
         return await legacy("legacy:mbras_campaigns_direct", payload)
@@ -163,7 +163,7 @@ async def fetch_adsets_async(payload: dict[str, Any], flags: Any, dispatch: Any,
 def get_daily_summary(payload: dict[str, Any], flags: Any, dispatch: Any, legacy: Any) -> Any:
     return (
         dispatch(IBVI_ADS_ROUTE, SUMMARY_METHOD, payload)
-        if flags.is_enabled("ibvi_ads.smart_ads_read_v1")
+        if flags.is_enabled("ibvi_ads.smart_ads_read_v1") is True
         else legacy(LEGACY_ROUTE, payload)
     )
 '''.encode("utf-8")
@@ -396,13 +396,24 @@ def test_routing_analyzer_rejects_malicious_or_ambiguous_flag_artifacts(bad_flag
 _SINGLE_CONTRACT_METHOD = "smart_ads.queries.get_campaign_performance_v1"
 _VALID_SINGLE_ENTRYPOINT = (
     "def read_one(payload, flags, dispatch, legacy):\n"
-    f'    if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'    if flags.is_enabled("{_FLAG_KEY}") is True:\n'
     f'        return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
     "    else:\n"
     f'        return legacy("{_LEGACY_ROUTE}", payload)\n'
 )
 
 _BAD_ADAPTER_ARTIFACTS: tuple[str, ...] = (
+    "def read_one(payload, flags, dispatch, legacy):\n"
+    f'    if flags.is_enabled("{_FLAG_KEY}"):\n'
+    f'        return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "    else:\n"
+    f'        return legacy("{_LEGACY_ROUTE}", payload)\n',
+    "def read_one(payload, flags, dispatch, legacy):\n"
+    f'    enabled = flags.is_enabled("{_FLAG_KEY}")\n'
+    "    if enabled:\n"
+    f'        return dispatch("/ibvi-ads", "{_SINGLE_CONTRACT_METHOD}", payload)\n'
+    "    else:\n"
+    f'        return legacy("{_LEGACY_ROUTE}", payload)\n',
     "import os\n" + _VALID_SINGLE_ENTRYPOINT,
     "import smart_ads\n" + _VALID_SINGLE_ENTRYPOINT,
     "from smart_ads.transports.mcp import handle_mcp_request_bytes\n" + _VALID_SINGLE_ENTRYPOINT,

@@ -115,7 +115,7 @@ def _parse_bounded_python_ast(raw_bytes: bytes, text: str, *, label: str) -> ast
     try:
         tree = ast.parse(raw_bytes)
         text_tree = ast.parse(text)
-    except (SyntaxError, ValueError, RecursionError) as exc:
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         raise ClosedValidationError(f"{label}: failed to parse Python AST") from exc
     if ast.dump(tree) != ast.dump(text_tree):
         raise ClosedValidationError(f"{label}: bytes vs str AST lexer differential")
@@ -455,7 +455,7 @@ def _unwrap_cond_subject(cond: ast.expr) -> ast.expr:
         and type(cond.comparators[0].value) is bool and cond.comparators[0].value is True
     ):
         return cond.left
-    return cond
+    raise ClosedValidationError("adapter_bytes: routing condition must compare flag subject with 'is True'")
 
 
 def _parse_bound_flag_stmt(stmt: ast.stmt, scope: _EpScope) -> tuple[str, str]:

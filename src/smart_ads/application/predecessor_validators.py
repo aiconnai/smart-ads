@@ -290,20 +290,18 @@ def _validate_ci_and_review_lists(ci_raw: object, rev_raw: object, *, expected_r
     if type(ci_raw) is not list or not ci_raw:
         raise ClosedValidationError("protected_merge_evidence.required_ci_results: expected non-empty list")
     for idx, entry in enumerate(ci_raw):
-        cm = require_mapping(entry, label=f"required_ci_results[{idx}]")
-        chk = cm.get("check") if "check" in cm else (cm.get("name") if "name" in cm else cm.get("check_name"))
-        _strict_id(chk, field_name=f"required_ci_results[{idx}].check")
-        statuses = [cm[k] for k in ("status", "conclusion") if k in cm]
-        if not statuses or any(type(s) is not str or s not in {"success", "passed"} for s in statuses):
+        cm = require_exact_keys(entry, frozenset({"check", "status"}), label=f"required_ci_results[{idx}]")
+        _strict_id(cm["check"], field_name=f"required_ci_results[{idx}].check")
+        if _strict_str(cm["status"], field_name=f"required_ci_results[{idx}].status") != "success":
             raise ClosedValidationError(f"required_ci_results[{idx}]: CI check did not pass")
     if type(rev_raw) is not list or not rev_raw:
         raise ClosedValidationError("protected_merge_evidence.exact_head_review_evidence: expected non-empty list")
     for idx, entry in enumerate(rev_raw):
-        rm = require_mapping(entry, label=f"exact_head_review_evidence[{idx}]")
-        if _strict_str(rm.get("reviewed_head_sha"), field_name=f"exact_head_review_evidence[{idx}].reviewed_head_sha") != expected_reviewed_head_sha:
+        rm = require_exact_keys(entry, frozenset({"reviewer", "reviewed_head_sha", "state"}), label=f"exact_head_review_evidence[{idx}]")
+        _strict_id(rm["reviewer"], field_name=f"exact_head_review_evidence[{idx}].reviewer")
+        if _strict_str(rm["reviewed_head_sha"], field_name=f"exact_head_review_evidence[{idx}].reviewed_head_sha") != expected_reviewed_head_sha:
             raise ClosedValidationError(f"exact_head_review_evidence[{idx}]: reviewed_head_sha mismatch")
-        states = [rm[k] for k in ("state", "status") if k in rm]
-        if not states or any(type(s) is not str or s not in {"APPROVED", "approved"} for s in states):
+        if _strict_str(rm["state"], field_name=f"exact_head_review_evidence[{idx}].state") != "APPROVED":
             raise ClosedValidationError(f"exact_head_review_evidence[{idx}]: review not approved")
 
 
@@ -429,7 +427,7 @@ def _validate_source_inventory_and_entries(manifest: Mapping[str, Any]) -> None:
         validate_sha256_prefixed(_strict_str(im["source_digest"], field_name="item.source_digest"), field_name="item.source_digest")
         if validate_sha256_prefixed(_strict_str(im["source_selector_digest"], field_name="item.source_selector_digest"), field_name="item.source_selector_digest") != jcs_sha256(im["source_selector"]):
             raise ClosedValidationError("source_inventory.item: source_selector_digest mismatch")
-    if item_paths != set(inv["declared_paths"]) or len(set(item_ids)) != len(item_ids) or set(entry_ids) != set(item_ids) or any(em["decision_status"] not in {"approved", "deferred", "rejected"} or type(em["blocking_defects"]) is not list or len(em["blocking_defects"]) != 0 for em in entry_maps):
+    if item_paths != set(inv["declared_paths"]) or len(set(item_ids)) != len(item_ids) or set(entry_ids) != set(item_ids) or any(type(em["decision_status"]) is not str or em["decision_status"] not in {"approved", "deferred", "rejected"} or type(em["blocking_defects"]) is not list or len(em["blocking_defects"]) != 0 for em in entry_maps):
         raise ClosedValidationError("decomposition_manifest: path coverage, inventory_id bijection, status, or blocking_defects violation")
 
 
@@ -703,7 +701,7 @@ def _verify_gov1_constituents_and_chronology(
     neg_us, c7a_us, mcp_us = _ts_us(neg_rep.executed_at_utc, field_name="neg.executed_at_utc"), _ts_us(cert7a.certified_at_utc, field_name="cert7a.certified_at_utc"), _ts_us(mcp_doc["executed_at_utc"], field_name="mcp.executed_at_utc")
     sbx_iss_us = _ts_us(sbx_doc["issued_at_utc"], field_name="sbx.issued_at_utc")
     sbx_from_us, sbx_until_us = _ts_us(sbx_doc["validity"]["from"], field_name="sbx.validity.from"), _ts_us(sbx_doc["validity"]["until"], field_name="sbx.validity.until")
-    if not (built_us <= ver_us <= conv_us and neg_us <= c7a_us <= conv_us and sbx_iss_us <= conv_us and mcp_us <= conv_us and sbx_from_us <= mcp_us < sbx_until_us):
+    if not (built_us <= ver_us <= c7a_us <= conv_us and built_us <= neg_us <= c7a_us and built_us <= mcp_us <= conv_us and sbx_iss_us <= conv_us and sbx_from_us <= mcp_us < sbx_until_us):
         raise ClosedValidationError("gov1_convergence_record: Stage-7/7A/GOV1 chronology or sandbox validity violation")
     return sbx_doc, neg_rep, mcp_doc
 

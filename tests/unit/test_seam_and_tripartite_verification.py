@@ -359,7 +359,7 @@ def _build_consumer_artifacts(
     adp_bytes = (
         b"FLAG_KEY = 'ibvi_ads.smart_ads_read_v1'\n"
         b"def fetch_campaigns(flags, smart_client, legacy_client, payload):\n"
-        b"    if flags.is_enabled(FLAG_KEY):\n"
+        b"    if flags.is_enabled(FLAG_KEY) is True:\n"
         b"        return smart_client.call('/ibvi-ads', 'smart_ads.queries.get_campaign_performance_v1', payload)\n"
         b"    else:\n"
         b"        return legacy_client.call('legacy:mbras_direct', payload)\n"

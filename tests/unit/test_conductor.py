@@ -198,7 +198,11 @@ class PolicyRuleOfflineIntelligence:
         self, *, context: EvaluationContext, evidence: Sequence[AnalysisEvidence]
     ) -> tuple[Finding, ...]:
         found = evaluate_findings(context, evidence[0])
-        return tuple(reversed(found)) if self._reverse else found
+        ordered = tuple(reversed(found)) if self._reverse else found
+        if evidence[0].require_signed and evidence[0].execution.integrity is not None:
+            kreg = evidence[0].execution.integrity.key_registry_snapshot_locator
+            return tuple(Finding.from_dict(_sign_dict(f.to_dict(), kreg), require_signed=True) for f in ordered)
+        return ordered
 
 
 class ConservativeAuditOfflineIntelligence:
@@ -221,6 +225,9 @@ class ConservativeAuditOfflineIntelligence:
         f_key_b = "finding:" + jcs_sha256({"alg": self._identity.algorithm_id, "camp": _CAMP_B, "pol": pol.policy_id})
         f_b = Finding(primary.execution.locator(), entry.result_locator, entry.result_key, f_key_b, "restatement", FINDING_INCONCLUSIVE, True, (entry.result_locator,), primary.bundle_analysis_policy_locator)
         f_a = Finding(primary.execution.locator(), entry.result_locator, entry.result_key, f_key_a, "waste", FINDING_INCONCLUSIVE, True, (entry.result_locator,), primary.bundle_analysis_policy_locator)
+        if primary.require_signed and primary.execution.integrity is not None:
+            kreg = primary.execution.integrity.key_registry_snapshot_locator
+            return tuple(Finding.from_dict(_sign_dict(f.to_dict(), kreg), require_signed=True) for f in (f_b, f_a))
         return (f_b, f_a)
 
 
@@ -413,6 +420,7 @@ class ConductorTestWorld:
         self.attested = (AttestedCertificationInput(CertificationInput(DerivedCertificationStatus.VERIFIED, "phase1_7b_base"), True),)
 
     def make_run_input(self, **overrides: Any) -> ConductorRunInput:
+        req = overrides.get("require_signed", True)
         base: dict[str, Any] = {
             "migration_run_context_locator": self.run_loc,
             "dataset_snapshot_locator": self.snap3_loc,
@@ -424,7 +432,8 @@ class ConductorTestWorld:
             "attested_certification_inputs": self.attested,
             "resolved_analysis_results": self.results,
             "analysis_evidence": (),
-            "certification_integrity": None,
+            "certification_integrity": P1Integrity(_KEY_ID, self.key_reg_loc) if req else None,
+            "certification_signer": (lambda d, _p: _sign_dict(d, self.key_reg_loc)) if req else None,
             "store": ReadOnlyGuardStore(self.store),
             "parquet_codec": self.codec,
             "signature_verifier": self.verifier,
@@ -532,12 +541,21 @@ def test_certification_record_matches_analytics_certification_verifier(world: Co
         lambda ctx, ev: tuple(Finding.from_dict(_sign_dict(f.to_dict(), world.key_reg_loc), require_signed=True) for f in evaluate_findings(ctx, ev[0])),
     )
     out_pre = conduct_offline_run(run_input=world.make_run_input(), intelligence=signed_findings_intel)
-    signed_cert_dict = _sign_dict(out_pre.certification_record.to_dict(), world.key_reg_loc)
-    cert_int = P1Integrity.from_dict(signed_cert_dict["integrity"], require_signed=True)
-    out_s = conduct_offline_run(run_input=world.make_run_input(certification_integrity=cert_int), intelligence=signed_findings_intel)
+    cert_int = out_pre.certification_record.integrity
+    assert cert_int is not None and cert_int.is_signed
+    out_s = conduct_offline_run(
+        run_input=world.make_run_input(certification_integrity=cert_int, certification_signer=None),
+        intelligence=signed_findings_intel,
+    )
     assert out_s.certification_record.integrity == cert_int
     captured: list[tuple[EvaluationContext, AnalysisEvidence]] = []
-    probe_intel = CustomCallbackIntelligence(world.intel_alg_1, lambda ctx, ev: (captured.append((ctx, ev[0])) or evaluate_findings(ctx, ev[0])))
+    probe_intel = CustomCallbackIntelligence(
+        world.intel_alg_1,
+        lambda ctx, ev: (
+            captured.append((ctx, ev[0]))
+            or tuple(Finding.from_dict(_sign_dict(f.to_dict(), world.key_reg_loc), require_signed=True) for f in evaluate_findings(ctx, ev[0]))
+        ),
+    )
     conduct_offline_run(run_input=world.make_run_input(), intelligence=probe_intel)
     ctx, ev0 = captured[0]
     expected_cert = build_certification_record(ctx, ev0, list(out_s.findings), list(world.attested), integrity=cert_int)
@@ -657,8 +675,8 @@ def test_rejects_tampered_duplicate_or_out_of_policy_findings(world: ConductorTe
         conduct_offline_run(run_input=run_in, intelligence=bad_str_intel)
 
     def _dup_findings(ctx: EvaluationContext, ev: Sequence[AnalysisEvidence]) -> tuple[Finding, ...]:
-        found = evaluate_findings(ctx, ev[0])
-        return (found[0], found[0])
+        f0 = Finding.from_dict(_sign_dict(evaluate_findings(ctx, ev[0])[0].to_dict(), world.key_reg_loc), require_signed=True)
+        return (f0, f0)
 
     with pytest.raises(ClosedValidationError, match="duplicate"):
         conduct_offline_run(run_input=run_in, intelligence=CustomCallbackIntelligence(world.intel_alg_1, _dup_findings))
@@ -666,13 +684,14 @@ def test_rejects_tampered_duplicate_or_out_of_policy_findings(world: ConductorTe
     def _out_of_policy_finding(ctx: EvaluationContext, ev: Sequence[AnalysisEvidence]) -> tuple[Finding, ...]:
         entry = ev[0].execution.canonical_result_set.entry(ctx.metrics_result_key)
         fkey = "finding:sha256:" + ("3" * 64)
-        return (Finding(world.exec_loc, entry.result_locator, entry.result_key, fkey, "saturation", FINDING_DETECTED, False, (entry.result_locator,), world.policy_loc),)
+        raw_f = Finding(world.exec_loc, entry.result_locator, entry.result_key, fkey, "saturation", FINDING_DETECTED, False, (entry.result_locator,), world.policy_loc)
+        return (Finding.from_dict(_sign_dict(raw_f.to_dict(), world.key_reg_loc), require_signed=True),)
 
     with pytest.raises(ClosedValidationError, match="policy|finding_type"):
         conduct_offline_run(run_input=run_in, intelligence=CustomCallbackIntelligence(world.intel_alg_1, _out_of_policy_finding))
 
     def _tampered_finding(ctx: EvaluationContext, ev: Sequence[AnalysisEvidence]) -> tuple[Finding, ...]:
-        f0 = evaluate_findings(ctx, ev[0])[0]
+        f0 = Finding.from_dict(_sign_dict(evaluate_findings(ctx, ev[0])[0].to_dict(), world.key_reg_loc), require_signed=True)
         object.__setattr__(f0, "finding_digest", "sha256:" + ("0" * 64))
         return (f0,)
 
@@ -686,7 +705,8 @@ def test_rejects_wrong_finding_locators_and_unpermitted_degraded_certification(w
     def _wrong_exec_finding(ctx: EvaluationContext, ev: Sequence[AnalysisEvidence]) -> tuple[Finding, ...]:
         entry = ev[0].execution.canonical_result_set.entry(ctx.metrics_result_key)
         fkey = "finding:sha256:" + ("7" * 64)
-        return (Finding(world.aux_exec_loc, entry.result_locator, entry.result_key, fkey, "waste", FINDING_DETECTED, False, (entry.result_locator,), world.policy_loc),)
+        raw_f = Finding(world.aux_exec_loc, entry.result_locator, entry.result_key, fkey, "waste", FINDING_DETECTED, False, (entry.result_locator,), world.policy_loc)
+        return (Finding.from_dict(_sign_dict(raw_f.to_dict(), world.key_reg_loc), require_signed=True),)
 
     with pytest.raises(ClosedValidationError, match="analysis_execution_locator|mismatch"):
         conduct_offline_run(run_input=run_in, intelligence=CustomCallbackIntelligence(world.intel_alg_1, _wrong_exec_finding))

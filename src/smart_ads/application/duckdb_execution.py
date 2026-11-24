@@ -28,7 +28,25 @@ from smart_ads.domain.catalog import DatasetCatalog, DatasetSnapshot, Generation
 from smart_ads.domain.curation import CurationExecution
 from smart_ads.domain.registry import ExpectedResourceInventory
 from smart_ads.contracts.operational_evidence import SanitizedCandidateFactSet
+from smart_ads.ports.consumer import P1SignatureVerifierPort
 from smart_ads.ports.storage import CellObjectStorePort, DuckDbEnginePort, ParquetLandingCodecPort
+
+
+def _make_read_store(
+    checked_store: CellObjectStorePort,
+    signature_verifier: P1SignatureVerifierPort | None,
+    require_signed: bool,
+) -> CellObjectStorePort:
+    from smart_ads.application.mcp_read_handler import _SignatureVerifyingStoreProxy
+
+    if signature_verifier is not None and (
+        not isinstance(signature_verifier, P1SignatureVerifierPort)
+        or not callable(getattr(signature_verifier, "verify_p1_envelope_signature", None))
+    ):
+        raise ClosedValidationError("signature_verifier: expected P1SignatureVerifierPort")
+    return _SignatureVerifyingStoreProxy(
+        checked_store, signature_verifier=signature_verifier, require_signed=require_signed
+    )
 
 
 def _validate_optional_p1_integrity(value: object, *, label: str) -> P1Integrity | None:
@@ -88,18 +106,18 @@ def _verify_build_input_locators(
             raise ClosedValidationError(f"build_input_locators[{idx}]: '$schema' != {bi_loc.artifact_type!r}")
         if ArtifactLocator.for_canonical_bytes(bi_loc.artifact_type, canonicalize_jcs(mapping)) != bi_loc:
             raise ClosedValidationError(f"build_input_locators[{idx}]: canonical digest mismatch")
+        if require_signed or "integrity" in mapping:
+            if "integrity" not in mapping:
+                raise ClosedValidationError(f"build_input_locators[{idx}]: unsigned P1 build input")
+            bi_int = P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed)
+            if bi_int.is_signed and bi_int.content_digest != p1_content_digest(mapping):
+                raise ClosedValidationError(f"build_input_locators[{idx}]: P1 content_digest mismatch")
         if bi_loc.artifact_type == GitArtifactProvenance.SCHEMA:
             GitArtifactProvenance.from_dict(mapping, require_signed=require_signed)
         elif bi_loc.artifact_type == FormulaBundle.SCHEMA:
             FormulaBundle.from_dict(mapping, require_signed=require_signed)
         elif bi_loc.artifact_type == BaseMetricDefinition.SCHEMA:
             BaseMetricDefinition.from_dict(mapping, require_signed=require_signed)
-        elif require_signed or "integrity" in mapping:
-            if "integrity" not in mapping:
-                raise ClosedValidationError(f"build_input_locators[{idx}]: unsigned P1 build input")
-            bi_int = P1Integrity.from_dict(mapping["integrity"], require_signed=require_signed)
-            if bi_int.is_signed and bi_int.content_digest != p1_content_digest(mapping):
-                raise ClosedValidationError(f"build_input_locators[{idx}]: P1 content_digest mismatch")
 
 
 def _load_bundle_policy_and_snapshot(
@@ -140,9 +158,11 @@ def _load_verified_raw_binary(
 
 
 def _verify_replay_bundle_inputs_and_binaries(
-    bundle: AnalysisReplayInputBundle, *, store: CellObjectStorePort, require_signed: bool
+    bundle: AnalysisReplayInputBundle, *, store: CellObjectStorePort, require_signed: bool,
+    verify_build_inputs: bool = True,
 ) -> tuple[bytes, dict[str, bytes]]:
-    _verify_build_input_locators(bundle, store=store, require_signed=require_signed)
+    if verify_build_inputs:
+        _verify_build_input_locators(bundle, store=store, require_signed=require_signed)
     db_loc = bundle.duckdb_binary_locator
     duckdb_bytes = _load_verified_raw_binary(
         store, object_ref=db_loc.object_ref, expected_size=db_loc.size_bytes,
@@ -163,7 +183,9 @@ def _verify_replay_bundle_inputs_and_binaries(
 def _resolve_duckdb_and_parquet_blobs(
     bundle: AnalysisReplayInputBundle, snapshot: DatasetSnapshot, *, store: CellObjectStorePort, require_signed: bool
 ) -> tuple[bytes, dict[str, bytes], tuple[tuple[ParquetObjectLocator, bytes], ...]]:
-    duckdb_bytes, ext_blobs = _verify_replay_bundle_inputs_and_binaries(bundle, store=store, require_signed=require_signed)
+    duckdb_bytes, ext_blobs = _verify_replay_bundle_inputs_and_binaries(
+        bundle, store=store, require_signed=require_signed, verify_build_inputs=False
+    )
     pq_pairs: list[tuple[ParquetObjectLocator, bytes]] = []
     for head in snapshot.partition_heads:
         gm = _load_p1(store, head.generation_manifest_locator, GenerationManifest, field_name="snapshot.partition_heads[].generation_manifest_locator", require_signed=require_signed)
@@ -224,20 +246,22 @@ def execute_analysis_replay_bundle(
     duckdb_engine: DuckDbEnginePort,
     result_integrities: Mapping[str, P1Integrity] | None = None,
     execution_integrity: P1Integrity | None = None,
+    signature_verifier: P1SignatureVerifierPort | None = None,
     require_signed_inputs: bool = False,
 ) -> tuple[AnalysisExecution, ArtifactLocator, tuple[tuple[AnalysisResult, ArtifactLocator], ...]]:
     """Verify all pre-DuckDB inputs, execute replay queries, and store `AnalysisExecution`."""
     checked_store = _require_store_and_bool(store, require_signed_inputs, bool_name="require_signed_inputs")
+    read_store = _make_read_store(checked_store, signature_verifier, require_signed_inputs)
     checked_codec = _require_parquet_codec(parquet_codec)
     if not isinstance(duckdb_engine, DuckDbEnginePort):
         raise ClosedValidationError(f"duckdb_engine: expected DuckDbEnginePort, got {type(duckdb_engine).__name__}")
     checked_exec_int = _validate_optional_p1_integrity(execution_integrity, label="execution_integrity")
     checked_bundle_loc, bundle, _, snapshot = _load_bundle_policy_and_snapshot(
-        bundle_locator, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed_inputs
+        bundle_locator, store=read_store, parquet_codec=checked_codec, require_signed=require_signed_inputs
     )
     checked_res_ints = _validate_result_integrities(result_integrities, {q.result_key for q in bundle.queries})
-    schemas_by_key, unique_schemas = _resolve_query_schemas(bundle, store=checked_store, require_signed=require_signed_inputs)
-    duckdb_bytes, ext_blobs, pq_pairs = _resolve_duckdb_and_parquet_blobs(bundle, snapshot, store=checked_store, require_signed=require_signed_inputs)
+    schemas_by_key, unique_schemas = _resolve_query_schemas(bundle, store=read_store, require_signed=require_signed_inputs)
+    duckdb_bytes, ext_blobs, pq_pairs = _resolve_duckdb_and_parquet_blobs(bundle, snapshot, store=read_store, require_signed=require_signed_inputs)
     projections = duckdb_engine.execute_replay_queries(
         bundle=bundle, duckdb_binary_bytes=duckdb_bytes, extension_binaries=MappingProxyType(ext_blobs),
         parquet_objects=pq_pairs, resolved_schemas=MappingProxyType(schemas_by_key),
@@ -458,12 +482,14 @@ def execute_certified_report(
     report_template_provenance_locator: ArtifactLocator, render_algorithm_identity: AlgorithmProvenanceIdentity,
     store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort,
     finding_integrities: Sequence[P1Integrity] | None = None, certification_integrity: P1Integrity | None = None,
-    report_integrity: P1Integrity | None = None, require_signed_inputs: bool = False,
+    report_integrity: P1Integrity | None = None, signature_verifier: P1SignatureVerifierPort | None = None,
+    require_signed_inputs: bool = False,
 ) -> tuple[ReportExecution, ArtifactLocator, AnalyticalCertificationRecord, ArtifactLocator, tuple[tuple[Finding, ArtifactLocator], ...]]:
     """Evaluate findings, certify them, render `ReportExecution`, and verify the full chain."""
     _strict_id(report_id, field_name="report_id")
     validate_envelope_timestamp_utc(executed_at_utc, field_name="executed_at_utc")
     checked_store = _require_store_and_bool(store, require_signed_inputs, bool_name="require_signed_inputs")
+    read_store = _make_read_store(checked_store, signature_verifier, require_signed_inputs)
     checked_codec = _require_parquet_codec(parquet_codec)
     checked_f_ints = _validate_finding_integrities(finding_integrities)
     checked_c_int = _validate_optional_p1_integrity(certification_integrity, label="certification_integrity")
@@ -471,11 +497,11 @@ def execute_certified_report(
     if isinstance(attested_certification_inputs, (str, bytes)) or not isinstance(attested_certification_inputs, Sequence) or not attested_certification_inputs:
         raise ClosedValidationError("attested_certification_inputs: expected non-empty Sequence of AttestedCertificationInput")
     hist_locs = sort_artifact_locators(restatement_history_generation_locators, expected_type=GenerationManifest.SCHEMA, allow_empty=True, field_name="restatement_history_generation_locators")
-    checked_bundle_loc, bundle, policy_obj, snapshot = _load_bundle_policy_and_snapshot(bundle_locator, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed_inputs)
-    inv_loc, cur_loc, resolved_cur, tmpl_loc, tmpl_prov, rnd_prov = _resolve_report_provenance_inputs(evaluation_context, bundle.migration_run_context_locator, policy_obj, expected_resource_inventory_locator, curation_execution_locator, report_template_provenance_locator, render_algorithm_identity, store=checked_store, require_signed=require_signed_inputs)
-    all_gens, decoded_rows = _collect_snapshot_generations(snapshot, bundle.migration_run_context_locator, resolved_cur, cur_loc, evaluation_context, hist_locs, store=checked_store, parquet_codec=checked_codec, require_signed=require_signed_inputs)
-    op_evs, ev_locs, pf_locs = _resolve_operational_evidences_and_proofs(all_gens, bundle.migration_run_context_locator, store=checked_store, require_signed=require_signed_inputs)
-    execution, results, schemas = _resolve_verified_execution_and_results(bundle, checked_bundle_loc, execution_locator, store=checked_store, require_signed=require_signed_inputs)
+    checked_bundle_loc, bundle, policy_obj, snapshot = _load_bundle_policy_and_snapshot(bundle_locator, store=read_store, parquet_codec=checked_codec, require_signed=require_signed_inputs)
+    inv_loc, cur_loc, resolved_cur, tmpl_loc, tmpl_prov, rnd_prov = _resolve_report_provenance_inputs(evaluation_context, bundle.migration_run_context_locator, policy_obj, expected_resource_inventory_locator, curation_execution_locator, report_template_provenance_locator, render_algorithm_identity, store=read_store, require_signed=require_signed_inputs)
+    all_gens, decoded_rows = _collect_snapshot_generations(snapshot, bundle.migration_run_context_locator, resolved_cur, cur_loc, evaluation_context, hist_locs, store=read_store, parquet_codec=checked_codec, require_signed=require_signed_inputs)
+    op_evs, ev_locs, pf_locs = _resolve_operational_evidences_and_proofs(all_gens, bundle.migration_run_context_locator, store=read_store, require_signed=require_signed_inputs)
+    execution, results, schemas = _resolve_verified_execution_and_results(bundle, checked_bundle_loc, execution_locator, store=read_store, require_signed=require_signed_inputs)
     evidence = AnalysisEvidence(execution, results, schemas, snapshot.locator(), policy_obj.locator(), require_signed_inputs, bundle.migration_run_context_locator)
     finding_pairs, cert_rec, cert_loc = _persist_findings_and_certification(evaluation_context, evidence, attested_certification_inputs, checked_f_ints, checked_c_int, store=checked_store)
     report, rep_loc = _build_verify_and_store_report_envelope(
