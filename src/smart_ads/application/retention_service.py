@@ -20,12 +20,18 @@ from smart_ads.contracts import (
     parse_timestamp_utc_micros, require_exact_keys, require_mapping, validate_envelope_timestamp_utc,
     validate_opaque_ref, validate_sha256_prefixed,
 )
+from smart_ads.contracts.consumer import (
+    ConsumerDeploymentReadback,
+    ConsumerFeatureFlagContract,
+    IbviAdsDelegationContext,
+    IbviAdsDelegationContract,
+)
 from smart_ads.contracts.effects import (
     EFFECT_ACTION_MATRIX, AuthorizationConsumptionRecord, AuthorizationReceipt, AuthorizationReservationRecord,
     EffectProof, ExecutionReceipt, ReservationStatus, RetentionReleaseTarget, RetentionRootAdmissionTarget,
-    _require_json_list, _require_locator_digest_pair, _safe_int, _sorted_locator_tuple, _sorted_object_ref_tuple,
+    _require_json_list, _require_locator_digest_pair, _sorted_locator_tuple, _sorted_object_ref_tuple,
     _split_p1_envelope, _strict_id, _strict_str, _typed_locator, _validate_nonce, sort_artifact_locators,
-    sort_cell_object_refs, validate_cell_object_ref, verify_four_record_effect_proof,
+    sort_cell_object_refs, verify_four_record_effect_proof,
 )
 from smart_ads.contracts.negative_security import NegativeSecurityTestReport
 from smart_ads.contracts.operational_evidence import OperationalReadEvidence, SanitizedCandidateFactSet
@@ -34,6 +40,7 @@ from smart_ads.contracts.retention import (
     RetentionRootAdmissionResult, RetentionRootSetCasReceipt, RetentionRootSetCasRequestProjection,
     RetentionRootSetHead, compute_object_ref_set_digest, compute_root_locator_set_digest,
 )
+from smart_ads.contracts.seam import LegacySeamContract, LegacySeamRelease, SeamParityRecord, WheelObjectLocator
 from smart_ads.domain import (
     CapabilityInvalidationTransition, CapabilityRevalidationTransition, CurationExecution, DatasetCatalog,
     DatasetCatalogCutReceipt, DatasetCatalogGenesisConsumptionRecord, DatasetCatalogGenesisRecord, DatasetSnapshot,
@@ -56,49 +63,6 @@ _OTHER_ADR_EFFECT_SPECS: Final[Mapping[str, tuple[str, str, str]]] = MappingProx
     "cutover_execution": ("cutover_target", "smart_ads/cutover_execution_result/v1", "cutover_effect_proof"),
     "legacy_read_retirement": ("retirement_target", "smart_ads/retirement_execution_result/v1", "retirement_effect_proof"),
 })
-
-
-@dataclass(frozen=True, slots=True)
-class WheelObjectLocator:
-    """Closed 5-member `smart_ads/wheel_object_locator/v1` embedded binary locator."""
-
-    SCHEMA: ClassVar[str] = "smart_ads/wheel_object_locator/v1"
-    KEYS: ClassVar[frozenset[str]] = frozenset({"$schema", "store_kind", "object_ref", "wheel_digest", "size_bytes"})
-    wheel_digest: str
-    size_bytes: int
-    store_kind: str = "cell_immutable_object"
-    object_ref: str = ""
-
-    def __post_init__(self) -> None:
-        label = "wheel_object_locator"
-        sha = validate_sha256_prefixed(_strict_str(self.wheel_digest, field_name=f"{label}.wheel_digest"), field_name=f"{label}.wheel_digest")
-        _safe_int(self.size_bytes, field_name=f"{label}.size_bytes", minimum=1)
-        if _strict_str(self.store_kind, field_name=f"{label}.store_kind") != "cell_immutable_object":
-            raise ClosedValidationError(f"{label}.store_kind: must equal 'cell_immutable_object'")
-        expected_ref = f"cell-object:{sha}"
-        raw_ref = _strict_str(self.object_ref, field_name=f"{label}.object_ref")
-        if raw_ref == "":
-            object.__setattr__(self, "object_ref", expected_ref)
-        elif raw_ref != expected_ref:
-            raise ClosedValidationError(f"{label}.object_ref: expected {expected_ref!r}, got {raw_ref!r}")
-
-    @classmethod
-    def for_wheel_bytes(cls, raw_bytes: bytes) -> WheelObjectLocator:
-        """Build a `WheelObjectLocator` over raw immutable wheel bytes."""
-        if type(raw_bytes) is not bytes or len(raw_bytes) == 0:
-            raise ClosedValidationError("raw_bytes: expected non-empty bytes")
-        digest = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
-        return cls(wheel_digest=digest, size_bytes=len(raw_bytes), object_ref=f"cell-object:{digest}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"$schema": self.SCHEMA, "store_kind": self.store_kind, "object_ref": self.object_ref, "wheel_digest": self.wheel_digest, "size_bytes": self.size_bytes}
-
-    @classmethod
-    def from_dict(cls, data: object) -> WheelObjectLocator:
-        m = require_exact_keys(data, cls.KEYS, label="wheel_object_locator")
-        if type(m["$schema"]) is not str or m["$schema"] != cls.SCHEMA:
-            raise ClosedValidationError(f"wheel_object_locator.$schema: expected {cls.SCHEMA!r}")
-        return cls(wheel_digest=m["wheel_digest"], size_bytes=m["size_bytes"], store_kind=m["store_kind"], object_ref=validate_cell_object_ref(m["object_ref"], field_name="wheel_object_locator.object_ref"))
 
 
 _BINARY_LOCATOR_SCHEMAS: Final[frozenset[str]] = frozenset({
@@ -153,15 +117,15 @@ _OTHER_ADR_STANDALONE_SCHEMAS: Final[frozenset[str]] = frozenset(
     f"smart_ads/{n}/v1"
     for n in (
         "acceptance_profile artifact_contract_inventory business_calendar "
-        "consumer_deployment_readback consumer_feature_flag_contract current_key_state current_key_state_head "
+        "current_key_state current_key_state_head "
         "cutover_execution_result daily_acceptance_token decomposition_fork_adjudication decomposition_manifest "
         "decomposition_manifest_head delivery_mode_decision_receipt deployment_config_execution_result "
         "feature_flag_ack_record feature_flag_readback_record gate2_approval_receipt gate2_authority_policy "
         "gate3_evidence_packet gate3_freshness_profile gate3_selection_receipt gate4_freshness_profile "
-        "gate4_verification_record gov1_convergence_record ibvi_ads_delegation_context ibvi_ads_delegation_contract "
+        "gate4_verification_record gov1_convergence_record "
         "incident_rollback_receipt incident_rollback_result key_authorization_registry "
         "key_state_anti_rollback_checkpoint legacy_deployment_readback legacy_deployment_state_snapshot "
-        "legacy_read_endpoint_inventory legacy_seam_contract legacy_seam_release legacy_step2_implementation_evidence "
+        "legacy_read_endpoint_inventory legacy_step2_implementation_evidence "
         "legacy_surface_enumeration_contract live_certification_certificate live_certification_head "
         "live_certification_transition manifest_validation_record mcp_rejection_matrix_report "
         "migration_completion_record migration_manifest migration_run_context operational_read_proof_set "
@@ -169,7 +133,7 @@ _OTHER_ADR_STANDALONE_SCHEMAS: Final[frozenset[str]] = frozenset(
         "reservation_reconciliation_record retirement_execution_result retirement_hour_bucket "
         "retirement_verification_record rollback_drain_record rollback_prestate_record rollback_query_log "
         "rollback_test_protocol rollback_test_receipt rollback_toggle_event rollback_toggle_result "
-        "sealed_sandbox_profile seam_parity_record shadow_acceptance_record shadow_mode_activation_result "
+        "sealed_sandbox_profile shadow_acceptance_record shadow_mode_activation_result "
         "smart_ads_live_read_activation_receipt stabilization_hour_bucket stabilization_period_completion_record "
         "weekly_acceptance_token wheel_boundary_report wheel_build_provenance workload_identity_execution_result"
     ).split()
@@ -267,7 +231,9 @@ def _schema_parsers() -> Mapping[str, Callable[[Mapping[str, Any], bool], Any]]:
         DatasetCatalog, DatasetCatalogCutReceipt, DatasetSnapshot, ClockAttestation, FormulaBundle, AnalysisPolicy,
         AnalysisResultSchema, AnalysisResult, AnalysisExecution, Finding, AnalyticalCertificationRecord,
         AnalysisReplayInputBundle, ReportExecution, ToleranceProfile, NativeRequestProjection,
-        Certification7BRecord, Certification7ARecord,
+        Certification7BRecord, Certification7ARecord, LegacySeamContract, LegacySeamRelease,
+        SeamParityRecord, IbviAdsDelegationContext, IbviAdsDelegationContract,
+        ConsumerFeatureFlagContract, ConsumerDeploymentReadback,
     )
     effects = (AuthorizationReceipt, AuthorizationReservationRecord, ExecutionReceipt, AuthorizationConsumptionRecord, EffectProof)
     out: dict[str, Callable[[Mapping[str, Any], bool], Any]] = {c.SCHEMA: (lambda d, req, _c=c: _c.from_dict(d, require_signed=req)) for c in p1_classes}
@@ -359,6 +325,28 @@ def _verify_visited_retention_root(
     if outer_loc.object_ref in sub_refs or root.pinned_object_refs != ordered or root.pinned_object_set_digest != compute_object_ref_set_digest(ordered, allow_empty=False):
         raise ClosedValidationError("retention_root: pinned_object_refs or digest mismatch against transitive closure")
 
+def _verify_bare_binary_refs(parsed: Any, *, store: CellObjectStorePort, raw_bins: list[str]) -> None:
+    if isinstance(parsed, LegacySeamRelease):
+        pairs: tuple[tuple[str, str | None], ...] = (
+            (parsed.baseline_commit_object_ref, None),
+            *((e.child_commit_object_ref, None) for e in parsed.parent_edge_chain),
+        )
+    elif isinstance(parsed, ConsumerDeploymentReadback):
+        pairs = (
+            (parsed.live_adapter_object_ref, parsed.live_adapter_artifact.file_content_sha256),
+            (parsed.live_feature_flag_object_ref, parsed.live_feature_flag_artifact.file_content_sha256),
+        )
+    else:
+        return
+    for ref, exp_sha in pairs:
+        exp_digest = ref.removeprefix("cell-object:")
+        if exp_sha is not None and exp_digest != exp_sha:
+            raise ClosedValidationError(f"retention_reachability_graph: object_ref {ref!r} != {exp_sha!r}")
+        raw = store.get_bytes(ref)
+        if len(raw) < 1 or "sha256:" + hashlib.sha256(raw).hexdigest() != exp_digest:
+            raise ClosedValidationError(f"retention_reachability_graph: missing, empty, or SHA-256-mismatched blob {ref!r}")
+        raw_bins.append(ref)
+
 def _visit_locator(
     loc: ArtifactLocator, *, store: CellObjectStorePort, parquet_codec: ParquetLandingCodecPort | None, require_signed: bool,
     visiting: set[bytes], visiting_refs: set[str], visited: dict[bytes, ArtifactLocator],
@@ -376,6 +364,7 @@ def _visit_locator(
     raw_children: list[ArtifactLocator] = []
     raw_bins: list[str] = []
     _scan_json_tree_references(raw_doc, is_root=True, depth=0, store=store, parquet_codec=parquet_codec, child_locs=raw_children, binary_refs=raw_bins)
+    _verify_bare_binary_refs(parsed, store=store, raw_bins=raw_bins)
     sorted_children = _dedup_sorted_locators(raw_children, field_name="child_locators")
     sorted_bins = sort_cell_object_refs(set(raw_bins), allow_empty=True, field_name="binary_refs")
     for child_loc in sorted_children:

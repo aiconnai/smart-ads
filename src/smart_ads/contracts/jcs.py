@@ -715,6 +715,12 @@ ADR_P1_DOMAIN_PREFIXES: Mapping[str, str] = MappingProxyType(
         "smart_ads/retention_root_admission_result/v1": "SMART-ADS:RETENTION-ADMISSION-RESULT:V1\n",
         "smart_ads/retention_root_admission_proof/v1": "SMART-ADS:RETENTION-ADMISSION:V1\n",
         "smart_ads/operational_read_evidence/v1": "SMART-ADS:OPERATIONAL-READ-EVIDENCE:V1\n",
+        "smart_ads/legacy_seam_release/v1": "SMART-ADS:LEGACY-SEAM-RELEASE:V1\n",
+        "smart_ads/legacy_seam_contract/v1": "SMART-ADS:LEGACY-SEAM-CONTRACT:V1\n",
+        "smart_ads/seam_parity_record/v1": "SMART-ADS:SEAM-PARITY:V1\n",
+        "smart_ads/ibvi_ads_delegation_contract/v1": "SMART-ADS:IBVI-ADS-DELEGATION-CONTRACT:V1\n",
+        "smart_ads/consumer_feature_flag_contract/v1": "SMART-ADS:CONSUMER-FEATURE-FLAG:V1\n",
+        "smart_ads/consumer_deployment_readback/v1": "SMART-ADS:CONSUMER-DEPLOYMENT-READBACK:V1\n",
     }
 )
 

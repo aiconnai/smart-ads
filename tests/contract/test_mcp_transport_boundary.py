@@ -54,29 +54,15 @@ def test_mcp_package_constants_exports_and_no_json_loads() -> None:
     assert MAX_MCP_BODY_BYTES == 65_536
     assert MAX_MCP_NESTING_DEPTH == 8
     expected_exports = {
-        "ALLOWED_FINDING_TYPES",
-        "ALLOWED_MCP_METHODS",
-        "AdmittedMcpRequest",
-        "IntelligenceFindingsQueryParams",
-        "JsonRpcRequestId",
-        "MAX_MCP_BODY_BYTES",
-        "MAX_MCP_NESTING_DEPTH",
-        "McpDelegationContext",
-        "McpMethodParams",
-        "McpProtocolRejection",
-        "McpReadHandlerPort",
-        "McpRejectionCaseId",
-        "McpRuntimeContext",
-        "McpWireOutcome",
-        "ParsedJsonRpcEnvelope",
-        "PerformanceQueryParams",
-        "RecurrentSummaryReportParams",
-        "handle_mcp_request_bytes",
-        "parse_mcp_wire_bytes",
-        "serialize_jsonrpc_result",
-        "validate_jsonrpc_request_envelope",
-        "validate_mcp_method_params",
-        "verify_mcp_delegation_context",
+        "ALLOWED_FINDING_TYPES", "ALLOWED_MCP_METHODS", "AdmittedMcpRequest",
+        "IntelligenceFindingsQueryParams", "JsonRpcRequestId", "MAX_MCP_BODY_BYTES",
+        "MAX_MCP_NESTING_DEPTH", "McpDelegationContext", "McpMethodParams",
+        "McpProtocolRejection", "McpReadHandlerPort", "McpRejectionCaseId",
+        "McpRuntimeContext", "McpWireOutcome", "ParsedJsonRpcEnvelope",
+        "PerformanceQueryParams", "RecurrentSummaryReportParams", "handle_mcp_request_bytes",
+        "parse_mcp_wire_bytes", "project_delegation_envelope_to_mcp_context",
+        "serialize_jsonrpc_result", "validate_jsonrpc_request_envelope",
+        "validate_mcp_method_params", "verify_mcp_delegation_context",
     }
     assert set(mcp_pkg.__all__) == expected_exports
     assert ALLOWED_MCP_METHODS == (
@@ -86,13 +72,11 @@ def test_mcp_package_constants_exports_and_no_json_loads() -> None:
         "smart_ads.queries.get_intelligence_findings_v1",
         "smart_ads.reports.generate_recurrent_summary_v1",
     )
-    assert tuple(
-        sorted(ALLOWED_MCP_METHODS, key=lambda s: s.encode("utf-8"))
-    ) == ALLOWED_MCP_METHODS
-    assert ALLOWED_FINDING_TYPES == frozenset(
-        {"restatement", "saturation", "stalled_delivery", "waste"}
-    )
+    assert tuple(sorted(ALLOWED_MCP_METHODS, key=lambda s: s.encode("utf-8"))) == ALLOWED_MCP_METHODS
+    assert ALLOWED_FINDING_TYPES == frozenset({"restatement", "saturation", "stalled_delivery", "waste"})
 
+
+def test_mcp_package_sources_have_no_assert_or_json_loads() -> None:
     mcp_py_files = sorted(MCP_PKG_DIR.glob("*.py"))
     assert [p.name for p in mcp_py_files] == [
         "__init__.py",

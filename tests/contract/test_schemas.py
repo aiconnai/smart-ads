@@ -1319,7 +1319,7 @@ def test_intrinsic_currency_self_consistency_and_non_brl_projection() -> None:
         )
 
 
-_EXPECTED_58_CORE_SCHEMA_IDS = {
+_EXPECTED_66_CORE_SCHEMA_IDS = {
     "smart_ads/active_partition_head/v1",
     "smart_ads/admitted_collection/v1",
     "smart_ads/analysis_execution/v1",
@@ -1341,6 +1341,8 @@ _EXPECTED_58_CORE_SCHEMA_IDS = {
     "smart_ads/certification_7b_record/v1",
     "smart_ads/certification_record/v1",
     "smart_ads/collection_result/v1",
+    "smart_ads/consumer_deployment_readback/v1",
+    "smart_ads/consumer_feature_flag_contract/v1",
     "smart_ads/curation_execution/v1",
     "smart_ads/dataset_catalog/v1",
     "smart_ads/dataset_catalog_cut_receipt/v1",
@@ -1359,6 +1361,10 @@ _EXPECTED_58_CORE_SCHEMA_IDS = {
     "smart_ads/formula_bundle/v1",
     "smart_ads/generation_manifest/v1",
     "smart_ads/git_artifact_provenance/v1",
+    "smart_ads/ibvi_ads_delegation_context/v1",
+    "smart_ads/ibvi_ads_delegation_contract/v1",
+    "smart_ads/legacy_seam_contract/v1",
+    "smart_ads/legacy_seam_release/v1",
     "smart_ads/native_request_projection/v1",
     "smart_ads/negative_security_test_report/v1",
     "smart_ads/normalized_collection_fact/v1",
@@ -1376,17 +1382,19 @@ _EXPECTED_58_CORE_SCHEMA_IDS = {
     "smart_ads/retention_root_set_cas_receipt/v1",
     "smart_ads/retention_root_set_head/v1",
     "smart_ads/sanitized_candidate_fact_set/v1",
+    "smart_ads/seam_parity_record/v1",
     "smart_ads/semantic_observation_projection/v1",
     "smart_ads/tolerance_profile/v1",
+    "smart_ads/wheel_object_locator/v1",
 }
 
 
 def test_core_schema_descriptors_and_bundle_digest_determinism() -> None:
     schema_ids = [d["schema_id"] for d in CORE_SCHEMA_DESCRIPTORS]
     assert schema_ids == sorted(schema_ids, key=lambda s: s.encode("utf-8"))
-    assert len(schema_ids) == 58
+    assert len(schema_ids) == 66
     assert len(set(schema_ids)) == len(schema_ids)
-    assert set(schema_ids) == _EXPECTED_58_CORE_SCHEMA_IDS
+    assert set(schema_ids) == _EXPECTED_66_CORE_SCHEMA_IDS
 
     by_id = {d["schema_id"]: d for d in CORE_SCHEMA_DESCRIPTORS}
     for sid, desc in by_id.items():

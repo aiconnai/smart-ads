@@ -4,6 +4,7 @@ from __future__ import annotations
 from smart_ads.transports.mcp.delegation import (
     McpDelegationContext,
     McpRuntimeContext,
+    project_delegation_envelope_to_mcp_context,
     verify_mcp_delegation_context,
 )
 from smart_ads.transports.mcp.gateway import (
@@ -53,6 +54,7 @@ __all__ = [
     "RecurrentSummaryReportParams",
     "handle_mcp_request_bytes",
     "parse_mcp_wire_bytes",
+    "project_delegation_envelope_to_mcp_context",
     "serialize_jsonrpc_result",
     "validate_jsonrpc_request_envelope",
     "validate_mcp_method_params",
